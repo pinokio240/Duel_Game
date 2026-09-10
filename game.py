@@ -165,8 +165,14 @@ class Game:
         self._powerups_step(dt)
 
         if not self.player.alive or not self.bot_tank.alive:
-            self.winner = 0 if self.bot_tank.alive else 1
-            self.score[self.winner] += 1
+            if self.player.alive:
+                self.winner = 0   # выжил игрок
+            elif self.bot_tank.alive:
+                self.winner = 1   # выжил бот
+            else:
+                self.winner = -1  # оба подорвались — ничья, очко никому
+            if self.winner >= 0:
+                self.score[self.winner] += 1
             self.state = "round_end"
             self.timer = ROUND_PAUSE_T
             self.sounds.play("round")
@@ -217,8 +223,12 @@ class Game:
             if self.state == "intro":
                 self._banner("РАУНД %d" % self.round, COL_GOLD)
             elif self.state == "round_end":
-                txt = "РАУНД ЗА ИГРОКОМ" if self.winner == 0 else "РАУНД ЗА БОТОМ"
-                self._banner(txt, COL_P1 if self.winner == 0 else COL_P2)
+                if self.winner == 0:
+                    self._banner("РАУНД ЗА ИГРОКОМ", COL_P1)
+                elif self.winner == 1:
+                    self._banner("РАУНД ЗА БОТОМ", COL_P2)
+                else:
+                    self._banner("НИЧЬЯ", COL_TEXT)
             elif self.state == "match_end":
                 self._draw_match_end()
             elif self.state == "pause":
