@@ -1,0 +1,6 @@
+# -*- coding: utf-8 -*-
+"""DUEL — танковая дуэль. Запуск: python main.py"""
+from game import Game
+
+if __name__ == "__main__":
+    Game().run()
