@@ -41,6 +41,15 @@ class FloatText:
         self.life = self.max_life = 0.9
 
 
+class Beam:
+    """Мгновенный лазерный луч: рисуется пару кадров после выстрела."""
+    __slots__ = ("x1", "y1", "x2", "y2", "life", "max_life", "color")
+    def __init__(self, x1, y1, x2, y2, color, life=0.16):
+        self.x1, self.y1, self.x2, self.y2 = x1, y1, x2, y2
+        self.color = color
+        self.life = self.max_life = life
+
+
 class Effects:
     """Копилка всех эффектов. Одна на всю игру."""
 
@@ -48,6 +57,7 @@ class Effects:
         self.particles = []
         self.rings = []
         self.texts = []
+        self.beams = []
         self.shake_t = 0.0
         self.shake_dur = 1.0
         self.shake_mag = 0.0
@@ -67,6 +77,11 @@ class Effects:
 
     def float_text(self, x, y, text, color):
         self.texts.append(FloatText(x, y, text, color))
+
+    def beam(self, x1, y1, x2, y2, color, life=0.16):
+        self.beams.append(Beam(x1, y1, x2, y2, color, life))
+        if len(self.beams) > 20:
+            self.beams.pop(0)
 
     def shake(self, mag=6, dur=0.3):
         self.shake_mag = max(self.shake_mag, mag)
@@ -96,6 +111,10 @@ class Effects:
             r.life -= dt
             if r.life <= 0:
                 self.rings.remove(r)
+        for b in self.beams[:]:
+            b.life -= dt
+            if b.life <= 0:
+                self.beams.remove(b)
         for t in self.texts[:]:
             t.life -= dt
             t.y -= 40 * dt
@@ -103,6 +122,11 @@ class Effects:
                 self.texts.remove(t)
 
     def draw(self, surf, ox=0, oy=0):
+        for b in self.beams:
+            k = b.life / b.max_life
+            w = 4 if k > 0.5 else 2
+            pygame.draw.line(surf, b.color, (b.x1 + ox, b.y1 + oy), (b.x2 + ox, b.y2 + oy), w)
+            pygame.draw.line(surf, (255, 255, 255), (b.x1 + ox, b.y1 + oy), (b.x2 + ox, b.y2 + oy), 1)
         for p in self.particles:
             k = p.life / p.max_life
             r = max(1, int(p.size * k))

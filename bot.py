@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 ИИ бота: держит дистанцию, обходит препятствия по флангу, уворачивается
-от пуль, выбирается из застреваний и ездит за ремонтом, когда подбит.
+от пуль и мин, выбирается из застреваний, ездит за ремонтом, прячется в дыму.
+Сложность настраивается пресетом (1 лёгкий / 2 норм / 3 хардкор).
 """
 import math
 import random
-from settings import CHASSIS, HULL
+from settings import CHASSIS, HULL, DIFF_PRESETS
 
 
 def _ang_diff(a, b):
@@ -19,12 +20,13 @@ def random_build():
 
 
 class BotAI:
-    def __init__(self, tank):
+    def __init__(self, tank, difficulty=2):
         self.t = tank
+        self.preset = DIFF_PRESETS.get(difficulty, DIFF_PRESETS[2])
         self.orbit = 1          # направление орбиты вокруг игрока
         self.orbit_t = 0.0      # до смены направления орбиты
         self.fire_delay = 0.3   # небольшая пауза между решениями стрелять
-        self.aim_noise = random.uniform(-4, 4)
+        self.aim_noise = random.uniform(-self.preset["aim"], self.preset["aim"])
         self.unstick_t = 0.0    # время отхода после застревания
         self.unstick_turn = 1   # в какую сторону крутиться при отходе
 
@@ -39,12 +41,29 @@ class BotAI:
                 continue
             bx, by = t.x - b.x, t.y - b.y
             d = math.hypot(bx, by)
-            if d > 340 or d < 1:
+            if d > self.preset["threat"] or d < 1:
                 continue
             sp = math.hypot(b.vx, b.vy) + 1e-6
             dot = (bx * b.vx + by * b.vy) / (d * sp)
             if dot > 0.93 and d < best_d:
                 best, best_d = b, d
+        return best
+
+    def _mine_ahead(self, game):
+        """Чужая мина по курсу — объезжаем."""
+        t = self.t
+        best, best_d = None, 170
+        rad = math.radians(t.angle)
+        for m in game.mines:
+            if m.owner is t:
+                continue
+            mx, my = t.x - m.x, t.y - m.y
+            d = math.hypot(mx, my)
+            if d < 1 or d > best_d:
+                continue
+            dot = (mx * math.cos(rad) + my * math.sin(rad)) / d
+            if dot > 0.55:
+                best, best_d = m, d
         return best
 
     def _side(self, bullet):
@@ -61,7 +80,8 @@ class BotAI:
         return min(cands, key=lambda p: (t.x - p.x) ** 2 + (t.y - p.y) ** 2)
 
     def _visible(self, game, x, y):
-        return not game.arena.line_blocked(self.t.x, self.t.y, x, y)
+        """Видно ли точку с учётом препятствий И дымовых завес."""
+        return not game.vision_blocked(self.t.x, self.t.y, x, y)
 
     # ---------- основное ----------
 
@@ -70,6 +90,8 @@ class BotAI:
         p = game.player
         if not t.alive or not p.alive:
             return
+        if t.frozen_t > 0:
+            return  # обездвижен ЭМИ — сидим и страдаем
 
         dx, dy = p.x - t.x, p.y - t.y
         dist = math.hypot(dx, dy)
@@ -85,9 +107,14 @@ class BotAI:
             turn = self.unstick_turn
         else:
             threat = self._threat(game)
+            mine = None if threat is not None else self._mine_ahead(game)
             if threat is not None:
                 # уклонение: уход перпендикулярно траектории пули
                 desired = math.degrees(math.atan2(threat.vy, threat.vx)) + 90 * self._side(threat)
+                forward = 1
+            elif mine is not None:
+                # отъезд от мины: прямо от неё
+                desired = math.degrees(math.atan2(t.y - mine.y, t.x - mine.x))
                 forward = 1
             else:
                 desired = self._choose_direction(game, ang_to, dist)
@@ -114,12 +141,12 @@ class BotAI:
         """Выбор направления: ремонт / фланг / дистанция."""
         t = self.t
         p = game.player
-        # 1) подбит и видит ремонт по прямой — едем за ним
+        # 1) подбит и видит ремонт по прямой — едем за ним (дым тут не помеха)
         if t.hp < t.max_hp * 0.45:
             repair = self._nearest_repair(game)
-            if repair is not None and self._visible(game, repair.x, repair.y):
+            if repair is not None and not game.arena.line_blocked(t.x, t.y, repair.x, repair.y):
                 return math.degrees(math.atan2(repair.y - t.y, repair.x - t.x))
-        # 2) игрок скрыт препятствием — не долбимся в стену, заходим с фланга
+        # 2) игрок скрыт препятствием или дымом — не долбимся в стену, заходим с фланга
         if not self._visible(game, p.x, p.y):
             return self._flank_angle(ang_to, dist)
         # 3) игрок виден: сближение / отход / орбита
@@ -152,10 +179,10 @@ class BotAI:
     def _try_fire(self, dt, game, p, ang_to):
         t = self.t
         self.fire_delay -= dt
-        if t.cooldown > 0 or self.fire_delay > 0:
+        if self.fire_delay > 0:
             return
         aim = ang_to + self.aim_noise
         if abs(_ang_diff(aim, t.angle)) < 9 and self._visible(game, p.x, p.y):
-            t.try_shoot(game.bullets, game.effects, game.sounds)
-            self.aim_noise = random.uniform(-4, 4)
-            self.fire_delay = random.uniform(0.1, 0.45)
+            game.fire_weapon(t)
+            self.aim_noise = random.uniform(-self.preset["aim"], self.preset["aim"])
+            self.fire_delay = random.uniform(self.preset["fire_min"], self.preset["fire_max"])

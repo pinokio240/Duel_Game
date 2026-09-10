@@ -60,6 +60,11 @@ class SoundBank:
         self.sounds["pickup"]  = s(np.concatenate([self._tone(660, 0.09, 0.35),
                                                    self._tone(990, 0.13, 0.35)]))
         self.sounds["round"]   = s(self._tone(440, 0.18, 0.32))
+        self.sounds["laser"]   = s(self._tone(1400, 0.22, 0.35, "saw", sweep=-1150))
+        self.sounds["freeze"]  = s(np.concatenate([self._tone(1250, 0.08, 0.3),
+                                                   self._tone(1750, 0.12, 0.3)]))
+        self.sounds["smoke"]   = s(self._noise(0.3, 0.3, p=1.6))
+        self.sounds["mine"]    = s(self._tone(880, 0.07, 0.3, "square"))
         self.sounds["win"]     = s(np.concatenate([self._tone(523, 0.13, 0.35),
                                                    self._tone(659, 0.13, 0.35),
                                                    self._tone(784, 0.22, 0.4)]))

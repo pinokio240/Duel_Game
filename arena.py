@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Арена: стены, препятствия, проверки коллизий и линии видимости."""
+"""Арена: 3 варианта расстановки препятствий, стены, коллизии, лучи."""
 import math
 import random
 import pygame
@@ -7,9 +7,28 @@ from settings import SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG
 
 WALL_T = 60  # толщина внешних стен
 
+# Три симметричных раскладки арены
+LAYOUTS = [
+    # «Классика»: центральная колонна и блоки по сторонам
+    [(600, 300, 80, 120),
+     (330, 160, 130, 36), (820, 160, 130, 36),
+     (330, 524, 130, 36), (820, 524, 130, 36),
+     (140, 330, 36, 60), (1104, 330, 36, 60)],
+    # «Крестовина»: длинные козырьки и точки-укрытия
+    [(600, 320, 80, 80),
+     (400, 180, 36, 36), (844, 180, 36, 36),
+     (400, 504, 36, 36), (844, 504, 36, 36),
+     (480, 140, 320, 36), (480, 544, 320, 36)],
+    # «Колонны»: зал с колоннами, узкие проходы для снарядов
+    [(330, 210, 40, 130), (330, 380, 40, 130),
+     (910, 210, 40, 130), (910, 380, 40, 130),
+     (610, 330, 60, 60)],
+]
+
 
 class Arena:
-    def __init__(self):
+    def __init__(self, variant=0):
+        self.variant = variant % len(LAYOUTS)
         w, h = SCREEN_W, SCREEN_H
         self.walls = [
             pygame.Rect(0, 0, w, WALL_T),
@@ -17,16 +36,7 @@ class Arena:
             pygame.Rect(0, 0, WALL_T, h),
             pygame.Rect(w - WALL_T, 0, WALL_T, h),
         ]
-        # Препятствия симметричны, чтобы бой был честным
-        self.obstacles = [
-            pygame.Rect(600, 300, 80, 120),   # центральная колонна
-            pygame.Rect(330, 160, 130, 36),   # верх слева
-            pygame.Rect(820, 160, 130, 36),   # верх справа
-            pygame.Rect(330, 524, 130, 36),   # низ слева
-            pygame.Rect(820, 524, 130, 36),   # низ справа
-            pygame.Rect(140, 330, 36, 60),    # бок слева
-            pygame.Rect(1104, 330, 36, 60),   # бок справа
-        ]
+        self.obstacles = [pygame.Rect(r) for r in LAYOUTS[self.variant]]
         self.rects = self.walls + self.obstacles
         self._bg = self._make_background()
 
@@ -62,7 +72,7 @@ class Arena:
         return any(r.collidepoint(x, y) for r in self.rects)
 
     def line_blocked(self, x1, y1, x2, y2, step=24):
-        """Есть ли препятствие на линии (для проверки: видит ли бот цель)."""
+        """Есть ли препятствие на линии (проверка: видит ли бот цель)."""
         d = math.hypot(x2 - x1, y2 - y1)
         n = max(1, int(d // step))
         for i in range(1, n):
@@ -70,6 +80,20 @@ class Arena:
             if self.point_blocked(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t):
                 return True
         return False
+
+    def raycast(self, x, y, angle, max_dist=2000.0, step=6.0):
+        """Куда попадёт мгновенный луч из (x, y) под углом angle.
+        Возвращает точку попадания в стену/препятствие или конец луча."""
+        rad = math.radians(angle)
+        dx, dy = math.cos(rad) * step, math.sin(rad) * step
+        dist = 0.0
+        while dist < max_dist:
+            x += dx
+            y += dy
+            dist += step
+            if self.point_blocked(x, y):
+                return x, y
+        return x, y
 
     def free_spot(self, avoid=(), avoid_dist=150):
         """Случайная свободная точка (для появления бонусов)."""

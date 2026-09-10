@@ -6,7 +6,8 @@
 import math
 import pygame
 from settings import (CHASSIS, HULL, TANK_RADIUS, PU_SHIELD_TIME,
-                      PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP)
+                      PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
+                      PU_RAPID_TIME, PU_RAPID_MULT)
 from bullet import Bullet
 
 
@@ -24,7 +25,6 @@ class Tank:
         self.max_hp = self.hull["hp"]
         self.hp = self.max_hp
         self.armor = self.chassis["armor"]  # сглаживание урона
-        self.reload_time = self.hull["reload"]
         self.cooldown = 0.0
         self.alive = True
         self.flash = 0.0          # белая вспышка при получении урона
@@ -33,11 +33,16 @@ class Tank:
         self.shield_t = 0.0
         self.boost_t = 0.0
         self.triple = 0
+        self.rapid_t = 0.0        # скорострел
+        self.frozen_t = 0.0       # ЭМИ-заморозка
+        self.laser_charges = 0    # заряды лазера
         self._sprite = self._make_sprite()
 
     # ----- характеристики с учётом бонусов -----
     @property
     def speed(self):
+        if self.frozen_t > 0:
+            return 0.0
         s = self.chassis["speed"] * (1.0 - self.hull["weight"])
         if self.boost_t > 0:
             s *= 1.6
@@ -46,6 +51,13 @@ class Tank:
     @property
     def turn_speed(self):
         return self.chassis["turn"]  # градусов/сек
+
+    @property
+    def reload_time(self):
+        r = self.hull["reload"]
+        if self.rapid_t > 0:
+            r *= PU_RAPID_MULT
+        return r
 
     # ----- неоновый спрайт (рисуется один раз, вращается каждый кадр) -----
     def _make_sprite(self):
@@ -71,7 +83,7 @@ class Tank:
     # ----- движение -----
     def control(self, dt, arena, forward=0, turn=0, tanks=()):
         """forward: 1 вперёд / -1 назад; turn: 1 по часовой / -1 против."""
-        if not self.alive:
+        if not self.alive or self.frozen_t > 0:
             return
         self.angle = (self.angle + turn * self.turn_speed * dt) % 360
         ox, oy = self.x, self.y
@@ -109,7 +121,7 @@ class Tank:
 
     # ----- стрельба -----
     def try_shoot(self, bullets, effects, sounds):
-        if not self.alive or self.cooldown > 0:
+        if not self.alive or self.cooldown > 0 or self.frozen_t > 0:
             return
         rad = math.radians(self.angle)
         mx = self.x + math.cos(rad) * (self.radius + 14)
@@ -155,21 +167,29 @@ class Tank:
             self.triple = PU_TRIPLE_SHOTS
         elif kind == "repair":
             self.hp = min(self.max_hp, self.hp + PU_REPAIR_HP)
+        elif kind == "rapid":
+            self.rapid_t = PU_RAPID_TIME
+        elif kind == "laser":
+            self.laser_charges += 2
 
     def update(self, dt):
         self.cooldown = max(0.0, self.cooldown - dt)
         self.flash = max(0.0, self.flash - dt)
         self.shield_t = max(0.0, self.shield_t - dt)
         self.boost_t = max(0.0, self.boost_t - dt)
+        self.rapid_t = max(0.0, self.rapid_t - dt)
+        self.frozen_t = max(0.0, self.frozen_t - dt)
 
     # ----- отрисовка -----
     def draw(self, surf, ox=0, oy=0):
         img = pygame.transform.rotate(self._sprite, -self.angle)
         rect = img.get_rect(center=(int(self.x + ox), int(self.y + oy)))
         surf.blit(img, rect.topleft)
+        cx, cy = int(self.x + ox), int(self.y + oy)
         if self.flash > 0:
-            pygame.draw.circle(surf, (255, 255, 255),
-                               (int(self.x + ox), int(self.y + oy)), self.radius + 3, 2)
+            pygame.draw.circle(surf, (255, 255, 255), (cx, cy), self.radius + 3, 2)
         if self.shield_t > 0:
-            pygame.draw.circle(surf, (90, 140, 255),
-                               (int(self.x + ox), int(self.y + oy)), self.radius + 7, 2)
+            pygame.draw.circle(surf, (90, 140, 255), (cx, cy), self.radius + 7, 2)
+        if self.frozen_t > 0:
+            pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 9, 2)
+            pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 13, 1)
