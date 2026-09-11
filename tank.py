@@ -9,7 +9,11 @@ import pygame
 from settings import (CHASSIS, HULL, WEAPONS, PERKS, TANK_RADIUS, BULLET_DAMAGE,
                       PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
                       PU_RAPID_TIME, PU_RAPID_MULT,
-                      BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT)
+                      BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT,
+                      PU_ELEMENT_SHOTS, FIRE_TIME, FIRE_DPS,
+                      EARTH_TIME, EARTH_MULT, SHOCK_TIME, SHOCK_MULT,
+                      AIR_PUSH, WATER_CLEAR_DMG,
+                      PU_MINE_CARRY, BARRIER_MAX)
 from bullet import Bullet
 
 
@@ -45,6 +49,17 @@ class Tank:
         self.rapid_t = 0.0        # скорострел
         self.frozen_t = 0.0       # ЭМИ-заморозка
         self.laser_charges = 0    # заряды лазера
+        # стихии: какой элемент заряжен и сколько снарядов осталось
+        self.element = None       # None / fire / water / earth / electric / air
+        self.element_shots = 0
+        # негативные эффекты от стихий врага
+        self.burn_t = 0.0         # поджог: тикает уроном, броня не спасает
+        self._burn_tick = 0.0
+        self.mud_t = 0.0          # земля: вязнет
+        self.shock_t = 0.0        # ток: мотор вполсилы
+        # ручные бустеры: мины и стены-барьеры носятся в боекомплекте
+        self.mine_carried = 0
+        self.barrier_charges = 0
         self._sprite = self._make_sprite()
 
     # ----- характеристики с учётом бонусов, дула и перка -----
@@ -52,8 +67,13 @@ class Tank:
     def speed(self):
         if self.frozen_t > 0:
             return 0.0
-        s = self.chassis["speed"] * (1.0 - self.hull["weight"])
+        s = self.chassis["speed"] * (1.0 - self.hull["weight"]
+                                     * self.chassis.get("wmult", 1.0))
         s *= self.weapon["move_mult"] * self.perk["speed_mult"]
+        if self.mud_t > 0:
+            s *= EARTH_MULT     # увяз в земле
+        if self.shock_t > 0:
+            s *= SHOCK_MULT     # ток: мотор вполсилы
         if self.boost_t > 0:
             # правило турбо: с перком «Гонец» ускорение слабее,
             # без перка — турбо работает как обычно
@@ -62,7 +82,10 @@ class Tank:
 
     @property
     def turn_speed(self):
-        return self.chassis["turn"] * self.perk["turn_mult"]  # градусов/сек
+        t = self.chassis["turn"] * self.perk["turn_mult"]  # градусов/сек
+        if self.shock_t > 0:
+            t *= SHOCK_MULT
+        return t
 
     @property
     def reload_time(self):
@@ -155,8 +178,15 @@ class Tank:
             self.triple -= 1
         dmg = BULLET_DAMAGE * self.weapon["damage_mult"]
         spd = self.weapon["speed_mult"]
+        elem = None
+        if self.element_shots > 0 and self.element:
+            elem = self.element
+            self.element_shots -= 1
+            if self.element_shots <= 0:
+                self.element = None
         for a in angles:
-            bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd))
+            bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
+                                  element=elem))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
         if self.mag_ammo > 1:
             self.mag_ammo -= 1
@@ -168,6 +198,15 @@ class Tank:
         sounds.play("shoot")
 
     # ----- урон и бонусы -----
+    def _die(self, effects, sounds):
+        self.hp = 0
+        self.alive = False
+        effects.burst(self.x, self.y, self.color, 42, 430, 0.9, 6)
+        effects.burst(self.x, self.y, (255, 255, 255), 16, 260, 0.6, 4)
+        effects.ring(self.x, self.y, self.color, 100, 0.5)
+        effects.shake(9, 0.4)
+        sounds.play("explode")
+
     def take_damage(self, dmg, effects, sounds):
         if not self.alive:
             return
@@ -178,16 +217,61 @@ class Tank:
         self.flash = 0.12
         effects.float_text(self.x, self.y - 36, "-%d" % dmg, (255, 130, 130))
         if self.hp <= 0:
-            self.hp = 0
-            self.alive = False
-            effects.burst(self.x, self.y, self.color, 42, 430, 0.9, 6)
-            effects.burst(self.x, self.y, (255, 255, 255), 16, 260, 0.6, 4)
-            effects.ring(self.x, self.y, self.color, 100, 0.5)
-            effects.shake(9, 0.4)
-            sounds.play("explode")
+            self._die(effects, sounds)
         else:
             effects.burst(self.x, self.y, self.color, 6, 160, 0.3, 3)
             sounds.play("hit")
+
+    # ----- эффекты стихий (получатель — этот танк) -----
+    def apply_element(self, elem, vx, vy, arena, effects, sounds):
+        """В нас попал элементальный снаряд. vx/vy — направление полёта."""
+        if elem == "fire":
+            self.burn_t = FIRE_TIME
+            self._burn_tick = 0.0
+            effects.float_text(self.x, self.y - 50, "ПОЖАР!", (255, 110, 0))
+        elif elem == "earth":
+            self.mud_t = EARTH_TIME
+            effects.float_text(self.x, self.y - 50, "УВЯЗ!", (180, 130, 60))
+        elif elem == "electric":
+            self.shock_t = SHOCK_TIME
+            effects.float_text(self.x, self.y - 50, "ТОК!", (255, 240, 110))
+        elif elem == "water":
+            washed = []
+            if self.shield_t > 0: washed.append("щит")
+            if self.boost_t > 0: washed.append("турбо")
+            if self.rapid_t > 0: washed.append("скорострел")
+            if self.triple > 0: washed.append("веер")
+            if self.laser_charges > 0: washed.append("лазер")
+            self.shield_t = self.boost_t = self.rapid_t = 0.0
+            self.triple = 0
+            self.laser_charges = 0
+            self.take_damage(WATER_CLEAR_DMG, effects, sounds)
+            msg = "СМЫТО: " + ", ".join(washed) if washed else "СМЫТО"
+            effects.float_text(self.x, self.y - 50, msg, (80, 170, 255))
+        elif elem == "air":
+            sp = math.hypot(vx, vy) + 1e-6
+            dx, dy = vx / sp * AIR_PUSH, vy / sp * AIR_PUSH
+            step = 8.0
+            n = int(AIR_PUSH / step)
+            for _ in range(n):
+                nx, ny = self.x + dx / n, self.y + dy / n
+                if arena.circle_collides(nx, ny, self.radius):
+                    break
+                self.x, self.y = nx, ny
+            effects.float_text(self.x, self.y - 50, "ПОРЫВ!", (190, 235, 255))
+
+    def _burn_step(self, dt, effects, sounds):
+        """Поджог: тикает уроном, броня не спасает."""
+        if self.burn_t <= 0 or not self.alive:
+            return
+        self.burn_t -= dt
+        self._burn_tick -= dt
+        if self._burn_tick <= 0:
+            self._burn_tick = 0.5
+            self.hp -= FIRE_DPS * 0.5
+            effects.burst(self.x, self.y, (255, 110, 0), 3, 90, 0.3, 2)
+            if self.hp <= 0:
+                self._die(effects, sounds)
 
     def apply_powerup(self, kind):
         if kind == "shield":
@@ -202,6 +286,14 @@ class Tank:
             self.rapid_t = PU_RAPID_TIME
         elif kind == "laser":
             self.laser_charges += 2
+        elif kind in ("fire", "water", "earth", "electric", "air"):
+            self.element = kind
+            self.element_shots = PU_ELEMENT_SHOTS
+        elif kind == "mine":
+            # мина больше не ставится сама — носим в боекомплекте (клавиша E)
+            self.mine_carried = min(self.mine_carried + 1, PU_MINE_CARRY)
+        elif kind == "barrier":
+            self.barrier_charges = min(self.barrier_charges + 1, BARRIER_MAX)
 
     def update(self, dt):
         self.cooldown = max(0.0, self.cooldown - dt)
@@ -210,6 +302,9 @@ class Tank:
         self.boost_t = max(0.0, self.boost_t - dt)
         self.rapid_t = max(0.0, self.rapid_t - dt)
         self.frozen_t = max(0.0, self.frozen_t - dt)
+        self.mud_t = max(0.0, self.mud_t - dt)
+        self.shock_t = max(0.0, self.shock_t - dt)
+        self.burn_t = max(0.0, self.burn_t - dt)
 
     # ----- отрисовка -----
     def draw(self, surf, ox=0, oy=0):
@@ -224,3 +319,9 @@ class Tank:
         if self.frozen_t > 0:
             pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 9, 2)
             pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 13, 1)
+        if self.burn_t > 0:
+            pygame.draw.circle(surf, (255, 110, 0), (cx, cy), self.radius + 9, 2)
+        if self.mud_t > 0:
+            pygame.draw.circle(surf, (180, 130, 60), (cx, cy), self.radius + 7, 2)
+        if self.shock_t > 0:
+            pygame.draw.circle(surf, (255, 240, 110), (cx, cy), self.radius + 11, 1)

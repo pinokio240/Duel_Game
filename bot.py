@@ -1,12 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-ИИ бота: держит дистанцию, обходит препятствия по флангу, уворачивается
-от пуль и мин, выбирается из застреваний, ездит за ремонтом, прячется в дыму.
+ИИ бота: держит дистанцию, обходит препятствия ПО ШИРИНЕ ТАНКА (узкие щели
+не считают проходимыми), уворачивается от пуль и мин, выбирается из
+застреваний, СОБИРАЕТ бонусы (ремонт, стихии, щит...), ставит мины под
+догоняющего и строит стены-барьеры между собой и игроком.
 Сложность настраивается пресетом (1 лёгкий / 2 норм / 3 хардкор).
 """
 import math
 import random
 from settings import CHASSIS, HULL, WEAPONS, PERKS, DIFF_PRESETS
+
+# сколько какой бонус стоит для бота (чем больше — тем охотнее едет)
+PU_VALUE = {
+    "repair": 3.0, "shield": 2.4, "freeze": 2.4, "laser": 2.2,
+    "fire": 2.2, "electric": 2.0, "triple": 1.8, "rapid": 1.8,
+    "earth": 1.8, "boost": 1.5, "air": 1.4, "barrier": 1.3,
+    "mine": 1.2, "water": 1.6, "smoke": 0.7,
+}
 
 
 def _ang_diff(a, b):
@@ -31,6 +41,12 @@ class BotAI:
         self.aim_noise = random.uniform(-self.preset["aim"], self.preset["aim"])
         self.unstick_t = 0.0    # время отхода после застревания
         self.unstick_turn = 1   # в какую сторону крутиться при отходе
+        # прокачка: сбор бонусов с обязательством (чтобы не дёргаться)
+        self.pu_target = None
+        self.pu_t = 0.0
+        # ручные бустеры
+        self.drop_cd = 0.0      # пауза между минами
+        self.wall_cd = 0.0      # пауза между стенами
 
     # ---------- помощники ----------
 
@@ -85,6 +101,49 @@ class BotAI:
         """Видно ли точку с учётом препятствий И дымовых завес."""
         return not game.vision_blocked(self.t.x, self.t.y, x, y)
 
+    def _path_clear(self, game, tx, ty):
+        """Проходима ли дорога ПО ШИРИНЕ ТАНКА: проверяем не только луч
+        по центру, но и два параллельных луча по бортам. Узкая щель,
+        в которую геометрически «влезает» взгляд, но не влезает танк,
+        больше не считается дорогой — бот сразу едет в обход."""
+        t = self.t
+        dx, dy = tx - t.x, ty - t.y
+        d = math.hypot(dx, dy)
+        if d < 1:
+            return True
+        ox, oy = -dy / d * (t.radius + 6), dx / d * (t.radius + 6)
+        a = game.arena
+        if a.line_blocked(t.x, t.y, tx, ty):
+            return False
+        if a.line_blocked(t.x + ox, t.y + oy, tx + ox, ty + oy):
+            return False
+        if a.line_blocked(t.x - ox, t.y - oy, tx - ox, ty - oy):
+            return False
+        return True
+
+    def _pick_powerup(self, game):
+        """Выбрать стоящий бонус: ценим ремонт на низком HP, не дарим
+        бонус игроку (если тот заметно ближе) и едем только если есть
+        проходимая дорога по ширине танка."""
+        t = self.t
+        best, best_score = None, 0.0
+        for pu in game.powerups:
+            d = math.hypot(pu.x - t.x, pu.y - t.y)
+            if d > 560:
+                continue
+            dp = math.hypot(pu.x - game.player.x, pu.y - game.player.y)
+            if dp * 1.5 < d:
+                continue    # игрок ближе — не подносить же ему
+            val = PU_VALUE.get(pu.kind, 1.0)
+            if pu.kind == "repair" and t.hp < t.max_hp * 0.5:
+                val += 2.5
+            if not self._path_clear(game, pu.x, pu.y):
+                continue
+            score = val * 300.0 / (120.0 + d)
+            if score > best_score:
+                best, best_score = pu, score
+        return best
+
     # ---------- основное ----------
 
     def update(self, dt, game):
@@ -95,9 +154,15 @@ class BotAI:
         if t.frozen_t > 0:
             return  # обездвижен ЭМИ — сидим и страдаем
 
+        self.drop_cd = max(0.0, self.drop_cd - dt)
+        self.wall_cd = max(0.0, self.wall_cd - dt)
+        self.pu_t = max(0.0, self.pu_t - dt)
+
         dx, dy = p.x - t.x, p.y - t.y
         dist = math.hypot(dx, dy)
         ang_to = math.degrees(math.atan2(dy, dx))
+
+        self._use_items(game, dist)
 
         forward, turn = 0, 0
         desired = None
@@ -139,19 +204,47 @@ class BotAI:
 
     # ---------- куда едем ----------
 
-    def _choose_direction(self, game, ang_to, dist):
-        """Выбор направления: ремонт / фланг / дистанция."""
+    def _use_items(self, game, dist):
+        """Ручные бустеры: мины под догоняющего, стены между собой и игроком."""
         t = self.t
         p = game.player
-        # 1) подбит и видит ремонт по прямой — едем за ним (дым тут не помеха)
+        # мина: игрок давит сзади на средней дистанции — кидаем под нос
+        if (t.mine_carried > 0 and self.drop_cd <= 0 and 115 < dist < 460):
+            rad = math.radians(t.angle)
+            dx, dy = p.x - t.x, p.y - t.y
+            d = math.hypot(dx, dy) + 1e-6
+            dot = (dx * math.cos(rad) + dy * math.sin(rad)) / d
+            if dot < -0.25:          # игрок именно сзади
+                if game._place_mine(t):
+                    self.drop_cd = 2.0
+        # стена: игрок близко — строим поперёк линии огня
+        if (t.barrier_charges > 0 and self.wall_cd <= 0 and dist < 520):
+            if game._place_barrier(t, math.degrees(math.atan2(p.y - t.y, p.x - t.x))):
+                self.wall_cd = 3.5
+
+    def _choose_direction(self, game, ang_to, dist):
+        """Выбор направления: ремонт / бонус / фланг / дистанция."""
+        t = self.t
+        p = game.player
+        # 1) подбит и видит ремонт ПО ПРОХОДИМОЙ дороге — едем за ним
         if t.hp < t.max_hp * 0.45:
             repair = self._nearest_repair(game)
-            if repair is not None and not game.arena.line_blocked(t.x, t.y, repair.x, repair.y):
+            if (repair is not None and
+                    self._path_clear(game, repair.x, repair.y)):
                 return math.degrees(math.atan2(repair.y - t.y, repair.x - t.x))
-        # 2) игрок скрыт препятствием или дымом — не долбимся в стену, заходим с фланга
+        # 2) задумались о полезном бонусе (дорога уже проверена в _pick_powerup)
+        if self.pu_t > 0 and self.pu_target in game.powerups:
+            return math.degrees(math.atan2(self.pu_target.y - t.y,
+                                           self.pu_target.x - t.x))
+        self.pu_target = self._pick_powerup(game)
+        self.pu_t = 1.2 if self.pu_target is not None else 0.0
+        if self.pu_target is not None:
+            return math.degrees(math.atan2(self.pu_target.y - t.y,
+                                           self.pu_target.x - t.x))
+        # 3) игрок скрыт препятствием, стеной или дымом — заходим с фланга
         if not self._visible(game, p.x, p.y):
             return self._flank_angle(ang_to, dist)
-        # 3) игрок виден: сближение / отход / орбита
+        # 4) игрок виден: сближение / отход / орбита
         return self._combat_angle(ang_to, dist)
 
     def _flank_angle(self, ang_to, dist):

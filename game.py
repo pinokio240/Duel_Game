@@ -11,6 +11,9 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
                       PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
                       PU_SMOKE_TIME, PU_SMOKE_RADIUS, PU_FREEZE_TIME,
+                      PU_MINE_ENEMY_DIST,
+                      BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
+                      BARRIER_DIST, BARRIER_MAX,
                       DIFF_PRESETS, BOT_DIFFICULTY)
 from arena import Arena, LAYOUTS
 from tank import Tank
@@ -71,6 +74,64 @@ def _seg_circle(x1, y1, x2, y2, cx, cy, r):
     return (px - cx) ** 2 + (py - cy) ** 2 < r * r
 
 
+def _pt_seg_dist(px, py, p1, p2):
+    """Расстояние от точки до отрезка (для коллизий со стеной-барьером)."""
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    l2 = dx * dx + dy * dy
+    if l2 == 0:
+        return math.hypot(px - p1[0], py - p1[1])
+    t = ((px - p1[0]) * dx + (py - p1[1]) * dy) / l2
+    t = max(0.0, min(1.0, t))
+    return math.hypot(px - (p1[0] + t * dx), py - (p1[1] + t * dy))
+
+
+class Barrier:
+    """Стена-бустер: ставится танком по Q, имеет 120 прочности,
+    блокирует танки и взгляд, пробивается снарядами, рассыпается со временем."""
+
+    def __init__(self, x, y, angle_deg, owner):
+        self.x, self.y = float(x), float(y)
+        self.owner = owner
+        rad = math.radians(angle_deg)
+        hl = BARRIER_LEN / 2
+        self.p1 = (x - math.cos(rad) * hl, y - math.sin(rad) * hl)
+        self.p2 = (x + math.cos(rad) * hl, y + math.sin(rad) * hl)
+        self.hp = BARRIER_HP
+        self.t = 0.0
+
+    def _dist(self, px, py):
+        return _pt_seg_dist(px, py, self.p1, self.p2)
+
+    def blocks_circle(self, px, py, r):
+        return self._dist(px, py) < r + BARRIER_THICK / 2
+
+    def blocks_point(self, px, py):
+        return self._dist(px, py) < BARRIER_THICK / 2 + 1
+
+    def update(self, dt):
+        self.t += dt
+
+    def expired(self):
+        return self.t >= BARRIER_LIFE
+
+    def draw(self, surf, ox=0, oy=0):
+        ax, ay = self.p1[0] + ox, self.p1[1] + oy
+        bx, by = self.p2[0] + ox, self.p2[1] + oy
+        blink = self.t > BARRIER_LIFE - 3 and int(self.t * 6) % 2 == 0
+        k = self.hp / BARRIER_HP
+        if blink:
+            core = (90, 95, 115)
+        elif k > 0.5:
+            core = (205, 210, 225)
+        else:
+            core = (235, 150, 80)   # треснула — вот-вот развалится
+        pygame.draw.line(surf, (52, 58, 84), (ax, ay), (bx, by), BARRIER_THICK + 6)
+        pygame.draw.line(surf, (86, 96, 150), (ax, ay), (bx, by), BARRIER_THICK)
+        pygame.draw.line(surf, core, (ax, ay), (bx, by), 4)
+        for px, py in ((ax, ay), (bx, by)):
+            pygame.draw.circle(surf, core, (int(px), int(py)), 4)
+
+
 class Game:
     def __init__(self):
         pygame.init()
@@ -102,6 +163,7 @@ class Game:
         self.powerups = []
         self.mines = []
         self.smokes = []
+        self.barriers = []
         self.powerup_t = POWERUP_INTERVAL * 0.6
 
         self._fake_keys = None  # только для автотестов
@@ -137,6 +199,8 @@ class Game:
         self.powerups = []
         self.mines = []
         self.smokes = []
+        self.barriers = []
+        self.arena.set_dynamic([])
         self.powerup_t = POWERUP_INTERVAL * 0.6
         self.effects.particles.clear()
         self.effects.texts.clear()
@@ -204,6 +268,10 @@ class Game:
         elif self.state == "fight":
             if k == pygame.K_ESCAPE:
                 self.state = "pause"
+            elif k == pygame.K_q:
+                self._place_barrier(self.player)   # стена-бустер
+            elif k == pygame.K_e:
+                self._place_mine(self.player)      # мина руками
         elif self.state == "pause":
             if k in (pygame.K_ESCAPE, pygame.K_RETURN):
                 self.state = "fight"
@@ -270,17 +338,33 @@ class Game:
         tn = ((keys[pygame.K_d] or keys[pygame.K_RIGHT]) -
               (keys[pygame.K_a] or keys[pygame.K_LEFT]))
 
+        # барьеры участвуют в коллизиях танков и в обзоре бота
+        self.arena.set_dynamic(self.barriers)
+
         self.player.update(dt)
         self.bot_tank.update(dt)
+        self.player._burn_step(dt, self.effects, self.sounds)
+        self.bot_tank._burn_step(dt, self.effects, self.sounds)
         self.player.control(dt, self.arena, fwd, tn, (self.bot_tank,))
         self.ai.update(dt, self)
         if keys[pygame.K_SPACE]:
             self.fire_weapon(self.player)
 
+        # снаряды бьют стены-барьеры (а стены блокируют и обзор бота)
+        walls = self.arena.walls_only()
         for b in self.bullets:
-            b.update(dt, self.arena, (self.player, self.bot_tank),
-                     self.effects, self.sounds)
+            self._bullet_vs_barriers(b)
+            if not b.dead:
+                b.update(dt, walls, (self.player, self.bot_tank),
+                         self.effects, self.sounds)
+            self._bullet_vs_barriers(b)
         self.bullets = [b for b in self.bullets if not b.dead]
+
+        for br in self.barriers[:]:
+            br.update(dt)
+            if br.expired():
+                self.barriers.remove(br)
+                self.effects.burst(br.x, br.y, (205, 210, 225), 10, 160, 0.4, 3)
 
         self._mines_step(dt)
         self._smokes_step(dt)
@@ -345,20 +429,74 @@ class Game:
                 return True
         return False
 
-    # ================= мины и дым =================
+    # ================= мины, стены и дым =================
     def _place_mine(self, t):
-        rad = math.radians(t.angle)
-        mx, my = t.x, t.y
-        for d in (46, 30, 16, 0):
-            mx = t.x - math.cos(rad) * d
-            my = t.y - math.sin(rad) * d
-            if not self.arena.point_blocked(mx, my):
-                break
+        """Мина ставится РУКАМИ (игрок — E, бот — решение ИИ).
+        Правила игрока: ставим прямо под собой (в 5 клетках или ближе),
+        и НИКОГДА во врага — если враг ближе 110 px, ставка отменяется."""
+        if t.mine_carried <= 0:
+            return False
+        enemy = self.bot_tank if t is self.player else self.player
+        if (enemy.alive and
+                (t.x - enemy.x) ** 2 + (t.y - enemy.y) ** 2 < PU_MINE_ENEMY_DIST ** 2):
+            self.effects.float_text(t.x, t.y - 54, "ВРАГ РЯДОМ!", (255, 90, 90))
+            self.sounds.play("ric")
+            return False
+        t.mine_carried -= 1
         own = [m for m in self.mines if m.owner is t]
         if len(own) >= PU_MINE_MAX:
             self.mines.remove(own[0])
-        self.mines.append(Mine(mx, my, t))
+        self.mines.append(Mine(t.x, t.y, t))
         self.sounds.play("mine")
+        return True
+
+    def _place_barrier(self, t, angle=None):
+        """Стена-бустер: встаёт поперёк курса в паре метров перед танком.
+        Если там стена/танк — пробуем ближе; совсем нельзя — честно скажем."""
+        if t.barrier_charges <= 0:
+            return False
+        if angle is None:
+            angle = t.angle
+        rad = math.radians(angle)
+        ux, uy = math.cos(rad), math.sin(rad)
+        enemy = self.bot_tank if t is self.player else self.player
+        for dist in (BARRIER_DIST, 64, 44, 28):
+            cx, cy = t.x + ux * dist, t.y + uy * dist
+            br = Barrier(cx, cy, angle + 90, t)
+            # стены/препятствия не трогаем
+            if any(self.arena.circle_collides(px, py, BARRIER_THICK)
+                   for px, py in (br.p1, (br.x, br.y), br.p2)):
+                continue
+            # в танки не втыкаем (и в себя, и во врага)
+            if any(tk.alive and br.blocks_circle(tk.x, tk.y, tk.radius)
+                   for tk in (self.player, self.bot_tank)):
+                continue
+            t.barrier_charges -= 1
+            self.barriers.append(br)
+            self.arena.set_dynamic(self.barriers)
+            self.effects.burst(cx, cy, (205, 210, 225), 8, 150, 0.3, 3)
+            self.sounds.play("ric")
+            return True
+        self.effects.float_text(t.x, t.y - 54, "ЗДЕСЬ НЕ ПОСТАВИТЬ", (255, 90, 90))
+        return False
+
+    def _bullet_vs_barriers(self, b):
+        """Снаряд врезался в стену-барьер: стена теряет прочность."""
+        if b.dead:
+            return
+        for br in self.barriers:
+            if _pt_seg_dist(b.x, b.y, br.p1, br.p2) < BARRIER_THICK / 2 + 5:
+                br.hp -= b.damage
+                b.dead = True
+                self.effects.burst(b.x, b.y, b.color, 8, 170, 0.3, 3)
+                self.sounds.play("ric")
+                if br.hp <= 0:
+                    self.barriers.remove(br)
+                    self.effects.burst(br.x, br.y, (205, 210, 225), 20, 320, 0.5, 4)
+                    self.effects.ring(br.x, br.y, (205, 210, 225), 70, 0.35)
+                    self.effects.shake(4, 0.2)
+                    self.sounds.play("explode")
+                return
 
     def _mines_step(self, dt):
         for m in self.mines[:]:
@@ -403,9 +541,7 @@ class Game:
 
     def _apply_pickup(self, t, pu):
         info = PU_INFO[pu.kind]
-        if pu.kind == "mine":
-            self._place_mine(t)
-        elif pu.kind == "smoke":
+        if pu.kind == "smoke":
             self.smokes.append(Smoke(t.x, t.y))
             self.sounds.play("smoke")
         elif pu.kind == "freeze":
@@ -415,6 +551,8 @@ class Game:
                 self.effects.float_text(enemy.x, enemy.y - 54, "ЭМИ!", info["color"])
             self.sounds.play("freeze")
         else:
+            # мина и стена теперь носятся в боекомплекте (E / Q),
+            # стихии заряжают пушку — всё это в apply_powerup
             t.apply_powerup(pu.kind)
         self.effects.float_text(t.x, t.y - 54, info["name"], info["color"])
         self.sounds.play("pickup")
@@ -431,6 +569,8 @@ class Game:
                 pu.draw(self.world, ox, oy)
             for m in self.mines:
                 m.draw(self.world, ox, oy)
+            for br in self.barriers:
+                br.draw(self.world, ox, oy)
             for b in self.bullets:
                 b.draw(self.world, ox, oy)
             if self.bot_tank.alive:
@@ -480,10 +620,11 @@ class Game:
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 255)))
         lines = [
-            "W/S — вперёд и назад      A/D — поворот      Пробел — выстрел",
-            "В ангаре соберите танк: шасси, корпус, дуло и перк — у всего своя цена.",
-            "8 арен, 9 бонусов, мины, лазер, дым, ЭМИ. Бот умеет воевать — не зевайте!",
-            "Но помните: нагромоздили брони — ползёте как сарай.",
+            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
+            "Q — поставить стену (120 прочности)   E — положить мину",
+            "В ангаре: шасси, корпус, дуло и перк — 300 комбинаций, у всех своя цена.",
+            "8 арен, 15 бонусов: стихии, стены, мины, лазер, дым, ЭМИ.",
+            "Бот теперь берёт бонусы и строит стены — не зевайте!",
         ]
         y = 340
         for s in lines:
@@ -508,7 +649,7 @@ class Game:
         img = get_font(28).render("Enter — в ангар", True, COL_P1)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 56)))
         # версия
-        img = get_font(16, bold=False).render("v1.3", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.4", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
@@ -519,7 +660,8 @@ class Game:
         hu = HULL[HU_KEYS[self.sel_hu]]
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
         pk = PERKS[PK_KEYS[self.sel_pk]]
-        speed = ch["speed"] * (1 - hu["weight"]) * wp["move_mult"] * pk["speed_mult"]
+        speed = (ch["speed"] * (1 - hu["weight"] * ch.get("wmult", 1.0))
+                 * wp["move_mult"] * pk["speed_mult"])
         hp = max(20, int(round(hu["hp"] * pk["hp_mult"])))
         reload = hu["reload"] * wp["reload_mult"] * pk["reload_mult"]
         dmg = round(30 * wp["damage_mult"])
@@ -554,20 +696,26 @@ class Game:
         t = get_font(26).render(title, True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 46)))
         n = len(keys)
-        box_h, step = (64, 260) if compact else (84, 330)
+        box_h = 64 if compact else 84
+        # 5 предметов не должны вылезать за экран — сужаем коробки
+        step = min(260 if compact else 330, (SCREEN_W - 140) // n)
+        box_w = step - 26
+        small = box_w < 235
+        name_f = get_font(20 if small else 24)
+        desc_f = get_font(13 if small else 16, bold=False)
         for i, key in enumerate(keys):
             item = table[key]
             x = SCREEN_W / 2 + (i - (n - 1) / 2) * step
             sel = (i == idx)
-            box = pygame.Rect(0, 0, 290, box_h)
+            box = pygame.Rect(0, 0, box_w, box_h)
             box.center = (int(x), y)
             bg = pygame.Rect(box.x - 6, box.y - 6, box.w + 12, box.h + 12)
             pygame.draw.rect(self.screen, (30, 40, 75), bg, border_radius=10)
             pygame.draw.rect(self.screen, COL_P1 if sel else (60, 70, 110), box,
                              3 if sel else 1, border_radius=8)
-            img = get_font(24).render(item["name"], True, COL_TEXT if sel else COL_DIM)
+            img = name_f.render(item["name"], True, COL_TEXT if sel else COL_DIM)
             self.screen.blit(img, img.get_rect(center=(box.centerx, box.y + 18)))
-            img2 = get_font(16, bold=False).render(item["desc"], True, COL_DIM)
+            img2 = desc_f.render(item["desc"], True, COL_DIM)
             self.screen.blit(img2, img2.get_rect(center=(box.centerx, box.y + 44)))
 
     def _draw_match_end(self):
@@ -638,6 +786,14 @@ class Game:
             sfx.append("ОБОЙМА %d/%d" % (t.mag_ammo, t.mag_size))
         if t.armor:
             sfx.append("броня %d" % t.armor)
+        if t.element and t.element_shots > 0:
+            ei = PU_INFO.get(t.element)
+            if ei:
+                sfx.append("%s x%d" % (ei["name"], t.element_shots))
+        if t.mine_carried > 0:
+            sfx.append("МИНА x%d (E)" % t.mine_carried)
+        if t.barrier_charges > 0:
+            sfx.append("СТЕНА x%d (Q)" % t.barrier_charges)
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         if t.triple > 0:
@@ -650,6 +806,12 @@ class Game:
             sfx.append("ЛАЗЕР x%d" % t.laser_charges)
         if t.frozen_t > 0:
             sfx.append("ЭМИ!")
+        if t.burn_t > 0:
+            sfx.append("ПОЖАР!")
+        if t.mud_t > 0:
+            sfx.append("УВЯЗ!")
+        if t.shock_t > 0:
+            sfx.append("ТОК!")
         row_y = y + 32
         if sfx:
             img = get_font(16, bold=False).render("   ".join(sfx), True, (160, 200, 255))

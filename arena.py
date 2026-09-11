@@ -66,7 +66,15 @@ class Arena:
         ]
         self.obstacles = [pygame.Rect(r) for r in LAYOUTS[self.variant]]
         self.rects = self.walls + self.obstacles
+        self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
         self._bg = self._make_background()
+
+    def set_dynamic(self, blockers):
+        self.dynamic = blockers
+
+    def walls_only(self):
+        """Вид арены без барьеров — для снарядов (те бьют барьеры отдельно)."""
+        return _WallsView(self)
 
     # ----- фон: неоновая сетка -----
     def _make_background(self):
@@ -94,10 +102,14 @@ class Arena:
         return (x - cx) ** 2 + (y - cy) ** 2 < radius * radius
 
     def circle_collides(self, x, y, radius):
-        return any(self._circle_rect(x, y, radius, r) for r in self.rects)
+        if any(self._circle_rect(x, y, radius, r) for r in self.rects):
+            return True
+        return any(d.blocks_circle(x, y, radius) for d in self.dynamic)
 
     def point_blocked(self, x, y):
-        return any(r.collidepoint(x, y) for r in self.rects)
+        if any(r.collidepoint(x, y) for r in self.rects):
+            return True
+        return any(d.blocks_point(x, y) for d in self.dynamic)
 
     def line_blocked(self, x1, y1, x2, y2, step=24):
         """Есть ли препятствие на линии (проверка: видит ли бот цель)."""
@@ -133,3 +145,30 @@ class Arena:
             if all((x - ax) ** 2 + (y - ay) ** 2 > avoid_dist ** 2 for ax, ay in avoid):
                 return x, y
         return SCREEN_W / 2, SCREEN_H / 2
+
+
+class _WallsView:
+    """Тонкая обёртка: та же арена, но без динамических барьеров.
+    Нужна снарядам — те взаимодействуют с барьерами через урон в game.py."""
+
+    def __init__(self, arena):
+        self._a = arena
+
+    @property
+    def rects(self):
+        return self._a.rects
+
+    def circle_collides(self, x, y, radius):
+        return any(self._a._circle_rect(x, y, radius, r) for r in self._a.rects)
+
+    def point_blocked(self, x, y):
+        return any(r.collidepoint(x, y) for r in self._a.rects)
+
+    def line_blocked(self, x1, y1, x2, y2, step=24):
+        d = math.hypot(x2 - x1, y2 - y1)
+        n = max(1, int(d // step))
+        for i in range(1, n):
+            t = i / n
+            if self.point_blocked(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t):
+                return True
+        return False
