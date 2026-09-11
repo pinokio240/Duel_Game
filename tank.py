@@ -8,7 +8,8 @@ import math
 import pygame
 from settings import (CHASSIS, HULL, WEAPONS, PERKS, TANK_RADIUS, BULLET_DAMAGE,
                       PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
-                      PU_RAPID_TIME, PU_RAPID_MULT, BOOST_MULT)
+                      PU_RAPID_TIME, PU_RAPID_MULT,
+                      BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT)
 from bullet import Bullet
 
 
@@ -54,7 +55,9 @@ class Tank:
         s = self.chassis["speed"] * (1.0 - self.hull["weight"])
         s *= self.weapon["move_mult"] * self.perk["speed_mult"]
         if self.boost_t > 0:
-            s *= BOOST_MULT   # ослабленное турбо — летать нельзя
+            # правило турбо: с перком «Гонец» ускорение слабее,
+            # без перка — турбо работает как обычно
+            s *= BOOST_PERK_MULT if self.perk_key == BOOST_PERK_KEY else BOOST_MULT
         return s
 
     @property
