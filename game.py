@@ -508,7 +508,7 @@ class Game:
         img = get_font(28).render("Enter — в ангар", True, COL_P1)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 56)))
         # версия
-        img = get_font(16, bold=False).render("v1.2", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.3", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
