@@ -1,34 +1,42 @@
 # -*- coding: utf-8 -*-
 """
 Танк: «танковое» управление, стрельба, броня, бонусы.
-Скорость считается честно: скорость шасси * (1 - вес корпуса).
+Скорость считается честно: скорость шасси * (1 - вес корпуса)
+* множитель дула * множитель перка. Хотели имбу? Их нет.
 """
 import math
 import pygame
-from settings import (CHASSIS, HULL, TANK_RADIUS, PU_SHIELD_TIME,
-                      PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
-                      PU_RAPID_TIME, PU_RAPID_MULT)
+from settings import (CHASSIS, HULL, WEAPONS, PERKS, TANK_RADIUS, BULLET_DAMAGE,
+                      PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
+                      PU_RAPID_TIME, PU_RAPID_MULT, BOOST_MULT)
 from bullet import Bullet
 
 
 class Tank:
-    def __init__(self, x, y, angle, chassis_key, hull_key, color):
+    def __init__(self, x, y, angle, chassis_key, hull_key, color,
+                 weapon_key="standard", perk_key="none"):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
         self.ch_key, self.hull_key = chassis_key, hull_key
+        self.wpn_key, self.perk_key = weapon_key, perk_key
         self.chassis = CHASSIS[chassis_key]
         self.hull = HULL[hull_key]
+        self.weapon = WEAPONS[weapon_key]
+        self.perk = PERKS[perk_key]
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
         self.radius = TANK_RADIUS
-        self.max_hp = self.hull["hp"]
+        self.max_hp = max(20, int(round(self.hull["hp"] * self.perk["hp_mult"])))
         self.hp = self.max_hp
         self.armor = self.chassis["armor"]  # сглаживание урона
         self.cooldown = 0.0
         self.alive = True
         self.flash = 0.0          # белая вспышка при получении урона
         self._stuck = 0.0         # бот: застрял ли у стены
+        # обойма (для спарки): сколько снарядов осталось до полной перезарядки
+        self.mag_size = self.weapon["mag"]
+        self.mag_ammo = self.mag_size
         # активные бонусы
         self.shield_t = 0.0
         self.boost_t = 0.0
@@ -38,23 +46,24 @@ class Tank:
         self.laser_charges = 0    # заряды лазера
         self._sprite = self._make_sprite()
 
-    # ----- характеристики с учётом бонусов -----
+    # ----- характеристики с учётом бонусов, дула и перка -----
     @property
     def speed(self):
         if self.frozen_t > 0:
             return 0.0
         s = self.chassis["speed"] * (1.0 - self.hull["weight"])
+        s *= self.weapon["move_mult"] * self.perk["speed_mult"]
         if self.boost_t > 0:
-            s *= 1.6
+            s *= BOOST_MULT   # ослабленное турбо — летать нельзя
         return s
 
     @property
     def turn_speed(self):
-        return self.chassis["turn"]  # градусов/сек
+        return self.chassis["turn"] * self.perk["turn_mult"]  # градусов/сек
 
     @property
     def reload_time(self):
-        r = self.hull["reload"]
+        r = self.hull["reload"] * self.weapon["reload_mult"] * self.perk["reload_mult"]
         if self.rapid_t > 0:
             r *= PU_RAPID_MULT
         return r
@@ -75,9 +84,20 @@ class Tank:
         # корпус
         pygame.draw.rect(s, self.color, (14, 10, 32, 30), border_radius=6)
         pygame.draw.rect(s, self.light, (18, 14, 24, 22), 2, border_radius=5)
-        # ствол (смотрит вправо — по нулевому углу)
-        pygame.draw.rect(s, self.light, (44, 22, 19, 7), border_radius=2)
-        pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
+        # ствол(ы) — вид зависит от выбранного дула (смотрят вправо)
+        if self.wpn_key == "twin":
+            # спарка: два тонких ствола друг над другом
+            pygame.draw.rect(s, self.light, (42, 18, 20, 5), border_radius=2)
+            pygame.draw.rect(s, self.light, (42, 27, 20, 5), border_radius=2)
+            pygame.draw.rect(s, self.color, (39, 16, 7, 18), border_radius=2)
+        elif self.wpn_key == "long":
+            # дальняя: длинный толстый ствол с раструбом
+            pygame.draw.rect(s, self.light, (44, 22, 26, 7), border_radius=2)
+            pygame.draw.rect(s, self.light, (66, 21, 5, 9), border_radius=1)
+            pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
+        else:
+            pygame.draw.rect(s, self.light, (44, 22, 19, 7), border_radius=2)
+            pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
         return s
 
     # ----- движение -----
@@ -130,9 +150,17 @@ class Tank:
         if self.triple > 0:
             angles = [self.angle - 12, self.angle, self.angle + 12]
             self.triple -= 1
+        dmg = BULLET_DAMAGE * self.weapon["damage_mult"]
+        spd = self.weapon["speed_mult"]
         for a in angles:
-            bullets.append(Bullet(mx, my, a, self))
-        self.cooldown = self.reload_time
+            bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd))
+        # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
+        if self.mag_ammo > 1:
+            self.mag_ammo -= 1
+            self.cooldown = self.weapon["mag_cd"] * (PU_RAPID_MULT if self.rapid_t > 0 else 1.0)
+        else:
+            self.mag_ammo = self.mag_size
+            self.cooldown = self.reload_time
         effects.burst(mx, my, self.light, 5, 130, 0.18, 3)
         sounds.play("shoot")
 

@@ -6,18 +6,20 @@ from settings import BULLET_SPEED, BULLET_DAMAGE, BULLET_BOUNCES
 
 
 class Bullet:
-    def __init__(self, x, y, angle, owner, damage=BULLET_DAMAGE):
+    def __init__(self, x, y, angle, owner, damage=BULLET_DAMAGE, speed_mult=1.0):
         rad = math.radians(angle)
         self.x = float(x)
         self.y = float(y)
-        self.vx = math.cos(rad) * BULLET_SPEED
-        self.vy = math.sin(rad) * BULLET_SPEED
+        v = BULLET_SPEED * speed_mult
+        self.vx = math.cos(rad) * v
+        self.vy = math.sin(rad) * v
         self.owner = owner
         self.damage = damage
         self.bounces = BULLET_BOUNCES
         self.age = 0.0
         self.dead = False
         self.color = owner.color
+        self.big = speed_mult > 1.1   # тяжёлый снаряд «Дальней» рисуется крупнее
         self.prev = (self.x, self.y)  # точка в начале кадра (для шлейфа и отскока)
 
     def update(self, dt, arena, tanks, effects, sounds):
@@ -71,6 +73,7 @@ class Bullet:
     def draw(self, surf, ox=0, oy=0):
         x, y = int(self.x + ox), int(self.y + oy)
         px, py = int(self.prev[0] + ox), int(self.prev[1] + oy)
-        pygame.draw.line(surf, self.color, (px, py), (x, y), 2)   # шлейф
-        pygame.draw.circle(surf, self.color, (x, y), 4)
-        pygame.draw.circle(surf, (255, 255, 255), (x, y), 2)
+        r = 5 if self.big else 4
+        pygame.draw.line(surf, self.color, (px, py), (x, y), r)   # шлейф
+        pygame.draw.circle(surf, self.color, (x, y), r)
+        pygame.draw.circle(surf, (255, 255, 255), (x, y), max(2, r - 2))

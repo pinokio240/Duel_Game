@@ -6,7 +6,7 @@
 """
 import math
 import random
-from settings import CHASSIS, HULL, DIFF_PRESETS
+from settings import CHASSIS, HULL, WEAPONS, PERKS, DIFF_PRESETS
 
 
 def _ang_diff(a, b):
@@ -15,8 +15,10 @@ def _ang_diff(a, b):
 
 
 def random_build():
-    """Случайная сборка бота — каждый матч он ездит на новой машине."""
-    return random.choice(list(CHASSIS)), random.choice(list(HULL))
+    """Случайная сборка бота (шасси, корпус, дуло, перк) —
+    каждый матч он ездит на новой машине."""
+    return (random.choice(list(CHASSIS)), random.choice(list(HULL)),
+            random.choice(list(WEAPONS)), random.choice(list(PERKS)))
 
 
 class BotAI:
