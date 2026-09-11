@@ -8,6 +8,24 @@ echo   Обновление DUEL до последней версии
 echo ============================================
 echo.
 
+rem --- Если игра клонирована через git — обновляемся настоящим git pull ---
+where git >nul 2>nul
+if errorlevel 1 goto zipway
+if not exist ".git" goto zipway
+
+echo [git] Обновляю через git pull...
+git pull --ff-only
+if not errorlevel 1 (
+    echo.
+    echo   Готово! Игра обновлена. Запускайте PLAY.bat
+    echo.
+    pause
+    exit /b
+)
+echo [git] Не сработало (нет сети или git) — качаю ZIP напрямую...
+echo.
+
+:zipway
 set TMPZIP=%TEMP%\duel_update.zip
 set TMPDIR=%TEMP%\duel_update
 
