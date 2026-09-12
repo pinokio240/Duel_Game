@@ -39,6 +39,12 @@ from sound import SoundBank
 BOSS_MODS = {"hp_mult": BOSS_HP_MULT, "damage_mult": 1.3,
              "turn_mult": 0.8, "speed_mult": 0.9}
 
+# v2.7/v2.8: какие режимы КОМАНДНЫЕ (счёт на две стороны: наша против
+# чужой), а какие — «АРМЕЙСКИЕ» (12-20 танков на самых больших картах).
+# В FFA (2-5, 11-15) team_mode выключен — у каждого танка свой team-номер.
+TEAM_MODES = (6, 7, 8, 9, 10, 16, 17, 18, 19, 20)
+ARMY_MODES = (16, 17, 18, 19, 20)
+
 CH_KEYS = list(CHASSIS)
 HU_KEYS = list(HULL)
 WP_KEYS = list(WEAPONS)
@@ -289,9 +295,13 @@ class Game:
         (2..5 и большие FFA v2.7: 11…15 → 6…10), в командах
         6 = «2 на 2» (4 танка), 7 = «2 против босса» (3 танка),
         8 = «3 на 3» (6 танков), 9 = «4 на 4» (8 танков),
-        10 = «5 на 5» (10 танков, v2.5)."""
+        10 = «5 на 5» (10 танков, v2.5),
+        v2.8 — армейские: 16 = «6 на 6» (12), 17 = «7 на 7» (14),
+        18 = «8 на 8» (16), 19 = «9 на 9» (18), 20 = «10 на 10» (20)."""
         return {6: 4, 7: 3, 8: 6, 9: 8, 10: 10,
-                11: 6, 12: 7, 13: 8, 14: 9, 15: 10}.get(self.mode, self.mode)
+                11: 6, 12: 7, 13: 8, 14: 9, 15: 10,
+                16: 12, 17: 14, 18: 16, 19: 18, 20: 20}.get(self.mode,
+                                                            self.mode)
 
     def _spawn_points(self, n):
         """Точки появления для n танков: 1вс1 — классика по краям, FFA —
@@ -301,13 +311,13 @@ class Game:
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
         if n == 2:
             ring = [(cx - 520, cy), (cx + 520, cy)]
-        elif self.mode in (6, 7, 8, 9, 10):
+        elif self.mode in TEAM_MODES:
             # командные режимы: наша команда — нижняя шеренга,
             # чужая — верхняя (сразу видно, кто с кем)
             if self.mode == 7:          # 2 против босса: нас двое, он один
                 our, foes_n = 2, 1
             else:
-                our = n // 2            # 2на2 → 2, 3на3 → 3, 4на4 → 4
+                our = n // 2            # 2на2 → 2, 6на6 → 6, 10на10 → 10
                 foes_n = our
             # v2.5: отступ шеренг = треть ВЫСОТЫ командной карты (729 при 2187) —
             # тянется вслед за размером; до стен (182) и блоков остаётся
@@ -356,13 +366,16 @@ class Game:
     def _reset_round(self):
         # арена переразыгрывается КАЖДЫЙ РАУНД и перемешивается (v2.1);
         # v2.5: командные режимы играют на КРУПНЫХ картах (3888x2187);
-        # v2.7: большие FFA (6-10 танков) — на тех же крупных картах
+        # v2.7: большие FFA (6-10 танков) — на тех же крупных картах;
+        # v2.8: армии 6на6…10на10 — на САМЫХ БОЛЬШИХ (5120x2880)
         self.arena = Arena(random.randrange(len(LAYOUTS)), shuffle=True,
-                           team=self.mode >= 6)
+                           team=self.mode >= 6,
+                           army=self.mode in ARMY_MODES)
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
         pts = self._spawn_points(self._tank_count())
-        # v2.7: команды — ТОЛЬКО режимы 6-10 (большие FFA 11-15 — каждый сам за себя)
-        self.team_mode = self.mode in (6, 7, 8, 9, 10)
+        # v2.7: команды — ТОЛЬКО режимы 6-10 (большие FFA 11-15 — каждый сам за себя);
+        # v2.8: к ним добавились армии 6на6…10на10 (16-20)
+        self.team_mode = self.mode in TEAM_MODES
         self.tank_team = {}
         self.player = Tank(
             pts[0][0], pts[0][1],
@@ -459,7 +472,7 @@ class Game:
         self.bot_builds = [random_build()
                            for _ in range(self._tank_count() - 1)]
         # в FFA счёт на каждого танка, в командах — на две стороны
-        self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+        self.score = [0] * (2 if self.mode in TEAM_MODES
                             else self._tank_count())
         self.round = 1
         self.points = 0.0
@@ -658,7 +671,7 @@ class Game:
                 self.state = "fight"
             elif k == pygame.K_a:
                 # выход в ангар: матч сбрасывается — сборка-то меняется
-                self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                self.score = [0] * (2 if self.mode in TEAM_MODES
                                     else self._tank_count())
                 self.round = 1
                 self.state = "select"
@@ -668,7 +681,7 @@ class Game:
             if k == pygame.K_RETURN:
                 self.start_match()
             elif k == pygame.K_a:
-                self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                self.score = [0] * (2 if self.mode in TEAM_MODES
                                     else self._tank_count())
                 self.round = 1
                 self.state = "select"   # в ангар за новой сборкой
@@ -750,7 +763,7 @@ class Game:
         elif kind == "p_resume":
             self.state = "fight"
         elif kind == "to_garage":                 # из паузы и из конца матча
-            self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+            self.score = [0] * (2 if self.mode in TEAM_MODES
                                 else self._tank_count())
             self.round = 1
             self.state = "select"
@@ -784,9 +797,14 @@ class Game:
                           self.arena.h - SCREEN_H)
 
     def _kill_all_foes(self):
-        """Кнопка «УБИТЬ СРАЗУ» (v2.6): не ждать 180 секунд «выяснения» —
-        ЖРЕБИЙ: случайный живой бот сразу забирает раунд, остальные
-        враги взрываются этим же кадром."""
+        """Кнопка «УБИТЬ СРАЗУ» (v2.6): не ждать 180 секунд «выяснения».
+        В FFA — ЖРЕБИЙ: случайный живой бот сразу забирает раунд,
+        остальные враги взрываются этим же кадром.
+        v2.8: в КОМАНДНЫХ режимах кнопка СУДИТ ПО ЖИВЫМ — перевес +2 танка
+        забирает раунд, при равном/почти равном составе — НИЧЬЯ."""
+        if self.team_mode:
+            self._team_judge()
+            return
         alive = [t for t in self.foes if t.alive]
         self.spectate_t = 0.0
         if not alive:
@@ -799,6 +817,24 @@ class Game:
         # раунд сразу за счастливчиком — как у последнего выжившего
         self.winner = self.tanks.index(lucky)
         self.score[self.winner] += 1
+        self.state = "round_end"
+        self.timer = ROUND_PAUSE_T
+        self.sounds.play("round")
+
+    def _team_judge(self):
+        """Кнопка «УБИТЬ СРАЗУ» в командах (v2.8): судим по живым танкам.
+        У какой стороны перевес ДВА танка и больше — та забирает раунд;
+        разница 0 или 1 — раунд НИЧЬЯ (никому). Никого не убиваем —
+        просто фиксируем вердикт и заканчиваем раунд."""
+        a0 = sum(1 for t in self.tanks if t.alive and self.tank_team[t] == 0)
+        a1 = sum(1 for t in self.tanks if t.alive and self.tank_team[t] == 1)
+        self.winner = 0 if a0 - a1 >= 2 else (1 if a1 - a0 >= 2 else -1)
+        if self.winner >= 0:
+            self.score[self.winner] += 1
+            if self.winner == 0:
+                self.points += SCORE_ROUND_WIN
+        else:
+            self.points += SCORE_ROUND_DRAW
         self.state = "round_end"
         self.timer = ROUND_PAUSE_T
         self.sounds.play("round")
@@ -1314,9 +1350,10 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "РЕЖИМЫ: 1вс1 · FFA ДО 10 · 2НА2 · 3НА3 · 4НА4 · 5НА5 · 2 ПРОТИВ БОССА.",
+            "РЕЖИМЫ: 1вс1 · FFA ДО 10 · КОМАНДЫ 2×2…10×10 · 2 ПРОТИВ БОССА.",
             "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
-            "После вашей смерти боты до 180 с выясняют победителя; кнопка отдаёт раунд случайному боту.",
+            "После смерти боты до 180 с выясняют победителя; кнопка: в FFA — жребий,"
+            " в командах — суд по живым (перевес 2+ танков).",
             "Неуязвимости больше нет. Консоль читера — Ё (`), работает на любой раскладке.",
         ]
         y = 306
@@ -1344,12 +1381,13 @@ class Game:
         # раскладка динамическая, шрифт 16, зазор 16
         y += 40
         img = get_font(20, bold=False).render(
-            "Режим боя (клик; F2–F10 — первые девять):", True, COL_DIM)
+            "Режим боя (клик; F2–F10 — горячие клавиши):", True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         mode_lbl = {2: "1×1", 3: "1×1×1", 4: "1×1×1×1", 5: "1×1×1×1×1",
                     6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4", 10: "5×5",
                     11: "FFA×6", 12: "FFA×7", 13: "FFA×8",
-                    14: "FFA×9", 15: "FFA×10"}
+                    14: "FFA×9", 15: "FFA×10",
+                    16: "6×6", 17: "7×7", 18: "8×8", 19: "9×9", 20: "10×10"}
         gap = 18
         fmode = get_font(16)
 
@@ -1371,7 +1409,7 @@ class Game:
 
         mode_row((2, 3, 4, 5, 11, 12, 13, 14, 15), y)   # все против всех
         y += 34
-        mode_row((6, 7, 8, 9, 10), y)                   # команды и босс
+        mode_row((6, 7, 8, 9, 10, 16, 17, 18, 19, 20), y)  # команды, босс и армии
         # статистика матчей и рекорд
         y += 38
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
@@ -1388,7 +1426,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.7", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.8", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1893,8 +1931,8 @@ class Game:
                      % (self.final_score, self.score_mult, rec))
 
     # ----- HUD во время боя -----
-    def _hp_bar(self, x, y, tank, right=False):
-        w, h = 260, 14
+    def _hp_bar(self, x, y, tank, right=False, h=14):
+        w = 260                  # ширина одна и та же, меняется только высота
         rect = pygame.Rect(x, y, w, h)
         pygame.draw.rect(self.screen, (30, 36, 60), rect, border_radius=4)
         k = tank.hp / tank.max_hp
@@ -1906,16 +1944,17 @@ class Game:
         pygame.draw.rect(self.screen, color, fill, border_radius=4)
         pygame.draw.rect(self.screen, (70, 80, 120), rect, 1, border_radius=4)
 
-    def _build_label(self, t, who=None, color=None):
+    def _build_label(self, t, who=None, color=None, cap=22):
         """«ИГРОК — шасси + корпус + дуло + перк + стихия» с автоподбором
         размера шрифта: длинная сборка не должна налезать на центральный счёт.
         Имя можно не передавать — возьмём display_name (СОЮЗНИК, БОСС).
-        color (v2.6) перекрашивает строку (командная подсветка HUD)."""
+        color (v2.6) перекрашивает строку (командная подсветка HUD).
+        cap (v2.8) — потолок шрифта: в плотных строках армий он мельче."""
         who = who or t.display_name or "БОТ"
         label = "%s — %s + %s + %s + %s + %s" % (
             who, t.chassis["name"], t.hull["name"], t.weapon["name"],
             t.perk["name"], t.elem["name"])
-        size = 22
+        size = cap
         while size > 13 and get_font(size).size(label)[0] > 500:
             size -= 1
         return get_font(size).render(label, True, color or t.color)
@@ -1995,9 +2034,14 @@ class Game:
             img = get_font(15, bold=False).render(pts_label, True, COL_GOLD)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 141)))
         else:
-            # --- FFA и команды: танки компактными строками справа ---
+            # --- FFA и команды: танки компактными строками справа.
+            # v2.8: в армиях (6на6…10на10) ботов до 19 — строки СЖАТЫЕ
+            # (без списка статусов, только имя + полоска HP), иначе
+            # не влезают в экран
+            compact = len(self.bots) > 9
+            row_h = 27 if compact else 52
             for i, b in enumerate(self.bots):
-                self._bot_row(b, i, 62 + i * 52)
+                self._bot_row(b, i, 62 + i * row_h, compact=compact)
             # победы цветными сегментами (низ по центру); при толпе
             # (FFA 8-10, v2.7) шрифт мельче — полоса не налезает на края
             seg_f = get_font(26 if len(self.tanks) <= 7 else 15)
@@ -2029,7 +2073,7 @@ class Game:
             img = get_font(14, bold=False).render(map_line, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
                                                        SCREEN_H - 22)))
-        if self.spectate_t > 0:
+        if self.spectate_t > 0 and self.state == "fight":
             img = get_font(16).render(
                 "БОТЫ ВЫЯСНЯЮТ ОТНОШЕНИЯ — ДОХНУТ ЧЕРЕЗ %d С (НИЧЬЯ)"
                 % int(self.spectate_t + 0.99), True, (190, 205, 255))
@@ -2037,15 +2081,34 @@ class Game:
                                                        SCREEN_H - 140)))
             self._button(SCREEN_W / 2, SCREEN_H - 112, "УБИТЬ СРАЗУ", "kill_all",
                          w=210, h=30, fs=15)
+        elif (self.team_mode and not self.player.alive
+                and self.state == "fight"):
+            # v2.8: кнопка теперь и в КОМАНДНЫХ режимах — вы погибли,
+            # а боты воюют бесконечно? Нажмите — раунд засудят по живым:
+            # перевес +2 танка забирает победу, иначе ничья.
+            img = get_font(16).render(
+                "КОМАНДЫ ВОЮЮТ БЕЗ ВАС — УБИТЬ СРАЗУ: ПЕРЕВЕС +2 ЖИВЫХ "
+                "ЗАБИРАЕТ РАУНД, ИНАЧЕ НИЧЬЯ", True, (190, 205, 255))
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
+                                                       SCREEN_H - 140)))
+            self._button(SCREEN_W / 2, SCREEN_H - 112, "УБИТЬ СРАЗУ", "kill_all",
+                         w=210, h=30, fs=15)
 
-    def _bot_row(self, t, idx, y):
+    def _bot_row(self, t, idx, y, compact=False):
         """Компактная строка танка в HUD (v2.1): имя, HP, победы и статусы.
         v2.2: имя берём из display_name (СОЮЗНИК / БОСС), победы в командах
-        считаются по стороне."""
+        считаются по стороне.
+        v2.8: compact=True — СЖАТАЯ строка для армий (11-19 ботов): имя
+        мельче, полоска HP уже, статусы не выводим (они видны на танке и
+        в полосе побед внизу) — иначе 19 строк не влезают в экран."""
         # v2.6: в командах строка танка красится цветом стороны
         img = self._build_label(t, t.display_name or BOT_NAMES[idx],
-                                color=self._team_ring_color(t))
+                                color=self._team_ring_color(t),
+                                cap=13 if compact else 22)
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y)))
+        if compact:
+            self._hp_bar(SCREEN_W - 330, y + 15, t, right=True, h=8)
+            return
         self._hp_bar(SCREEN_W - 330, y + 22, t, right=True)
         tags = self._status_tags(t)
         if self.team_mode:

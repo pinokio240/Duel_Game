@@ -2075,6 +2075,153 @@ def test_big_teams():
           "water" in g4.foes[1].element_keys)
 
 
+# ---------- 3w. АРМЕЙСКИЕ КОМАНДЫ v2.8: 6на6…10на10 + кнопка в командах ----------
+def test_army_teams():
+    """v2.8: режимы 16-20 — командные бои 6 НА 6 … 10 НА 10 (12-20 танков).
+    team_mode включен, счёт на две стороны, САМЫЕ БОЛЬШИЕ карты 5120x2880,
+    шеренги, у врагов 10-й бот БОТ-10 (белый). Кнопка «УБИТЬ СРАЗУ» теперь
+    есть и в командах: суд по живым — перевес +2 забирает раунд, иначе ничья."""
+    import math
+    from game import Game
+    from settings import (MODE_NAMES, BOT_NAMES, ARMY_ARENA_W, ARMY_ARENA_H,
+                          SCORE_ROUND_DRAW, SCORE_ROUND_WIN)
+
+    # ----- составы, карты, команды всех пяти армейских режимов -----
+    for mode, n in ((16, 12), (17, 14), (18, 16), (19, 18), (20, 20)):
+        g = Game()
+        g.mode = mode
+        g.start_match()
+        g.state = "fight"
+        g._fake_keys = FakeKeys(())
+        half = n // 2
+        check("Армия %dx%d: название «%s»" % (half, half, MODE_NAMES[mode]),
+              MODE_NAMES[mode].startswith("%d на %d" % (half, half)))
+        check("Армия %dx%d: танков %d, ботов %d, врагов %d"
+              % (half, half, n, n - 1, half),
+              len(g.tanks) == n and len(g.bots) == n - 1
+              and len(g.foes) == half)
+        check("Армия %dx%d: командный режим, счёт на две стороны" % (half, half),
+              g.team_mode is True and g.score == [0, 0])
+        check("Армия %dx%d: самая большая карта %dx%d"
+              % (half, half, g.arena.w, g.arena.h),
+              (g.arena.w, g.arena.h) == (ARMY_ARENA_W, ARMY_ARENA_H))
+        teams_ok = (g.tank_team[g.player] == 0
+                    and all(g.tank_team[b] == 0 for b in g.bots[:half - 1])
+                    and all(g.tank_team[b] == 1 for b in g.foes))
+        check("Армия %dx%d: игрок + %d союзника против %d ботов"
+              % (half, half, half - 1, half), teams_ok)
+        check("Армия %dx%d: все живы, спавны дальше 240 px" % (half, half),
+              all(t.alive for t in g.tanks)
+              and min(math.hypot(a.x - b.x, a.y - b.y)
+                      for i, a in enumerate(g.tanks)
+                      for b in g.tanks[i + 1:]) > 240)
+        g.draw()   # HUD с плотными строками рисуется без ошибок
+
+    # имена союзников и врагов в 10 на 10: СОЮЗНИК…СОЮЗНИК-9 против БОТ…БОТ-10
+    g20 = Game()
+    g20.mode = 20
+    g20.start_match()
+    g20.state = "fight"
+    g20._fake_keys = FakeKeys(())
+    check("10на10: союзники зовутся СОЮЗНИК…СОЮЗНИК-9",
+          [b.display_name for b in g20.bots[:9]]
+          == ["СОЮЗНИК"] + ["СОЮЗНИК-%d" % i for i in range(2, 10)])
+    check("10на10: враги зовутся БОТ…БОТ-10 (десятый появился)",
+          [b.display_name for b in g20.foes] == BOT_NAMES[:10])
+    # шеренги: наша внизу, чужая сверху (арена без баррикад, чтобы
+    # случайные препятствия не вытолкнули точки на чужую половину)
+    from arena import Arena
+    g20.arena = Arena(0, team=True, army=True)
+    pts = g20._spawn_points(20)
+    check("10на10: шеренги — наша снизу (10), чужая сверху (10)",
+          all(p[1] > g20.arena.h / 2 for p in pts[:10])
+          and all(p[1] < g20.arena.h / 2 for p in pts[10:]))
+    # ИИ союзника воюет только с чужой командой
+    ai = g20.ais[0]
+    ai.target = ai._pick_target(g20)
+    check("10на10: ИИ СОЮЗНИКА берёт целью только чужую команду",
+          ai.target is not None and g20.tank_team[ai.target] == 1)
+
+    # ЭМИ в 10 на 10: чужак поднял — вся его десятка ездит, наша стоит
+    from powerup import PowerUp
+    from settings import PU_FREEZE_TIME
+    f20 = g20.foes[0]
+    g20._apply_pickup(f20, PowerUp(f20.x, f20.y, "freeze"))
+    check("ЭМИ в 10на10: чужая десятка ЦЕЛА (подобравший + 9 напарников)",
+          all(f.frozen_t == 0.0 for f in g20.foes))
+    check("ЭМИ в 10на10: замерзли игрок и все 9 его союзников",
+          g20.player.frozen_t == PU_FREEZE_TIME
+          and all(a.frozen_t == PU_FREEZE_TIME for a in g20.bots[:9]))
+
+    # ----- КНОПКА «УБИТЬ СРАЗУ» В КОМАНДНОМ РЕЖИМЕ (v2.8) -----
+    # пока игрок жив — кнопки нет (судить нечего, сам воюешь)
+    g6 = Game()
+    g6.mode = 6
+    g6.start_match()
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    g6.draw()
+    check("2на2: пока игрок жив — кнопки «УБИТЬ СРАЗУ» нет",
+          not [r for r, kd, d in g6._click_zones if kd == "kill_all"])
+    # игрок погиб, боты воюют — кнопка появилась
+    g6.player._die(g6.effects, g6.sounds)
+    g6.update(1 / 60.0)
+    g6.draw()   # зоны кликов пересобираются каждый кадр — рисуем заново
+    check("2на2: после смерти игрока кнопка появилась (союзник жив)",
+          g6.state == "fight"
+          and bool([r for r, kd, d in g6._click_zones if kd == "kill_all"]))
+    # вердикт НИЧЬЯ: союзник 1 против двух ботов — перевеса 2 нет
+    g6._kill_all_foes()
+    check("2на2 кнопка: живых 1 против 2 — НИЧЬЯ, никому очко",
+          g6.state == "round_end" and g6.winner == -1
+          and g6.score == [0, 0] and g6.points == SCORE_ROUND_DRAW)
+    check("2на2 кнопка: никого не убило — суд только фиксирует вердикт",
+          sum(1 for t in g6.tanks if t.alive) == 3)
+
+    # вердикт ПОБЕДА НАШЕЙ КОМАНДЫ: в 6на6 осталось 5 наших против 1 чужого
+    g16 = Game()
+    g16.mode = 16
+    g16.start_match()
+    g16.state = "fight"
+    g16._fake_keys = FakeKeys(())
+    g16.player._die(g16.effects, g16.sounds)
+    for b in g16.foes[1:]:
+        b.alive = False
+    g16._kill_all_foes()
+    check("6на6 кнопка: живых 5 наших против 1 чужого — раунд за нами",
+          g16.state == "round_end" and g16.winner == 0
+          and g16.score[0] == 1 and g16.points == SCORE_ROUND_WIN)
+
+    # вердикт ПОБЕДА ЧУЖАКОВ: в 6на6 остался 1 наш против 3 чужих
+    g16b = Game()
+    g16b.mode = 16
+    g16b.start_match()
+    g16b.state = "fight"
+    g16b._fake_keys = FakeKeys(())
+    g16b.player._die(g16b.effects, g16b.sounds)
+    for b in g16b.bots[:4]:          # убили четверых своих союзников
+        b.alive = False
+    for b in g16b.foes[3:]:          # и троих чужих
+        b.alive = False
+    g16b._kill_all_foes()
+    check("6на6 кнопка: живых 1 наш против 3 чужих — раунд за ботами",
+          g16b.state == "round_end" and g16b.winner == 1
+          and g16b.score[1] == 1)
+
+    # жребий FFA не сломался: кнопка в FFA по-прежнему отдает раунд боту
+    g15 = Game()
+    g15.mode = 15
+    g15.start_match()
+    g15.state = "fight"
+    g15._fake_keys = FakeKeys(())
+    g15.player._die(g15.effects, g15.sounds)
+    g15.update(1 / 60.0)
+    g15._kill_all_foes()
+    check("FFA 10: кнопка по-прежнему жребий (раунд случайному боту)",
+          g15.state == "round_end" and g15.winner > 0
+          and g15.score[g15.winner] == 1)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -2101,6 +2248,7 @@ if __name__ == "__main__":
     test_ffa_big()
     test_ice_immunity()
     test_big_teams()
+    test_army_teams()
     test_bigmap()
     test_points()
     test_score_table()

@@ -6,13 +6,15 @@ v2.2: КАРТЫ ПОБОЛЬШЕ — мир больше окна 1280x720: к�
 (в game.py).
 v2.5: РАЗМЕРЫ ПОД РЕЖИМ: обычные карты 2752x1548 (ещё x1.5 площади к v2.4),
 командные 3888x2187 (ещё x3 площади к v2.4) — каждая арена несёт свой
-размер, масштаб раскладки и толщину стен."""
+размер, масштаб раскладки и толщину стен.
+v2.8: АРМЕЙСКИЕ карты 5120x2880 — под командные 6на6…10на10 (12-20 танков)."""
 import math
 import random
 import pygame
 from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
                       PROP_MAX, ARENA_W, ARENA_H,
-                      TEAM_ARENA_W, TEAM_ARENA_H)
+                      TEAM_ARENA_W, TEAM_ARENA_H,
+                      ARMY_ARENA_W, ARMY_ARENA_H)
 
 WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется)
 
@@ -123,14 +125,20 @@ MAP_NAMES = ["Классика", "Крестовина", "Колонны", "Уг
 
 
 class Arena:
-    def __init__(self, variant=0, shuffle=False, team=False):
+    def __init__(self, variant=0, shuffle=False, team=False, army=False):
         """shuffle=True — случайное зеркало и/или случайные баррикады:
         одна и та же карта каждый раз играет по-новому.
         team=True — БОЛЬШАЯ карта: крупнее обычной (v2.5), там много
-        танков; с v2.7 на них играют и большие FFA (6-10 танков)."""
+        танков; с v2.7 на них играют и большие FFA (6-10 танков).
+        army=True (v2.8) — САМАЯ БОЛЬШАЯ карта: под 6на6…10на10,
+        где танков от 12 до 20 (перекрывает флаг team)."""
         self.variant = variant % len(LAYOUTS)
-        self.w, self.h = ((TEAM_ARENA_W, TEAM_ARENA_H) if team
-                          else (ARENA_W, ARENA_H))
+        if army:
+            self.w, self.h = ARMY_ARENA_W, ARMY_ARENA_H
+        elif team:
+            self.w, self.h = TEAM_ARENA_W, TEAM_ARENA_H
+        else:
+            self.w, self.h = ARENA_W, ARENA_H
         s = self.w / float(SCREEN_W)      # масштаб исходной раскладки
         self.wall_t = int(WALL_T * s)     # толщина внешних стен
         self.spawn_cols = [(int(x * s), int(y * s)) for x, y in _SPAWN_SRC]
@@ -158,7 +166,8 @@ class Arena:
         self.obstacles = obs
         self.rects = self.walls + self.obstacles
         self.name = (MAP_NAMES[self.variant]
-                     + (" [большая]" if team else "")
+                     + (" [огромная]" if army else
+                        " [большая]" if team else "")
                      + (" ★" if tags else ""))
         self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
         self._bg = self._make_background()
