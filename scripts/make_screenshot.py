@@ -21,7 +21,6 @@ g.state = "fight"
 g._reset_round()
 g.arena = Arena(0)   # фиксированная «Классика» для стабильного кадра
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
-g.grace_t = 0.0      # чтобы бой в кадре шёл честно
 
 # прогрев боя, чтобы были снаряды/эффекты
 for _ in range(240):
@@ -62,8 +61,7 @@ g.score = [0, 0]
 g.bot_builds = [("light", "light", "shotgun", "sprinter", "electric"),
                 ("heavy", "heavy", "shotgun", "turtle", "fire")]
 g._reset_round()
-g.arena = Arena(0)
-g.grace_t = 8.0             # пусть в кадре висит кнопка «УБИТЬ СРАЗУ»
+g.arena = Arena(0, team=(g.mode >= 6))
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 for _ in range(200):
     g.update(1 / 60.0)
@@ -84,7 +82,6 @@ g.bot_builds = [("light", "compact", "rapidgun", "sprinter", "electric"),
                 ("heavy", "armored", "standard", "turtle", "fire"),
                 ("sport", "compact", "shotgun", "sprinter", "vamp")]
 g._reset_round()
-g.grace_t = 12.0            # в кадре виден грейс и кнопка внизу
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 for _ in range(240):
     g.update(1 / 60.0)

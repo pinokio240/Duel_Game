@@ -4,25 +4,30 @@ v2.1: РАНДОМИЗАЦИЯ — перед боем карта может з�
 несколько случайных баррикад, а сама арена переразыгрывается КАЖДЫЙ РАУНД.
 v2.2: КАРТЫ ПОБОЛЬШЕ — мир больше окна 1280x720: камера следует за игроком
 (в game.py).
-v2.4: мир 2240x1260 — как старая карта, но в 3 раза БОЛЬШЕ ПО ПЛОЩАДИ
-(масштаб 1.75 от исходных координат, 16:9 сохранено)."""
+v2.5: РАЗМЕРЫ ПОД РЕЖИМ: обычные карты 2752x1548 (ещё x1.5 площади к v2.4),
+командные 3888x2187 (ещё x3 площади к v2.4) — каждая арена несёт свой
+размер, масштаб раскладки и толщину стен."""
 import math
 import random
 import pygame
 from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
-                      PROP_MAX, ARENA_W, ARENA_H)
+                      PROP_MAX, ARENA_W, ARENA_H,
+                      TEAM_ARENA_W, TEAM_ARENA_H)
 
-WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется ниже)
+WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется)
 
-# Масштаб мира: 2240/1280 = 1.75 — раскладки растягиваются из исходных
-# координат 1280x720, площадь вырастает втрое (v2.4)
+# Масштаб/стены ДЛЯ ОБЫЧНОЙ карты (по умолчанию) — оставлены для совместимости;
+# каждая арена с v2.5 считает свои значения в __init__ (self.wall_t).
 _S = ARENA_W / float(SCREEN_W)
-WALL_TS = int(WALL_T * _S)          # стены тоже толще (105 px)
+WALL_TS = int(WALL_T * _S)
+
+# классические точки появления танков в ИСХОДНЫХ координатах
+_SPAWN_SRC = ((240, 360), (1040, 360))
 
 
-def _scaled_layout(rects):
-    """Раскладка из исходных координат 1280x720 — в большой мир 2240x1260."""
-    return [(int(x * _S), int(y * _S), max(1, int(w * _S)), max(1, int(h * _S)))
+def _scaled_layout(rects, s):
+    """Раскладка из исходных координат 1280x720 — в мир масштаба s."""
+    return [(int(x * s), int(y * s), max(1, int(w * s)), max(1, int(h * s)))
             for (x, y, w, h) in rects]
 
 # Восемь симметричных раскладок арены (все зеркалятся по центру)
@@ -116,26 +121,28 @@ MAP_NAMES = ["Классика", "Крестовина", "Колонны", "Уг
              "Полоса", "Соты", "Мосты", "Бункер", "Веер", "Шахты",
              "Вилка", "Кольцо", "Зигзаг", "Казармы", "Ступени", "Бухта"]
 
-# классические точки появления танков в ИСХОДНЫХ координатах (масштабируются)
-_SPAWN_SRC = ((240, 360), (1040, 360))
-_SPAWN_COLS = [(int(x * _S), int(y * _S)) for x, y in _SPAWN_SRC]
-
 
 class Arena:
-    def __init__(self, variant=0, shuffle=False):
+    def __init__(self, variant=0, shuffle=False, team=False):
         """shuffle=True — случайное зеркало и/или случайные баррикады:
-        одна и та же карта каждый раз играет по-новому."""
+        одна и та же карта каждый раз играет по-новому.
+        team=True — командная карта: крупнее обычной (v2.5), там много
+        танков и нужен разгон."""
         self.variant = variant % len(LAYOUTS)
-        w, h = ARENA_W, ARENA_H
-        self.w = w
-        self.h = h
+        self.w, self.h = ((TEAM_ARENA_W, TEAM_ARENA_H) if team
+                          else (ARENA_W, ARENA_H))
+        s = self.w / float(SCREEN_W)      # масштаб исходной раскладки
+        self.wall_t = int(WALL_T * s)     # толщина внешних стен
+        self.spawn_cols = [(int(x * s), int(y * s)) for x, y in _SPAWN_SRC]
+        w, h = self.w, self.h
+        wt = self.wall_t
         self.walls = [
-            pygame.Rect(0, 0, w, WALL_TS),
-            pygame.Rect(0, h - WALL_TS, w, WALL_TS),
-            pygame.Rect(0, 0, WALL_TS, h),
-            pygame.Rect(w - WALL_TS, 0, WALL_TS, h),
+            pygame.Rect(0, 0, w, wt),
+            pygame.Rect(0, h - wt, w, wt),
+            pygame.Rect(0, 0, wt, h),
+            pygame.Rect(w - wt, 0, wt, h),
         ]
-        obs = [pygame.Rect(r) for r in _scaled_layout(LAYOUTS[self.variant])]
+        obs = [pygame.Rect(r) for r in _scaled_layout(LAYOUTS[self.variant], s)]
         tags = []
         if shuffle:
             mx, my = (random.random() < 0.5, random.random() < 0.5)
@@ -145,20 +152,24 @@ class Arena:
                 obs = [pygame.Rect(r.x, h - r.y - r.h, r.w, r.h) for r in obs]
             if mx or my:
                 tags.append("зеркало")
-            added = self._add_props(obs, w, h)
+            added = self._add_props(obs)
             if added:
                 tags.append("+%d баррикад" % added)
         self.obstacles = obs
         self.rects = self.walls + self.obstacles
-        self.name = MAP_NAMES[self.variant] + (" ★" if tags else "")
+        self.name = (MAP_NAMES[self.variant]
+                     + (" [командная]" if team else "")
+                     + (" ★" if tags else ""))
         self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
         self._bg = self._make_background()
 
-    @staticmethod
-    def _add_props(obs, w, h):
+    def _add_props(self, obs):
         """Накидать 0..PROP_MAX случайных баррикад в свободные места —
         подальше от стен, других препятствий и точек появления танков.
-        Баррикады крупнее в большом мире (v2.2)."""
+        Размер баррикад и отступы тянутся за масштабом карты (v2.5)."""
+        s = self.w / float(SCREEN_W)
+        k = s / 1.5           # базовые размеры рассчитаны на масштаб 1.5
+        wt, w, h = self.wall_t, self.w, self.h
         added = 0
         for _ in range(70):
             if added >= PROP_MAX:
@@ -166,14 +177,16 @@ class Arena:
             if added and random.random() < 0.4:
                 break            # бывает и пара баррикад, и ноль
             pw, ph = random.choice(((54, 54), (84, 42), (42, 84), (72, 72)))
-            x = random.uniform(WALL_TS + 100, w - WALL_TS - 100 - pw)
-            y = random.uniform(WALL_TS + 90, h - WALL_TS - 90 - ph)
+            pw, ph = max(20, int(pw * k)), max(20, int(ph * k))
+            x = random.uniform(wt + 100 * k, w - wt - 100 * k - pw)
+            y = random.uniform(wt + 90 * k, h - wt - 90 * k - ph)
             r = pygame.Rect(int(x), int(y), pw, ph)
-            if any(r.inflate(110, 110).colliderect(o) for o in obs):
+            if any(r.inflate(int(110 * k), int(110 * k)).colliderect(o)
+                   for o in obs):
                 continue
             cx, cy = r.center
-            if any((cx - sx) ** 2 + (cy - sy) ** 2 < 210 ** 2
-                   for sx, sy in _SPAWN_COLS):
+            if any((cx - sx) ** 2 + (cy - sy) ** 2 < (210 * k) ** 2
+                   for sx, sy in self.spawn_cols):
                 continue
             obs.append(r)
             added += 1
@@ -248,8 +261,8 @@ class Arena:
     def free_spot(self, avoid=(), avoid_dist=150):
         """Случайная свободная точка (для появления бонусов)."""
         for _ in range(200):
-            x = random.uniform(WALL_TS + 70, self.w - WALL_TS - 70)
-            y = random.uniform(WALL_TS + 70, self.h - WALL_TS - 70)
+            x = random.uniform(self.wall_t + 70, self.w - self.wall_t - 70)
+            y = random.uniform(self.wall_t + 70, self.h - self.wall_t - 70)
             if self.circle_collides(x, y, 30):
                 continue
             if all((x - ax) ** 2 + (y - ay) ** 2 > avoid_dist ** 2 for ax, ay in avoid):

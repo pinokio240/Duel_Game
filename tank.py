@@ -67,10 +67,10 @@ class Tank:
                     self.mods[_f] *= _v
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
-        # v2.2: команда (уникальна по умолчанию), неуязвимость (грейс ботов),
+        # v2.2: команда (уникальна по умолчанию), неуязвимость (спецфлаг),
         # масштаб (БОСС вдвое крупнее) и имя в HUD («СОЮЗНИК», «БОСС»)
         self.team = next(_TEAM_SEQ)
-        self.immune = False           # боты неуязвимы первые 45 сек раунда
+        self.immune = False           # флаг неуязвимости (спецрежимы/консоль)
         self._immune_cd = 0.0         # чтобы «НЕУЯЗВИМ» не спамило каждый кадр
         self.scale = float(scale)
         self.radius = TANK_RADIUS * self.scale
@@ -302,7 +302,7 @@ class Tank:
         if not self.alive:
             return
         if self.immune:
-            # грейс ботов (45 сек раунда): никакой урон не проходит
+            # неуязвимость (спецфлаг, v2.5 — грейса больше нет): урон не проходит
             if self._immune_cd <= 0:
                 self._immune_cd = 0.7
                 effects.float_text(self.x, self.y - 50, "НЕУЯЗВИМ", (190, 205, 255))

@@ -305,13 +305,11 @@ def test_laser_fan():
     g.state = "fight"
     g._reset_round()
     g.effects = _Fx()
-    g.grace_t = 0.0                 # без грейса — иначе бот неуязвим для луча
-    g.bot_tank.immune = False
     p, bot = g.player, g.bot_tank
-    # чистая полоса карты «Классика» (мир 2240x1260: блоки выше/ниже)
+    # чистая полоса карты «Классика» (мир 2752x1548: блоки выше/ниже)
     g.arena = Arena(0)
-    p.x, p.y, p.angle = 350, 380, 0
-    bot.x, bot.y = 750, 380
+    p.x, p.y, p.angle = 350, 540, 0
+    bot.x, bot.y = 750, 540
     hp0 = bot.hp
 
     # лазер + веер: ОДНО нажатие — три луча, тратятся и лазер, и веер
@@ -490,13 +488,11 @@ def test_points():
     g._fake_keys = FakeKeys(())
     p, bot = g.player, g.bot_tank
     # чистая полоса, враг заморожен — пуля гарантированно долетает
-    g.grace_t = 0.0                  # снимаем грейс, иначе бот неуязвим
-    g.bot_tank.immune = False
     g.arena = Arena(0)
-    p.x, p.y, p.angle = 350, 380, 0
-    bot.x, bot.y = 650, 380
+    p.x, p.y, p.angle = 350, 540, 0
+    bot.x, bot.y = 650, 540
     bot.frozen_t = 3.0
-    g.bullets.append(Bullet(380, 380, 0, p))
+    g.bullets.append(Bullet(380, 540, 0, p))
     for _ in range(30):
         g.update(1 / 60.0)
     check("очки капают за урон врагу", g.points > 0, "(%.0f)" % g.points)
@@ -1068,6 +1064,28 @@ def test_stats_persist():
                                if r.get("score") != 777]
     g2._save_stats()
 
+    # v2.5: забег НЕ попал в топ-10 — раньше был краш next()/StopIteration
+    from settings import ROUNDS_TO_WIN
+    g3 = Game()
+    g3.stats["score_table"] = [{"score": 100000 + i, "res": "win",
+                                "rounds": "5:0", "c": 0, "b": 0, "e": 0,
+                                "mult": 1.0, "el": "Огонь",
+                                "date": "01.01 00:00"} for i in range(10)]
+    g3.state = "round_end"
+    g3.timer = 0.01
+    g3.score = [0, ROUNDS_TO_WIN]   # поражение с мизерными очками
+    g3.points = 0
+    g3.score_mult = 1.0
+    g3.update(1 / 60.0)
+    check("забег мимо топ-10 НЕ роняет игру (место 0)",
+          g3.state == "match_end" and g3.table_place == 0
+          and len(g3.stats["score_table"]) == 10)
+    g3._draw_match_end()   # баннер «в топ-10 не попал» рисуется без краша
+    # прибираем: вернуть таблицу без подставных рекордов
+    g3.stats["score_table"] = [r for r in g3.stats["score_table"]
+                               if r.get("score", 0) < 100000]
+    g3._save_stats()
+
 
 # ---------- 3o. РЕЖИМЫ v2.1: 1вс1 / 1вс1вс1 / 1вс1вс1вс1 / 1вс1вс1вс1вс1 ----------
 def test_ffa():
@@ -1119,9 +1137,6 @@ def test_ffa():
     g2 = Game()
     g2.mode = 3
     g2._reset_round()
-    g2.grace_t = 0.0
-    for b in g2.bots:
-        b.immune = False
     g2.arena = Arena(6)          # «Мосты»: чистая полоса на y=540
     b1, b2 = g2.bots[0], g2.bots[1]
     b1.x, b1.y, b1.angle = 600, 540, 0
@@ -1155,20 +1170,11 @@ def test_ffa():
     check("бот добрал 5 побед — матч завершён поражением",
           g3.state == "match_end" and g3.stats["losses"] >= 1)
 
-    # ОГНЕННАЯ ЗОНА: FFA-раунд не тянется вечно — после 35 сек жжёт всех
-    from settings import FFA_ZONE_T
-    g5 = Game()
-    g5.mode = 3
-    g5._reset_round()
-    g5.state = "fight"
-    g5._fake_keys = FakeKeys(())
-    for _ in range(70 * 60):            # 70 секунд симуляции — с запасом
-        g5.update(1 / 60.0)
-        if g5.state == "round_end":
-            break
-    check("огненная зона завершает затянувшийся FFA-раунд",
-          g5.state == "round_end" and g5.round_t > FFA_ZONE_T,
-          "(round_t %.1f)" % g5.round_t)
+    # ОГНЕННОЙ ЗОНЫ БОЛЬШЕ НЕТ (v2.5 — убрана по просьбе игрока)
+    import settings as _st
+    check("огненная зона удалена (нет FFA_ZONE_T и _zone_step)",
+          not hasattr(_st, "FFA_ZONE_T") and not hasattr(Game, "_zone_step")
+          and not hasattr(g, "round_t"))
 
     # спавны выживают на случайных картах во всех режимах
     ok = True
@@ -1219,10 +1225,13 @@ def test_map_shuffle():
     check("классические спавны не перекрыты (40 карт)", blocked == 0)
 
 
-# ---------- 3q. ГРЕЙС v2.2: ботов нельзя убить 45 сек + кнопка ----------
-def test_grace():
+# ---------- 3q. ПОСЛЕ СМЕРТИ ИГРОКА v2.5: окно выяснения вместо грейса ----------
+def test_spectate():
+    """v2.5: НЕУЯЗВИМОСТИ НЕТ. После смерти игрока живые боты (2+) в FFA
+    выясняют победителя SPECTATE_T секунд, потом умирают — ничья.
+    Один бот берёт раунд сразу. Кнопка «УБИТЬ СРАЗУ» — не ждать."""
     from game import Game
-    from settings import BOT_GRACE_T
+    from settings import SPECTATE_T
 
     class _Fx:
         def burst(self, *a, **k): pass
@@ -1237,40 +1246,109 @@ def test_grace():
     g = Game()
     g.state = "fight"
     g._reset_round()
-    check("в начале раунда грейс = %g с" % BOT_GRACE_T,
-          g.grace_t == BOT_GRACE_T)
-    check("боты неуязвимы, игрок — нет",
-          all(b.immune for b in g.bots) and not g.player.immune)
+    check("неуязвимости в начале раунда НЕТ",
+          g.spectate_t == 0.0 and not any(b.immune for b in g.bots)
+          and not g.player.immune)
     bot = g.bot_tank
     hp0 = bot.hp
     bot.take_damage(30, fx, snd)
-    check("урон в грейс НЕ проходит", bot.hp == hp0)
+    check("бота можно бить с первой секунды", bot.hp < hp0,
+          "(hp %d -> %d)" % (hp0, bot.hp))
     bot.apply_element("fire", 1, 0, g.arena, fx, snd)
     for _ in range(30):
         bot._burn_step(1 / 60.0, fx, snd)
-    check("поджог неуязвимого не тикает", bot.hp == hp0)
-    # кнопка «УБИТЬ СРАЗУ» рисуется и работает даже в грейс
-    g.draw()
-    zone = [r for r, kd, d in g._click_zones if kd == "kill_all"]
-    check("кнопка «УБИТЬ СРАЗУ» видна во время грейса", bool(zone))
-    g._kill_all_foes()
-    check("«УБИТЬ СРАЗУ» убивает неуязвимых ботов",
-          not any(b.alive for b in g.bots) and g.grace_t == 0)
-    g.update(1 / 60.0)
-    check("после «УБИТЬ СРАЗУ» раунд завершён в пользу игрока",
-          g.state == "round_end" and g.winner == 0 and g.score[0] == 1)
+    check("поджог тикает сразу (некого щадить)", bot.hp < hp0)
 
-    # грейс истёк — урон снова проходит
+    # --- 1вс1: игрок умер — бот берёт раунд СРАЗУ, без всяких ожиданий
+    g1 = Game()
+    g1.mode = 2
+    g1._reset_round()
+    g1.state = "fight"
+    g1._fake_keys = FakeKeys(())
+    g1.player.alive = False
+    g1.player._die(fx, snd)
+    g1.update(1 / 60.0)
+    check("1вс1: бот-одиночка берёт раунд сразу после смерти игрока",
+          g1.state == "round_end" and g1.winner == 1 and g1.score[1] == 1)
+
+    # --- FFA на 3: игрок умер при двух живых ботах — стартует окно 70 с
     g2 = Game()
-    g2.state = "fight"
+    g2.mode = 3
     g2._reset_round()
+    g2.state = "fight"
     g2._fake_keys = FakeKeys(())
-    g2.grace_t = 0.016
-    g2.update(1 / 60.0)      # тик грейса: теперь боты уязвимы
-    check("после грейса боты уязвимы", not any(b.immune for b in g2.foes))
-    hp1 = g2.bot_tank.hp
-    g2.bot_tank.take_damage(30, fx, snd)
-    check("после грейса урон проходит", g2.bot_tank.hp < hp1)
+    g2.player.alive = False
+    g2.player._die(fx, snd)
+    g2.update(1 / 60.0)
+    check("после смерти игрока боты выясняют победителя %g с" % SPECTATE_T,
+          g2.state == "fight" and g2.spectate_t == SPECTATE_T)
+    # делаем ботов неубиваемыми, чтобы проверить именно ТАЙМАУТ окна,
+    # а не их случайную дуэль (флаг immune больше нигде не трогается)
+    for b in g2.bots:
+        b.immune = True
+    # окно рисует текст и кнопку «УБИТЬ СРАЗУ»
+    g2.draw()
+    check("кнопка «УБИТЬ СРАЗУ» видна во время выяснения",
+          bool([r for r, kd, d in g2._click_zones if kd == "kill_all"]))
+    # 70 секунд никто не победил — ВСЕ боты умирают, раунд ничья
+    for _ in range(int(SPECTATE_T * 60) + 2):
+        g2.update(1 / 60.0)
+        if g2.state == "round_end":
+            break
+    check("время вышло — боты мертвы, раунд ничья",
+          g2.state == "round_end" and g2.winner == -1
+          and not any(b.alive for b in g2.bots))
+
+    # --- FFA: один бот победил другого ДО конца окна — победа уйдёт ему
+    g3 = Game()
+    g3.mode = 3
+    g3._reset_round()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.player.alive = False
+    g3.player._die(fx, snd)
+    g3.update(1 / 60.0)               # окно запустилось
+    g3.bots[1].alive = False          # первый бот «победил» второго
+    g3.update(1 / 60.0)
+    check("победа в выяснении уходит победившему боту",
+          g3.state == "round_end" and g3.winner == 1 and g3.score[1] == 1)
+
+    # --- кнопка «УБИТЬ СРАЗУ» во время окна: боты мертвы сразу, ничья
+    g4 = Game()
+    g4.mode = 4
+    g4._reset_round()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.player.alive = False
+    g4.player._die(fx, snd)
+    g4.update(1 / 60.0)
+    check("в 1x1x1x1 окно тоже запустилось", g4.spectate_t == SPECTATE_T)
+    g4._kill_all_foes()
+    g4.update(1 / 60.0)
+    check("«УБИТЬ СРАЗУ» — боты мертвы, раунд ничья",
+          g4.state == "round_end" and g4.winner == -1
+          and not any(b.alive for b in g4.bots))
+
+    # --- команда: окно НЕ запускается (союзники доигрывают за нас)
+    g5 = Game()
+    g5.mode = 6
+    g5._reset_round()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5.player.alive = False
+    g5.player._die(fx, snd)
+    g5.update(1 / 60.0)
+    check("в командах после смерти игрока окно не стартует",
+          g5.state == "fight" and g5.spectate_t == 0.0)
+
+    # --- игрок жив: окно не стартует
+    g6 = Game()
+    g6.mode = 3
+    g6._reset_round()
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    g6.update(1 / 60.0)
+    check("пока игрок жив — никакого окна", g6.spectate_t == 0.0)
 
 
 # ---------- 3r. КОНСОЛЬ РАЗРАБОТЧИКА (Ё): выдача всего, подсказки ----------
@@ -1287,6 +1365,22 @@ def test_console():
     # подсказки: пишешь «Ту» — консоль подсказывает «Турбо»
     g.con_input = "Ту"
     check("подсказка «Ту» -> «Турбо»", "турбо" in g._con_hints())
+
+    # v2.5: Ё на РУССКОЙ раскладке Windows не даёт K_BACKQUOTE —
+    # консоль должна открываться по сканкоду клавиши и по символу
+    ev_ru = pygame.event.Event(pygame.KEYDOWN, key=1073741824 + 0x0451,
+                               scancode=pygame.KSCAN_GRAVE, unicode="ё")
+    g.con_open = False
+    g.on_keydown(ev_ru)
+    check("Ё с русской раскладки (санкод) открывает консоль", g.con_open)
+    g.on_keydown(ev_ru)
+    check("повторное Ё закрывает консоль", not g.con_open)
+    ev_lat = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_BACKQUOTE,
+                                scancode=pygame.KSCAN_GRAVE, unicode="`")
+    g.on_keydown(ev_lat)
+    check("Ё с латинской раскладки по-прежнему работает", g.con_open)
+    g.con_open = False
+
     g.con_input = "Во"
     check("подсказка «Во» показывает воду и воздух",
           "вода" in g._con_hints() and "воздух" in g._con_hints())
@@ -1327,10 +1421,10 @@ def test_console():
     check("«хп 50 Игрок» выставляет прочность", p.hp == 50)
     g._con_execute("счёт 500")
     check("«счёт 500» накидывает очков", g.points == 500)
-    g._con_execute("грейс 10")
-    check("«грейс 10» ставит таймер", g.grace_t == 10)
-    g._con_execute("грейс 0")
-    check("«грейс 0» снимает неуязвимость", not any(b.immune for b in g.foes))
+    g._con_execute("ждать 70")
+    check("«ждать 70» ставит окно выяснения", g.spectate_t == 70)
+    g._con_execute("ждать 0")
+    check("«ждать 0» снимает окно", g.spectate_t == 0)
 
     # бонус БЕЗ цели — режим установки кликом (веер на карту)
     g._con_open = True
@@ -1379,8 +1473,8 @@ def test_team_modes():
           [g.tank_team[t] for t in g.tanks] == [0, 0, 1, 1])
     check("союзник — «СОЮЗНИК» с бирюзовым цветом",
           g.bots[0].display_name == "СОЮЗНИК")
-    check("союзник НЕ прячется за грейсом (неуязвимы только враги)",
-          not g.bots[0].immune and all(b.immune for b in g.foes))
+    check("неуязвимости нет ни у кого (v2.5)",
+          not g.bots[0].immune and not any(b.immune for b in g.foes))
     check("врагов двое, счёт командный [0, 0]",
           len(g.foes) == 2 and g.score == [0, 0])
     g.draw()   # HUD командного режима рисуется без ошибок
@@ -1428,8 +1522,8 @@ def test_team_modes():
           abs(boss.radius - 24 * BOSS_SCALE) < 0.01 and boss.scale == BOSS_SCALE)
     check("БОСС вчетверо крепче (~800 HP)", boss.max_hp >= 780,
           "(hp %d)" % boss.max_hp)
-    check("БОСС неуязвим в грейс, союзник — нет",
-          boss.immune and not g3.bots[0].immune)
+    check("БОСС и союзник без неуязвимости (v2.5)",
+          not boss.immune and not g3.bots[0].immune)
     g3.draw()
     # убили босса — раунд за командой игрока
     g3.state = "fight"
@@ -1460,20 +1554,30 @@ def test_team_modes():
           g5.state == "match_end" and g5.stats["losses"] >= 1)
 
 
-# ---------- 3t. БОЛЬШАЯ КАРТА v2.4: мир 2240x1260 (x3 старой), камера, миникарта ----------
+# ---------- 3t. КАРТЫ v2.5: обычные 2752x1548, командные 3888x2187 ----------
 def test_bigmap():
     import math
     from game import Game
-    from settings import ARENA_W, ARENA_H, SCREEN_W, SCREEN_H
+    from settings import (ARENA_W, ARENA_H, SCREEN_W, SCREEN_H,
+                          TEAM_ARENA_W, TEAM_ARENA_H)
 
-    check("мир x3 старой площади: 2240x1260 при окне 1280x720",
-          ARENA_W == 2240 and ARENA_H == 1260
-          and ARENA_W > SCREEN_W and ARENA_H > SCREEN_H)
+    check("обычная карта x1.5 площади к v2.4: 2752x1548",
+          ARENA_W == 2752 and ARENA_H == 1548
+          and abs(ARENA_W * ARENA_H / (2240.0 * 1260) - 1.5) < 0.01)
+    check("командная карта x3 площади к v2.4: 3888x2187",
+          TEAM_ARENA_W == 3888 and TEAM_ARENA_H == 2187
+          and abs(TEAM_ARENA_W * TEAM_ARENA_H / (2240.0 * 1260) - 3.0) < 0.02)
     a = __import__("arena").Arena(0)
+    at = __import__("arena").Arena(0, team=True)
+    check("арена несёт свой размер: обычная и командная",
+          (a.w, a.h) == (ARENA_W, ARENA_H)
+          and (at.w, at.h) == (TEAM_ARENA_W, TEAM_ARENA_H)
+          and at.wall_t > a.wall_t)
     check("внешние стены большого мира блокируют",
           a.point_blocked(10, 540) and a.point_blocked(960, 10))
     check("свободная точка на большом мире ищется",
-          not a.circle_collides(*a.free_spot(), 26))
+          not a.circle_collides(*a.free_spot(), 26)
+          and not at.circle_collides(*at.free_spot(), 26))
 
     g = Game()
     g.state = "fight"
@@ -1485,16 +1589,29 @@ def test_bigmap():
     g._cam_snap()
     check("камера прижата к левому верхнему углу",
           g.cam[0] == 0 and g.cam[1] == 0)
-    g.player.x, g.player.y = 1900, 1070
+    g.player.x, g.player.y = ARENA_W - 10, ARENA_H - 10
     g._cam_snap()
     check("камера прижата к правому нижнему углу",
           g.cam[0] == ARENA_W - SCREEN_W and g.cam[1] == ARENA_H - SCREEN_H)
+    # командный режим — командная карта и кламп камеры по ней
+    gt = Game()
+    gt.mode = 8
+    gt._reset_round()
+    gt.state = "fight"
+    gt._fake_keys = FakeKeys(())
+    check("3на3 выезжает на командной карте 3888x2187",
+          (gt.arena.w, gt.arena.h) == (TEAM_ARENA_W, TEAM_ARENA_H))
+    gt.player.x, gt.player.y = TEAM_ARENA_W - 10, TEAM_ARENA_H - 10
+    gt._cam_snap()
+    check("камера на командной карте прижата к её правому нижнему углу",
+          gt.cam[0] == TEAM_ARENA_W - SCREEN_W
+          and gt.cam[1] == TEAM_ARENA_H - SCREEN_H)
     g._reset_round()
     g.draw()
     check("бой на большой карте рисуется (камера + миникарта)", True)
     # спавны всех режимов свободны и далеко друг от друга
     ok = True
-    for m in (2, 3, 4, 5, 6, 7, 8, 9):
+    for m in (2, 3, 4, 5, 6, 7, 8, 9, 10):
         for _ in range(3):
             gm = Game()
             gm.mode = m
@@ -1507,7 +1624,7 @@ def test_bigmap():
                        for b2 in gm.tanks[i + 1:])
             if dist < 240:
                 ok = False
-    check("спавны всех 8 режимов свободны и не ближе 240 px", ok)
+    check("спавны всех 9 режимов свободны и не ближе 240 px", ok)
 
 
 # ---------- 3u. ФИКС «ПУЛЕМЁТ + ЛЁД» v2.3: лёд больше не перезаливается ----------
@@ -1586,17 +1703,16 @@ def test_big_teams():
     check("вражеские боты получили имена БОТ..БОТ-3",
           [b.display_name for b in g.bots[2:]] == ["БОТ", "БОТ-2", "БОТ-3"])
     check("врагов трое, счёт командный", len(g.foes) == 3 and g.score == [0, 0])
-    check("грейс на врагах, союзники свободны",
-          all(b.immune for b in g.foes)
-          and not any(b.immune for b in g.bots[:2]))
+    check("неуязвимости нет — бить можно всех с первой секунды",
+          not any(b.immune for b in g.tanks))
     g.draw()   # HUD на 6 танков рисуется без ошибок
 
     # шеренги на старте: наша снизу, чужая сверху (арена без баррикад)
     g.arena = Arena(0)
     pts = g._spawn_points(6)
     check("шеренги 3на3: наша снизу, чужая сверху",
-          all(p[1] > ARENA_H / 2 for p in pts[:3])
-          and all(p[1] < ARENA_H / 2 for p in pts[3:]))
+          all(p[1] > g.arena.h / 2 for p in pts[:3])
+          and all(p[1] < g.arena.h / 2 for p in pts[3:]))
     dist = min(math.hypot(p1[0] - p2[0], p1[1] - p2[1])
                for i, p1 in enumerate(pts) for p2 in pts[i + 1:])
     check("точки шеренг разнесены не меньше 240 px", dist > 240,
@@ -1633,8 +1749,8 @@ def test_big_teams():
     g2.arena = Arena(0)
     pts = g2._spawn_points(8)
     check("шеренги 4на4: 4 снизу и 4 сверху",
-          all(p[1] > ARENA_H / 2 for p in pts[:4])
-          and all(p[1] < ARENA_H / 2 for p in pts[4:]))
+          all(p[1] > g2.arena.h / 2 for p in pts[:4])
+          and all(p[1] < g2.arena.h / 2 for p in pts[4:]))
 
     # снаряд ПРОЛЕТАЕТ сквозь союзника в толпе из 8 танков
     p, a1 = g2.player, g2.bots[0]
@@ -1665,6 +1781,40 @@ def test_big_teams():
     g3.update(1 / 60.0)
     check("команда игрока вырезана -> раунд за командой ботов",
           g3.state == "round_end" and g3.winner == 1 and g3.score[1] == 1)
+
+    # ----- 5 НА 5 (v2.5): вся рота — 10 танков -----
+    g5 = Game()
+    g5.mode = 10
+    g5._reset_round()
+    check("режим «5 на 5»: 10 танков", len(g5.tanks) == 10)
+    check("команды: игрок+4 союзника против пяти ботов",
+          [g5.tank_team[t] for t in g5.tanks]
+          == [0, 0, 0, 0, 0, 1, 1, 1, 1, 1])
+    check("четвёртый союзник зовётся СОЮЗНИК-4",
+          g5.bots[3].display_name == "СОЮЗНИК-4")
+    check("врагов пятеро с именами БОТ..БОТ-5",
+          [b.display_name for b in g5.bots[4:]]
+          == ["БОТ", "БОТ-2", "БОТ-3", "БОТ-4", "БОТ-5"])
+    check("счёт командный, врагов пять", len(g5.foes) == 5
+          and g5.score == [0, 0] and g5.team_mode)
+    g5.draw()   # HUD на 10 танков рисуется без ошибок
+    g5.arena = Arena(0)
+    pts5 = g5._spawn_points(10)
+    check("шеренги 5на5: 5 снизу и 5 сверху",
+          all(p[1] > g5.arena.h / 2 for p in pts5[:5])
+          and all(p[1] < g5.arena.h / 2 for p in pts5[5:]))
+    dist5 = min(math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+                for i, p1 in enumerate(pts5) for p2 in pts5[i + 1:])
+    check("точки 5на5 разнесены не меньше 240 px", dist5 > 240,
+          "(min %.0f)" % dist5)
+    # вырезали чужих — раунд за нашей ротой
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    for b in g5.foes:
+        b.alive = False
+    g5.update(1 / 60.0)
+    check("враги 5на5 мертвы -> раунд за вашей командой",
+          g5.state == "round_end" and g5.winner == 0 and g5.score[0] == 1)
 
     # консоль в большом бою: «Бот» — чужак, «Союзник2» — второй союзник
     g4 = Game()
@@ -1700,7 +1850,7 @@ if __name__ == "__main__":
     test_stats_persist()
     test_ffa()
     test_map_shuffle()
-    test_grace()
+    test_spectate()
     test_console()
     test_team_modes()
     test_ice_immunity()

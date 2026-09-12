@@ -32,10 +32,7 @@ def play_match(mode, max_sec=240):
     g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))
     assert g.state == "intro", g.state
     g._fake_keys = FakeKeys()
-    # КОНСОЛЬ РАЗРАБОТЧИКА (v2.2): снимаем 45-секундную неуязвимость ботов,
-    # чтобы стресс-матч шёл в темпе, и заодно проверяем её в реальном бою
-    g._con_execute("грейс 0")
-    assert g.grace_t == 0
+    # v2.5: неуязвимости больше нет — ничего снимать не нужно
     frames = 0
     limit = int(max_sec * 60)
     while g.state != "match_end" and frames < limit:
@@ -61,12 +58,14 @@ def play_match(mode, max_sec=240):
 
 if __name__ == "__main__":
     pygame.init()
-    # мир стал больше (2240x1260) — раунды длиннее, даём с запасом
+    # v2.5: карты ещё крупнее + после смерти игрока боты 70 с выясняют
+    # победителя (зоны-подгонщика больше нет) — раунды длиннее, лимиты выше
     for m in (3, 4, 5):
-        play_match(m, max_sec=420)
-    # командные режимы v2.2/v2.3: 2 на 2, 3 на 3, 4 на 4 и 2 против БОССА
-    play_match(6, max_sec=480)
-    play_match(8, max_sec=480)
-    play_match(9, max_sec=480)
-    play_match(7, max_sec=540)
+        play_match(m, max_sec=1800)
+    # командные режимы на больших картах: 2на2, 3на3, 4на4, 5на5 и 2 против БОССА
+    play_match(6, max_sec=900)
+    play_match(8, max_sec=900)
+    play_match(9, max_sec=900)
+    play_match(10, max_sec=1200)
+    play_match(7, max_sec=1200)
     print("СТРЕСС-ТЕСТ ПРОЙДЕН")
