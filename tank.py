@@ -16,7 +16,7 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       FIRE_TIME, FIRE_DPS,
                       EARTH_TIME, EARTH_MULT, SHOCK_TIME, SHOCK_MULT,
                       AIR_PUSH, WATER_CLEAR_DMG, WATER_SLOW_TIME,
-                      ICE_TIME, POISON_TIME, POISON_DPS,
+                      ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS,
                       PU_MINE_CARRY, BARRIER_MAX)
 from bullet import Bullet, ELEMENT_COLORS
 
@@ -92,6 +92,7 @@ class Tank:
         self.triple = 0
         self.rapid_t = 0.0        # скорострел
         self.frozen_t = 0.0       # ЭМИ-заморозка / лёд
+        self.ice_immune_t = 0.0   # v2.3: после оттаивания лёд не берёт (фикс пулемёт+лёд)
         self.laser_charges = 0    # заряды лазера
         # негативные эффекты от стихий врага (свою стихию мы зарядили в ангаре)
         self.burn_t = 0.0         # поджог: тикает уроном, броня не спасает
@@ -332,8 +333,19 @@ class Tank:
             self.shock_t = SHOCK_TIME
             effects.float_text(self.x, self.y - 50, "ТОК!", (255, 240, 110))
         elif elem == "ice":
-            self.frozen_t = max(self.frozen_t, ICE_TIME)
-            effects.float_text(self.x, self.y - 50, "ЛЁД!", (120, 255, 255))
+            if self.ice_immune_t > 0:
+                # v2.3: только что оттаял — очередь ледяных снарядов
+                # (пулемёт + лёд) больше не скует повторно
+                effects.float_text(self.x, self.y - 50, "НЕ СКУЕТСЯ",
+                                   (150, 215, 235))
+            elif self.frozen_t > 0:
+                # уже заморожен: новые попадания лёд НЕ продлевают —
+                # иначе пулемётная очередь держала в вечном льду
+                effects.float_text(self.x, self.y - 50, "УЖЕ В ЛЬДУ",
+                                   (150, 215, 235))
+            else:
+                self.frozen_t = ICE_TIME
+                effects.float_text(self.x, self.y - 50, "ЛЁД!", (120, 255, 255))
         elif elem == "poison":
             self.poison_t = POISON_TIME
             self._poison_tick = 0.0
@@ -429,7 +441,12 @@ class Tank:
         self.shield_t = max(0.0, self.shield_t - dt)
         self.boost_t = max(0.0, self.boost_t - dt)
         self.rapid_t = max(0.0, self.rapid_t - dt)
+        was_frozen = self.frozen_t > 0
         self.frozen_t = max(0.0, self.frozen_t - dt)
+        if was_frozen and self.frozen_t <= 0.0:
+            # только что оттаял: окно иммунитета к льду (v2.3)
+            self.ice_immune_t = ICE_IMMUNE_T
+        self.ice_immune_t = max(0.0, self.ice_immune_t - dt)
         self.mud_t = max(0.0, self.mud_t - dt)
         self.shock_t = max(0.0, self.shock_t - dt)
         self.burn_t = max(0.0, self.burn_t - dt)
@@ -448,6 +465,9 @@ class Tank:
         if self.frozen_t > 0:
             pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 9, 2)
             pygame.draw.circle(surf, (160, 240, 255), (cx, cy), self.radius + 13, 1)
+        elif self.ice_immune_t > 0:
+            # тонкая тусклая окружность: оттаял, повторный лёд не берёт
+            pygame.draw.circle(surf, (110, 175, 195), (cx, cy), self.radius + 9, 1)
         if self.burn_t > 0:
             pygame.draw.circle(surf, (255, 110, 0), (cx, cy), self.radius + 9, 2)
         if self.mud_t > 0:

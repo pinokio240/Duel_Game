@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """Обновляет screenshot.png боя, ffa.png (режим на 5), boss.png (БОСС),
-console.png (консоль разработчика) и garage.png."""
+team44.png (4 на 4), console.png (консоль разработчика) и garage.png."""
 import os
 import sys
 
@@ -72,6 +72,27 @@ g.draw()
 out = "/home/z/my-project/tool-results/boss.png"
 pygame.image.save(g.screen, out)
 print("boss.png:", out)
+
+# ----- кадр режима «4 НА 4» (v2.3): две шеренги по четыре танка -----
+g.mode = 9
+g.score = [0, 0]
+g.bot_builds = [("light", "compact", "rapidgun", "sprinter", "electric"),
+                ("sport", "light", "shotgun", "none", "earth"),
+                ("heavy", "armored", "howitzer", "turtle", "poison"),
+                ("medium", "medium", "twin", "gunner", "water"),
+                ("light", "light", "long", "none", "none"),
+                ("heavy", "armored", "standard", "turtle", "fire"),
+                ("sport", "compact", "shotgun", "sprinter", "vamp")]
+g._reset_round()
+g.grace_t = 12.0            # в кадре виден грейс и кнопка внизу
+g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+for _ in range(240):
+    g.update(1 / 60.0)
+g._cam_snap()
+g.draw()
+out = "/home/z/my-project/tool-results/team44.png"
+pygame.image.save(g.screen, out)
+print("team44.png:", out)
 
 # ----- кадр КОНСОЛИ РАЗРАБОТЧИКА: пишем «Ту», внизу подсказка «Турбо» -----
 g.state = "fight"

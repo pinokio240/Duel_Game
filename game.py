@@ -24,7 +24,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
                       SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
-                      ICE_TIME, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
+                      ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
                       SCORE_PICKUP,
                       FFA_ZONE_T, SUDDEN_DEATH_DPS,
@@ -289,21 +289,38 @@ class Game:
     # ================= создание боя =================
     def _tank_count(self):
         """Сколько танков выезжает: в FFA номер режима = число танков,
-        в командах 6 = «2 на 2» (4 танка), 7 = «2 против босса» (3 танка)."""
-        return {6: 4, 7: 3}.get(self.mode, self.mode)
+        в командах 6 = «2 на 2» (4 танка), 7 = «2 против босса» (3 танка),
+        8 = «3 на 3» (6 танков), 9 = «4 на 4» (8 танков)."""
+        return {6: 4, 7: 3, 8: 6, 9: 8}.get(self.mode, self.mode)
 
     def _spawn_points(self, n):
-        """Точки появления для n танков: 1вс1 — классика по краям,
-        остальные — кольцо вокруг центра большого мира (v2.2: r=420).
-        Точки без стен и подальше друг от друга."""
+        """Точки появления для n танков: 1вс1 — классика по краям, FFA —
+        кольцо вокруг центра большого мира, КОМАНДЫ (v2.3) — двумя
+        шеренгами: наша снизу, чужая сверху. Точки без стен и
+        подальше друг от друга."""
         cx, cy = ARENA_W / 2, ARENA_H / 2
         if n == 2:
             ring = [(cx - 520, cy), (cx + 520, cy)]
+        elif self.mode >= 6:
+            # командные режимы: наша команда — нижняя шеренга,
+            # чужая — верхняя (сразу видно, кто с кем)
+            if self.mode == 7:          # 2 против босса: нас двое, он один
+                our, foes_n = 2, 1
+            else:
+                our = n // 2            # 2на2 → 2, 3на3 → 3, 4на4 → 4
+                foes_n = our
+            our_pts = [(cx, cy + 380)]
+            for j in range(our - 1):    # союзники веером вокруг игрока
+                off = (j // 2 + 1) * 300 * (1 if j % 2 == 0 else -1)
+                our_pts.append((cx + off, cy + 380))
+            foe_pts = [(cx + (j - (foes_n - 1) / 2.0) * 300, cy - 380)
+                       for j in range(foes_n)]
+            ring = our_pts + foe_pts
         else:
             ring = []
             for i in range(n):
                 a = math.radians(90 + i * 360.0 / n)   # игрок — снизу
-                ring.append((cx + math.cos(a) * 420, cy + math.sin(a) * 420))
+                ring.append((cx + math.cos(a) * 380, cy + math.sin(a) * 380))
         out = []
         for x, y in ring:
             out.append(self._free_spawn(x, y, out))
@@ -352,16 +369,22 @@ class Game:
         self.tanks = [self.player]
         self.bots = []
         self.ais = []
-        for i in range(self._tank_count() - 1):
+        n_tanks = self._tank_count()
+        # сколько союзников впереди: 2 против босса — один,
+        # 2на2/3на3/4на4 — половина минус игрок
+        n_allies = (1 if self.mode == 7 else n_tanks // 2 - 1) \
+            if self.team_mode else 0
+        for i in range(n_tanks - 1):
             b = self.bot_builds[i % len(self.bot_builds)] if self.bot_builds \
                 else ("medium", "medium", "standard", "none", "none")
             px, py = pts[i + 1]
             ang = math.degrees(math.atan2(cy - py, cx - px))
-            ally = self.team_mode and i == 0          # союзник — нашей команды
-            boss = self.mode == 7 and i == 1          # огромный БОСС
+            ally = i < n_allies                # союзники — первые в списке
+            boss = self.mode == 7 and i == 1   # огромный БОСС
             if ally:
+                aname = "СОЮЗНИК" if i == 0 else "СОЮЗНИК-%d" % (i + 1)
                 t = Tank(px, py, ang, b[0], b[1], ALLY_COLOR,
-                         b[2], b[3], b[4], display_name="СОЮЗНИК")
+                         b[2], b[3], b[4], display_name=aname)
                 t.team = 0
             elif boss:
                 mods = dict(BOSS_MODS)
@@ -376,11 +399,18 @@ class Game:
                          display_name="БОСС")
                 t.team = 1
             else:
-                color = (BOT_COLORS[0] if i == 1 else BOT_COLORS[1]) \
-                    if self.team_mode else BOT_COLORS[i % len(BOT_COLORS)]
-                t = Tank(px, py, ang, b[0], b[1], color,
-                         b[2], b[3], b[4], extra_mods=emods or None)
-                t.team = 1 if self.team_mode else i + 1
+                if self.team_mode:
+                    j = i - n_allies           # номер вражеского бота в шеренге
+                    color = BOT_COLORS[j % len(BOT_COLORS)]
+                    t = Tank(px, py, ang, b[0], b[1], color,
+                             b[2], b[3], b[4], extra_mods=emods or None,
+                             display_name=BOT_NAMES[j])
+                    t.team = 1
+                else:
+                    color = BOT_COLORS[i % len(BOT_COLORS)]
+                    t = Tank(px, py, ang, b[0], b[1], color,
+                             b[2], b[3], b[4], extra_mods=emods or None)
+                    t.team = i + 1
             self.tank_team[t] = t.team
             self.bots.append(t)
             self.ais.append(BotAI(t, self.difficulty))
@@ -522,6 +552,12 @@ class Game:
             elif k == pygame.K_F7:
                 self.mode = 7
                 self.sounds.play("ric")
+            elif k == pygame.K_F8:
+                self.mode = 8
+                self.sounds.play("ric")
+            elif k == pygame.K_F9:
+                self.mode = 9
+                self.sounds.play("ric")
         elif self.state == "select":
             if k in (pygame.K_a, pygame.K_LEFT):
                 self.sel_ch = (self.sel_ch - 1) % len(CH_KEYS)
@@ -601,7 +637,7 @@ class Game:
                 self.state = "fight"
             elif k == pygame.K_a:
                 # выход в ангар: матч сбрасывается — сборка-то меняется
-                self.score = [0] * self.mode
+                self.score = [0] * (2 if self.mode >= 6 else self.mode)
                 self.round = 1
                 self.state = "select"
             elif k == pygame.K_m:
@@ -610,7 +646,7 @@ class Game:
             if k == pygame.K_RETURN:
                 self.start_match()
             elif k == pygame.K_a:
-                self.score = [0] * self.mode
+                self.score = [0] * (2 if self.mode >= 6 else self.mode)
                 self.round = 1
                 self.state = "select"   # в ангар за новой сборкой
             elif k == pygame.K_t:
@@ -691,7 +727,7 @@ class Game:
         elif kind == "p_resume":
             self.state = "fight"
         elif kind == "to_garage":                 # из паузы и из конца матча
-            self.score = [0] * self.mode
+            self.score = [0] * (2 if self.mode >= 6 else self.mode)
             self.round = 1
             self.state = "select"
             self.sounds.play("ric")
@@ -1230,8 +1266,8 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "РЕЖИМЫ: 1вс1 · 1вс1вс1 · 1вс1вс1вс1 · 1вс1вс1вс1вс1 · 2 НА 2 · 2 ПРОТИВ БОССА (F2–F7).",
-            "Карты стали БОЛЬШЕ (камера едет за вами, миникарта в углу), 16 арен, рандом каждый раунд.",
+            "РЕЖИМЫ: 1вс1 · FFA до 5 · 2НА2 · 3НА3 · 4НА4 · 2 ПРОТИВ БОССА (F2–F9).",
+            "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
             "Ботов нельзя убить первые 45 сек — есть кнопка «УБИТЬ СРАЗУ». Консоль читера — Ё (`).",
         ]
         y = 310
@@ -1255,23 +1291,30 @@ class Game:
                              2, border_radius=7)
             self.screen.blit(img, r)
             self._click_zones.append((r.inflate(14, 12), "menu_diff", dkey))
-        # РЕЖИМ БОЯ (v2.1 + команды v2.2): 1вс1…5 танков, 2на2, 2 против босса
+        # РЕЖИМ БОЯ (v2.1+): FFA, 2на2, 3на3, 4на4, 2 против босса.
+        # v2.3: кнопок стало 8 — раскладка динамическая, бегим вправо
         y += 42
-        img = get_font(20, bold=False).render("Режим боя (клик или F2–F7):",
+        img = get_font(20, bold=False).render("Режим боя (клик или F2–F9):",
                                               True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         mode_lbl = {2: "1×1", 3: "1×1×1", 4: "1×1×1×1", 5: "1×1×1×1×1",
-                    6: "2×2", 7: "2×БОСС"}
-        for i, m in enumerate((2, 3, 4, 5, 6, 7)):
-            color = COL_GOLD if self.mode == m else (70, 80, 120)
-            img = get_font(20).render(mode_lbl[m], True, color)
-            r = img.get_rect(midleft=(SCREEN_W / 2 - 100 + i * 108, y))
+                    6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4"}
+        gap = 26
+        fmode = get_font(17)
+        btns = [(fmode.render(mode_lbl[m], True,
+                              COL_GOLD if self.mode == m else (70, 80, 120)), m)
+                for m in (2, 3, 4, 5, 6, 7, 8, 9)]
+        total = sum(im.get_width() for im, _ in btns) + gap * (len(btns) - 1)
+        bx = SCREEN_W / 2 - 100 + (724 - total) / 2.0   # полоса 540..1264
+        for im, m in btns:
+            r = im.get_rect(midleft=(bx, y))   # левый край ровно в bx
             hov = r.inflate(14, 12).collidepoint(self._mouse)
             pygame.draw.rect(self.screen, COL_P1 if hov else (40, 50, 90),
                              r.inflate(14 if hov else 10, 12 if hov else 8),
                              2, border_radius=7)
-            self.screen.blit(img, r)
+            self.screen.blit(im, r)
             self._click_zones.append((r.inflate(14, 12), "menu_mode", m))
+            bx += im.get_width() + gap
         # статистика матчей и рекорд
         y += 42
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
@@ -1288,7 +1331,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.2", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.3", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1352,7 +1395,9 @@ class Game:
                    "earth": "ВЯЗКОСТЬ: враг еле ползёт 2.5 с",
                    "electric": "ТОК: мотор врага вполсилы 1.3 с",
                    "air": "ПОРЫВ: отшвыривает врага на 90 px",
-                   "ice": "ЛЁД: вмораживает врага на %.1f с" % ICE_TIME,
+                   "ice": "ЛЁД: вмораживает врага на %.1f с (повторно — не сразу: "
+                          "после оттаивания %.1f с лёд не берёт)"
+                          % (ICE_TIME, ICE_IMMUNE_T),
                    "poison": "ЯД: %.0f с по %.0f урона/с — броня не спасает"
                              % (POISON_TIME, POISON_DPS),
                    "vamp": "ЛЕЧИТ вам %d%% урона каждого попадания"
@@ -1842,6 +1887,8 @@ class Game:
             sfx.append("ЛАЗЕР x%d" % t.laser_charges)
         if t.frozen_t > 0:
             sfx.append("ЗАМОРОЗКА!")
+        elif t.ice_immune_t > 0:
+            sfx.append("ОТТАИЛ")      # v2.3: лёд сейчас не берёт
         if t.burn_t > 0:
             sfx.append("ПОЖАР!")
         if t.poison_t > 0:
@@ -1925,13 +1972,16 @@ class Game:
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
                                                        SCREEN_H - 88)))
         # ГРЕЙС БОТОВ (v2.2): первые 45 секунд их нельзя убить,
-        # но есть кнопка «УБИТЬ СРАЗУ» — ждать не обязательно
+        # но есть кнопка «УБИТЬ СРАЗУ» — ждать не обязательно.
+        # v2.3: перенесено вниз — в 4на4 строки ботов справа
+        # доходят до середины экрана, наверху им не место
         if self.grace_t > 0:
             img = get_font(16).render(
                 "БОТЫ НЕУЯЗВИМЫ ЕЩЁ %d С" % int(self.grace_t + 0.99),
                 True, (190, 205, 255))
-            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 168)))
-            self._button(SCREEN_W / 2, 196, "УБИТЬ СРАЗУ", "kill_all",
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
+                                                       SCREEN_H - 140)))
+            self._button(SCREEN_W / 2, SCREEN_H - 112, "УБИТЬ СРАЗУ", "kill_all",
                          w=210, h=30, fs=15)
 
     def _bot_row(self, t, idx, y):
@@ -2039,7 +2089,7 @@ class Game:
         return reg
 
     _CON_TARGETS = ("игрок", "я", "бот", "бот1", "бот2", "бот3", "бот4",
-                    "союзник", "босс", "все", "всех")
+                    "союзник", "союзник2", "союзник3", "босс", "все", "всех")
 
     def _con_key(self, e):
         """Ввод в открытой консоли: текст (русский тоже), Enter, Tab, история."""
@@ -2107,7 +2157,9 @@ class Game:
 
     def _con_targets(self, toks):
         """Разобрать цель из слов: «Игрок», «Я», «Бот», «Бот2», «Союзник»,
-        «Босс», «Все» или число (номер танка, 1 = игрок)."""
+        «Союзник2», «Босс», «Все» или число (номер танка, 1 = игрок).
+        v2.3: «Бот/БотN» — это ЧУЖАКИ (в командах союзник ботом не считается)."""
+        allies = [b for b in self.bots if self.tank_team.get(b) == 0]
         tanks, rest = [], []
         for tok in toks:
             t = tok.strip(",.")
@@ -2115,17 +2167,21 @@ class Game:
                 if self.player:
                     tanks.append(self.player)
             elif t == "союзник":
-                tanks += [b for b in self.bots if self.tank_team.get(b) == 0]
+                tanks += allies
+            elif t.startswith("союзник") and t[-1].isdigit():
+                i = int(t[-1]) - 1
+                if 0 <= i < len(allies):
+                    tanks.append(allies[i])
             elif t in ("все", "всех"):
                 tanks += [tk for tk in self.tanks if tk is not self.player]
             elif t == "босс":
                 tanks += [b for b in self.bots if b.display_name == "БОСС"]
             elif t == "бот":
-                tanks += self.bots[:1]
+                tanks += self.foes[:1]
             elif t.startswith("бот") and t[-1].isdigit():
                 i = int(t[-1]) - 1
-                if 0 <= i < len(self.bots):
-                    tanks.append(self.bots[i])
+                if 0 <= i < len(self.foes):
+                    tanks.append(self.foes[i])
             elif t.isdigit():
                 i = int(t) - 1
                 if 0 <= i < len(self.tanks):
@@ -2211,7 +2267,8 @@ class Game:
                 "  грейс <сек> — таймер неуязвимости ботов (0 — выключить)",
                 "  счёт <N> — накинуть очков · сброс — перезапустить раунд",
                 "  список — все предметы · очистить — убрать этот текст",
-                "КОМУ: Игрок / Я / Бот / Бот2..4 / Союзник / Босс / Все / число (N танка)",
+                "КОМУ: Игрок / Я / Бот / Бот2..4 / Союзник(2,3) / Босс / Все / число",
+                "(в командах Бот — это только ЧУЖАКИ, союзники — Союзник/Союзник2/3)",
                 "Стихии СКЛАДЫВАЮТСЯ: «Огонь Игрок» потом «Вода 1 Игрок» — и то и то.",
                 "Пиши «Ту» — подскажет «Турбо» (Tab — дополнить). Ё — закрыть.")
             return

@@ -1334,8 +1334,15 @@ def test_console():
     g._con_execute("Веер")
     check("«Веер» без цели включает установку кликом",
           g.con_place == "triple" and not g.con_open)
-    # клик по карте в мировых координатах камеры — бонус появляется
-    wx, wy = p.x + 220, p.y
+    # клик по карте в мировых координатах камеры — бонус появляется.
+    # точка ищем СВОБОДНУЮ: карта случайная, часть позиции занята баррикадами
+    wx = wy = None
+    for dx in range(200, 560, 20):
+        cand = (p.x + dx, p.y)
+        if not g.arena.circle_collides(cand[0], cand[1], 26):
+            wx, wy = cand
+            break
+    check("рядом с игроком нашлась свободная точка под бонус", wx is not None)
     g._con_do_place((wx - g.cam[0], wy - g.cam[1]))
     check("клик ставит бонус на карту (потом можно подъехать и забрать)",
           len(g.powerups) == 1 and g.powerups[0].kind == "triple"
@@ -1484,7 +1491,7 @@ def test_bigmap():
     check("бой на большой карте рисуется (камера + миникарта)", True)
     # спавны всех режимов свободны и далеко друг от друга
     ok = True
-    for m in (2, 3, 4, 5, 6, 7):
+    for m in (2, 3, 4, 5, 6, 7, 8, 9):
         for _ in range(3):
             gm = Game()
             gm.mode = m
@@ -1497,7 +1504,179 @@ def test_bigmap():
                        for b2 in gm.tanks[i + 1:])
             if dist < 240:
                 ok = False
-    check("спавны всех 6 режимов свободны и не ближе 240 px", ok)
+    check("спавны всех 8 режимов свободны и не ближе 240 px", ok)
+
+
+# ---------- 3u. ФИКС «ПУЛЕМЁТ + ЛЁД» v2.3: лёд больше не перезаливается ----------
+def test_ice_immunity():
+    from settings import ICE_TIME, ICE_IMMUNE_T
+    from tank import Tank
+    from arena import Arena
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+    a = Arena(0)
+
+    t = Tank(600, 540, 0, "medium", "medium", COL)
+    t.apply_element("ice", 1, 0, a, fx, snd)
+    check("лёд вмораживает на %.1f с" % ICE_TIME, t.frozen_t == ICE_TIME)
+    # очередь по уже замороженному: заморозка НЕ продлевается
+    for _ in range(5):
+        t.apply_element("ice", 1, 0, a, fx, snd)
+    check("повторные ледяные попадания НЕ продлевают лёд",
+          t.frozen_t == ICE_TIME, "(frozen %.2f)" % t.frozen_t)
+    # оттаивание -> иммунитет на ICE_IMMUNE_T
+    for _ in range(int(ICE_TIME * 60) + 2):
+        t.update(1 / 60.0)
+    check("после оттаивания включается иммунитет к льду (%.1f с)" % ICE_IMMUNE_T,
+          t.frozen_t == 0.0 and abs(t.ice_immune_t - ICE_IMMUNE_T) < 0.1,
+          "(immune %.2f)" % t.ice_immune_t)
+    t.apply_element("ice", 1, 0, a, fx, snd)
+    check("в окне иммунитета лёд НЕ сковывает", t.frozen_t == 0.0)
+    # иммунитет кончился — лёд снова работает
+    for _ in range(int(ICE_IMMUNE_T * 60) + 3):
+        t.update(1 / 60.0)
+    t.apply_element("ice", 1, 0, a, fx, snd)
+    check("после окна иммунитета лёд снова вмораживает", t.frozen_t == ICE_TIME)
+
+    # ПУЛЕМЁТ + ЛЁД как в бою: полная обойма не держит врага в вечном льду
+    victim = Tank(660, 540, 0, "light", "light", (255, 46, 122))
+    victim.apply_element("ice", 1, 0, a, fx, snd)   # первая дробина скует
+    for _ in range(5):                              # остальные 5 дробин обоймы
+        victim.apply_element("ice", 1, 0, a, fx, snd)
+        victim.update(0.12)                         # темп очереди пулемёта
+    check("обойма пулемёта держит врага не дольше %.1f с льда" % ICE_TIME,
+          victim.frozen_t <= ICE_TIME,
+          "(frozen %.2f)" % victim.frozen_t)
+    while victim.frozen_t > 0:
+        victim.update(1 / 60.0)
+    check("оттаял — иммунитет включился, танк может ехать",
+          victim.ice_immune_t > 0 and victim.speed > 0)
+
+
+# ---------- 3v. РЕЖИМЫ 3 НА 3 И 4 НА 4 (v2.3) ----------
+def test_big_teams():
+    import math
+    from game import Game
+    from bullet import Bullet
+    from arena import Arena
+    from settings import ARENA_H
+
+    # ----- 3 НА 3 -----
+    g = Game()
+    g.mode = 8
+    g._reset_round()
+    check("режим «3 на 3»: 6 танков", len(g.tanks) == 6)
+    check("команды: игрок+2 союзника против трёх ботов",
+          [g.tank_team[t] for t in g.tanks] == [0, 0, 0, 1, 1, 1])
+    check("союзники зовутся СОЮЗНИК и СОЮЗНИК-2",
+          g.bots[0].display_name == "СОЮЗНИК"
+          and g.bots[1].display_name == "СОЮЗНИК-2")
+    check("вражеские боты получили имена БОТ..БОТ-3",
+          [b.display_name for b in g.bots[2:]] == ["БОТ", "БОТ-2", "БОТ-3"])
+    check("врагов трое, счёт командный", len(g.foes) == 3 and g.score == [0, 0])
+    check("грейс на врагах, союзники свободны",
+          all(b.immune for b in g.foes)
+          and not any(b.immune for b in g.bots[:2]))
+    g.draw()   # HUD на 6 танков рисуется без ошибок
+
+    # шеренги на старте: наша снизу, чужая сверху (арена без баррикад)
+    g.arena = Arena(0)
+    pts = g._spawn_points(6)
+    check("шеренги 3на3: наша снизу, чужая сверху",
+          all(p[1] > ARENA_H / 2 for p in pts[:3])
+          and all(p[1] < ARENA_H / 2 for p in pts[3:]))
+    dist = min(math.hypot(p1[0] - p2[0], p1[1] - p2[1])
+               for i, p1 in enumerate(pts) for p2 in pts[i + 1:])
+    check("точки шеренг разнесены не меньше 240 px", dist > 240,
+          "(min %.0f)" % dist)
+
+    # ИИ второго союзника целится только в чужую команду
+    ai = g.ais[1]
+    ai.target = ai._pick_target(g)
+    check("ИИ СОЮЗНИКА-2 воюет только с врагами",
+          ai.target is not None and g.tank_team[ai.target] == 1)
+
+    # вырезали врагов — раунд за нашей командой
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    for b in g.foes:
+        b.alive = False
+    g.update(1 / 60.0)
+    check("враги 3на3 мертвы -> раунд за вашей командой",
+          g.state == "round_end" and g.winner == 0 and g.score[0] == 1)
+
+    # ----- 4 НА 4 -----
+    g2 = Game()
+    g2.mode = 9
+    g2._reset_round()
+    check("режим «4 на 4»: 8 танков", len(g2.tanks) == 8)
+    check("команды: игрок+3 союзника против четырёх ботов",
+          [g2.tank_team[t] for t in g2.tanks] == [0, 0, 0, 0, 1, 1, 1, 1])
+    check("третий союзник зовётся СОЮЗНИК-3",
+          g2.bots[2].display_name == "СОЮЗНИК-3")
+    check("врагов четверо с именами БОТ..БОТ-4",
+          [b.display_name for b in g2.bots[3:]]
+          == ["БОТ", "БОТ-2", "БОТ-3", "БОТ-4"])
+    g2.draw()
+    g2.arena = Arena(0)
+    pts = g2._spawn_points(8)
+    check("шеренги 4на4: 4 снизу и 4 сверху",
+          all(p[1] > ARENA_H / 2 for p in pts[:4])
+          and all(p[1] < ARENA_H / 2 for p in pts[4:]))
+
+    # снаряд ПРОЛЕТАЕТ сквозь союзника в толпе из 8 танков
+    p, a1 = g2.player, g2.bots[0]
+    p.x, p.y = 500, 540
+    a1.x, a1.y = 760, 540
+    a1.hp = a1.max_hp
+    g2.arena = Arena(0)
+    hp0 = a1.hp
+    bl = Bullet(530, 540, 0, p, damage=30)
+    bl.age = 1.0
+    for _ in range(40):
+        bl.update(1 / 60.0, g2.arena.walls_only(), tuple(g2.tanks),
+                  g2.effects, g2.sounds)
+        if bl.dead:
+            break
+    check("в 4на4 снаряд союзника НЕ ранит союзника", a1.hp == hp0,
+          "(hp %d -> %d)" % (hp0, a1.hp))
+
+    # вся наша команда мертва -> раунд за ботами
+    g3 = Game()
+    g3.mode = 9
+    g3._reset_round()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    for tk in g3.tanks:
+        if g3.tank_team[tk] == 0:
+            tk.alive = False
+    g3.update(1 / 60.0)
+    check("команда игрока вырезана -> раунд за командой ботов",
+          g3.state == "round_end" and g3.winner == 1 and g3.score[1] == 1)
+
+    # консоль в большом бою: «Бот» — чужак, «Союзник2» — второй союзник
+    g4 = Game()
+    g4.mode = 8
+    g4._reset_round()
+    g4._con_execute("гаубица союзник2")
+    check("консоль: «Гаубица Союзник2» сменила дуло второму союзнику",
+          g4.bots[1].wpn_key == "howitzer")
+    g4._con_execute("закалить врага бот")
+    check("консоль: «Закалить врага Бот» бьёт по ЧУЖАКУ, не по союзнику",
+          g4.foes[0].mods.get("hp_mult", 1.0) != 1.0
+          and g4.bots[0].mods.get("hp_mult", 1.0) == 1.0)
+    g4._con_execute("вода 1 бот2")
+    check("консоль: «Вода 1 Бот2» добавила стихию чужаку №2",
+          "water" in g4.foes[1].element_keys)
 
 
 if __name__ == "__main__":
@@ -1521,6 +1700,8 @@ if __name__ == "__main__":
     test_grace()
     test_console()
     test_team_modes()
+    test_ice_immunity()
+    test_big_teams()
     test_bigmap()
     test_points()
     test_score_table()
