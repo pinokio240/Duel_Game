@@ -7,7 +7,8 @@ import random
 import pygame
 from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       COL_P1, COL_P2, COL_GOLD, ROUNDS_TO_WIN, ROUND_BANNER_T,
-                      ROUND_PAUSE_T, CHASSIS, HULL, WEAPONS, PERKS,
+                      ROUND_PAUSE_T, CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS,
+                      BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
                       PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
                       PU_SMOKE_TIME, PU_SMOKE_RADIUS, PU_FREEZE_TIME,
@@ -26,6 +27,7 @@ CH_KEYS = list(CHASSIS)
 HU_KEYS = list(HULL)
 WP_KEYS = list(WEAPONS)
 PK_KEYS = list(PERKS)
+EL_KEYS = list(ELEMENTS)
 STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duel_stats.json")
 DIFF_NAMES = {1: "Лёгкий", 2: "Норм", 3: "Хардкор"}
 
@@ -146,10 +148,10 @@ class Game:
         # состояние
         self.state = "menu"       # menu/select/intro/fight/round_end/match_end/pause
         self.timer = 0.0
-        self.build = ("medium", "medium", "standard", "none")   # сборка игрока
-        self.bot_build = ("medium", "medium", "standard", "none")
+        self.build = ("medium", "medium", "standard", "none", "none")   # сборка игрока
+        self.bot_build = ("medium", "medium", "standard", "none", "none")
         self.sel_ch, self.sel_hu = 1, 1     # курсоры в ангаре
-        self.sel_wpn, self.sel_pk = 0, 0
+        self.sel_wpn, self.sel_pk, self.sel_el = 0, 0, 0
         self.score = [0, 0]
         self.round = 1
         self.winner = 0
@@ -191,9 +193,10 @@ class Game:
     def _reset_round(self):
         cx, cy = SCREEN_W / 2, SCREEN_H / 2
         self.player = Tank(cx - 400, cy, 0, self.build[0], self.build[1], COL_P1,
-                           self.build[2], self.build[3])
+                           self.build[2], self.build[3], self.build[4])
         self.bot_tank = Tank(cx + 400, cy, 180, self.bot_build[0], self.bot_build[1],
-                             COL_P2, self.bot_build[2], self.bot_build[3])
+                             COL_P2, self.bot_build[2], self.bot_build[3],
+                             self.bot_build[4])
         self.ai = BotAI(self.bot_tank, self.difficulty)
         self.bullets = []
         self.powerups = []
@@ -259,9 +262,16 @@ class Game:
             elif k == pygame.K_c:
                 self.sel_pk = (self.sel_pk + 1) % len(PK_KEYS)
                 self.sounds.play("ric")
+            elif k == pygame.K_f:
+                self.sel_el = (self.sel_el - 1) % len(EL_KEYS)
+                self.sounds.play("ric")
+            elif k == pygame.K_g:
+                self.sel_el = (self.sel_el + 1) % len(EL_KEYS)
+                self.sounds.play("ric")
             elif k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
-                              WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk])
+                              WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
+                              EL_KEYS[self.sel_el])
                 self.start_match()
             elif k == pygame.K_ESCAPE:
                 self.state = "menu"
@@ -551,8 +561,7 @@ class Game:
                 self.effects.float_text(enemy.x, enemy.y - 54, "ЭМИ!", info["color"])
             self.sounds.play("freeze")
         else:
-            # мина и стена теперь носятся в боекомплекте (E / Q),
-            # стихии заряжают пушку — всё это в apply_powerup
+            # мина и стена носятся в боекомплекте (E / Q) — всё в apply_powerup
             t.apply_powerup(pu.kind)
         self.effects.float_text(t.x, t.y - 54, info["name"], info["color"])
         self.sounds.play("pickup")
@@ -615,6 +624,7 @@ class Game:
             self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, SCREEN_H / 2 + 40)))
 
     def _draw_menu(self):
+        self.screen.fill((10, 12, 26))   # и из паузы в меню тоже чистый фон
         img = get_font(110).render("DUEL", True, COL_TEXT)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 170)))
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
@@ -622,9 +632,10 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — поставить стену (120 прочности)   E — положить мину",
-            "В ангаре: шасси, корпус, дуло и перк — 300 комбинаций, у всех своя цена.",
-            "8 арен, 15 бонусов: стихии, стены, мины, лазер, дым, ЭМИ.",
-            "Бот теперь берёт бонусы и строит стены — не зевайте!",
+            "В ангаре: шасси, корпус, дуло, перк и СТИХИЯ — 1800 комбинаций.",
+            "Стихия заряжает каждый снаряд: огонь, вода, земля, ток, воздух.",
+            "8 арен, 10 бонусов: стены, мины, лазер, дым, ЭМИ.",
+            "Бот собирает бонусы и строит стены — не зевайте!",
         ]
         y = 340
         for s in lines:
@@ -649,10 +660,11 @@ class Game:
         img = get_font(28).render("Enter — в ангар", True, COL_P1)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 56)))
         # версия
-        img = get_font(16, bold=False).render("v1.4", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.5", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
+        self.screen.fill((10, 12, 26))   # непрозрачный фон: старый бой не просвечивает
         t1 = get_font(40).render("АНГАР", True, COL_TEXT)
         self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 52)))
 
@@ -660,20 +672,22 @@ class Game:
         hu = HULL[HU_KEYS[self.sel_hu]]
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
         pk = PERKS[PK_KEYS[self.sel_pk]]
+        el = ELEMENTS[EL_KEYS[self.sel_el]]
         speed = (ch["speed"] * (1 - hu["weight"] * ch.get("wmult", 1.0))
                  * wp["move_mult"] * pk["speed_mult"])
         hp = max(20, int(round(hu["hp"] * pk["hp_mult"])))
         reload = hu["reload"] * wp["reload_mult"] * pk["reload_mult"]
-        dmg = round(30 * wp["damage_mult"])
+        dmg = round(BULLET_DAMAGE * wp["damage_mult"] * el["damage_mult"])
 
-        # --- четыре панели выбора ---
-        self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 150, True)
-        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 262, True)
-        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 374, True)
-        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 486, True)
+        # --- пять панелей выбора (компактно, чтобы всё влезло) ---
+        self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 128, True)
+        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 224, True)
+        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 320, True)
+        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 416, True)
+        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 512, True)
 
         # --- итоговые характеристики ---
-        x, y = SCREEN_W / 2, 566
+        x, y = SCREEN_W / 2, 580
         rows = [
             "Скорость: %.0f px/с    Прочность: %d    Броня: %d    Урон: %d    Выстрел: %.2f с"
             % (speed, hp, ch["armor"], dmg, reload),
@@ -688,7 +702,8 @@ class Game:
 
         # превью танка игрока (в углу, чтобы не мешать панелям)
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
-                       WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk])
+                       WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
+                       EL_KEYS[self.sel_el])
         img = pygame.transform.scale_by(preview._sprite, 1.6)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W - 120, 60)))
 
@@ -697,12 +712,26 @@ class Game:
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 46)))
         n = len(keys)
         box_h = 64 if compact else 84
-        # 5 предметов не должны вылезать за экран — сужаем коробки
+        # 5-6 предметов не должны вылезать за экран — сужаем коробки
         step = min(260 if compact else 330, (SCREEN_W - 140) // n)
         box_w = step - 26
         small = box_w < 235
         name_f = get_font(20 if small else 24)
         desc_f = get_font(13 if small else 16, bold=False)
+
+        def _wrap(desc):
+            """Длинная подпись в узкой коробке — переносим на 2 строки."""
+            if desc_f.size(desc)[0] <= box_w - 8 or " " not in desc:
+                return [desc]
+            words = desc.split(" ")
+            best = None
+            for j in range(1, len(words)):
+                a, b = " ".join(words[:j]), " ".join(words[j:])
+                w = max(desc_f.size(a)[0], desc_f.size(b)[0])
+                if best is None or w < best[0]:
+                    best = (w, a, b)
+            return [best[1], best[2]]
+
         for i, key in enumerate(keys):
             item = table[key]
             x = SCREEN_W / 2 + (i - (n - 1) / 2) * step
@@ -713,10 +742,15 @@ class Game:
             pygame.draw.rect(self.screen, (30, 40, 75), bg, border_radius=10)
             pygame.draw.rect(self.screen, COL_P1 if sel else (60, 70, 110), box,
                              3 if sel else 1, border_radius=8)
+            dlines = _wrap(item["desc"])
+            name_y = box.y + (13 if len(dlines) > 1 else 18)
             img = name_f.render(item["name"], True, COL_TEXT if sel else COL_DIM)
-            self.screen.blit(img, img.get_rect(center=(box.centerx, box.y + 18)))
-            img2 = desc_f.render(item["desc"], True, COL_DIM)
-            self.screen.blit(img2, img2.get_rect(center=(box.centerx, box.y + 44)))
+            self.screen.blit(img, img.get_rect(center=(box.centerx, name_y)))
+            dy = box.y + (31 if len(dlines) > 1 else 44)
+            for dl in dlines:
+                img2 = desc_f.render(dl, True, COL_DIM)
+                self.screen.blit(img2, img2.get_rect(center=(box.centerx, dy)))
+                dy += 16 if small else 20
 
     def _draw_match_end(self):
         win = self.score[0] > self.score[1]
@@ -741,17 +775,19 @@ class Game:
     def _draw_hud(self):
         p, b = self.player, self.bot_tank
         # --- игрок (слева) ---
-        img = get_font(22).render("ИГРОК — %s + %s + %s + %s"
+        img = get_font(22).render("ИГРОК — %s + %s + %s + %s + %s"
                                   % (p.chassis["name"], p.hull["name"],
-                                     p.weapon["name"], p.perk["name"]),
+                                     p.weapon["name"], p.perk["name"],
+                                     p.elem["name"]),
                                   True, COL_P1)
         self.screen.blit(img, (70, 62))
         self._hp_bar(70, 92, p)
         self._mini_info(p, 70, 116)
         # --- бот (справа) ---
-        img = get_font(22).render("БОТ — %s + %s + %s + %s"
+        img = get_font(22).render("БОТ — %s + %s + %s + %s + %s"
                                   % (b.chassis["name"], b.hull["name"],
-                                     b.weapon["name"], b.perk["name"]),
+                                     b.weapon["name"], b.perk["name"],
+                                     b.elem["name"]),
                                   True, COL_P2)
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, 62)))
         self._hp_bar(SCREEN_W - 330, 92, b, right=True)
@@ -786,10 +822,8 @@ class Game:
             sfx.append("ОБОЙМА %d/%d" % (t.mag_ammo, t.mag_size))
         if t.armor:
             sfx.append("броня %d" % t.armor)
-        if t.element and t.element_shots > 0:
-            ei = PU_INFO.get(t.element)
-            if ei:
-                sfx.append("%s x%d" % (ei["name"], t.element_shots))
+        if t.element_key != "none":
+            sfx.append("стихия: %s" % t.elem["name"])
         if t.mine_carried > 0:
             sfx.append("МИНА x%d (E)" % t.mine_carried)
         if t.barrier_charges > 0:

@@ -87,9 +87,11 @@ def test_turbo_rule():
           abs(u.speed - ubase * BOOST_MULT) < 0.01)
 
 
-# ---------- 3b. СТИХИИ: огонь, вода, земля, ток, воздух ----------
+# ---------- 3b. СТИХИИ — шестая часть сборки, каждый снаряд элементальный ----------
 def test_elements():
-    from settings import EARTH_MULT, SHOCK_MULT
+    from settings import EARTH_MULT, SHOCK_MULT, BULLET_DAMAGE, BULLET_SPEED
+    from powerup import PU_INFO
+    from bot import random_build
 
     class _Fx:
         def burst(self, *a, **k): pass
@@ -103,24 +105,53 @@ def test_elements():
     fx, snd = _Fx(), _Snd()
     arena = Arena(0)
 
-    # огонь: 4 снаряда, каждый с элементом, потом обнуляется
-    t = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
-    t.apply_powerup("fire")
-    check("огонь заряжает 4 снаряда", t.element == "fire" and t.element_shots == 4)
+    # стихии больше НЕТ на карте — она теперь выбирается в ангаре
+    check("на карте 10 бонусов, стихий среди них нет",
+          len(PU_INFO) == 10 and not
+          (set(PU_INFO) & {"fire", "water", "earth", "electric", "air"}))
+
+    # сборка бота: 5 компонентов, все ключи валидны
+    rb = random_build()
+    from settings import CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS
+    check("сборка бота: 5 компонентов и все валидны",
+          len(rb) == 5 and rb[0] in CHASSIS and rb[1] in HULL and
+          rb[2] in WEAPONS and rb[3] in PERKS and rb[4] in ELEMENTS)
+
+    # огонь из ангара: КАЖДЫЙ снаряд огненный (и не кончается)
+    t = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none", "fire")
     bullets = []
-    for _ in range(4):
-        bullets.clear()
+    for _ in range(3):
         t.cooldown = 0
         t.try_shoot(bullets, fx, snd)
-    check("после 4 выстрелов стихия кончается",
-          all(b.element == "fire" for b in bullets) and t.element is None)
+    check("«Огонь»: все снаряды огненные",
+          len(bullets) == 3 and all(b.element == "fire" for b in bullets))
+    check("цена огня: урон снаряда x0.75",
+          abs(bullets[0].damage - BULLET_DAMAGE * 0.75) < 0.1,
+          "(dmg=%.1f)" % bullets[0].damage)
 
-    # вода: смывает все бонусы
+    # нейтральная: без эффекта, но снаряд больнее (+10%)
+    nt = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none", "none")
+    nb = []
+    nt.cooldown = 0
+    nt.try_shoot(nb, fx, snd)
+    check("«Нейтральная»: урон x1.10, без эффекта",
+          abs(nb[0].damage - BULLET_DAMAGE * 1.10) < 0.1 and nb[0].element is None)
+
+    # воздух: снаряд летит на 20% быстрее
+    ar = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none", "air")
+    ab = []
+    ar.cooldown = 0
+    ar.try_shoot(ab, fx, snd)
+    check("«Воздух»: скорость снаряда x1.2",
+          abs(ab[0].vx - BULLET_SPEED * 1.2) < 0.1)
+
+    # вода: смывает все бонусы и заставляет буксовать
     v = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
     v.apply_powerup("shield"); v.apply_powerup("boost"); v.apply_powerup("laser")
     v.apply_element("water", 1, 0, arena, fx, snd)
-    check("вода смывает щит/турбо/лазер",
-          v.shield_t == 0 and v.boost_t == 0 and v.laser_charges == 0)
+    check("вода смывает щит/турбо/лазер и мочит (буксует)",
+          v.shield_t == 0 and v.boost_t == 0 and v.laser_charges == 0
+          and v.mud_t > 0)
 
     # земля: скорость падает в 2.2 раза
     z = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
@@ -149,6 +180,16 @@ def test_elements():
     for _ in range(60):
         f._burn_step(1 / 60.0, fx, snd)
     check("поджог тикает уроном", f.hp < f.max_hp)
+
+    # сборка игрока доезжает до танка: элемент попадает в конструктор
+    from game import Game as _G
+    g = _G()
+    g.build = ("light", "light", "standard", "sprinter", "electric")
+    g._reset_round()
+    check("стихия из ангара доезжает до танка",
+          g.player.element_key == "electric" and
+          g.player.elem["name"] == "Ток")
+    pygame.quit()
 
 
 # ---------- 3c. СТЕНА-БАРЬЕР: блокирует танк, ломается снарядами ----------
@@ -280,10 +321,10 @@ def test_battle():
     check("бой идёт без ошибок 8 сек", g.state in ("fight", "round_end"))
     g.draw()  # HUD/арена/стены рисуются без исключений
 
-    # гараж с 5 шасси и 5 корпусами рисуется
+    # гараж: 5 панелей (шасси/корпус/дуло/перк/стихия) рисуется
     g.state = "select"
     g._draw_select()
-    check("ангар с 5 шасси и 5 корпусами работает", True)
+    check("ангар: 5 панелей, включая стихию, работает", True)
     g.state = "fight"
 
     # регрессия победителя: убили бота — очко ИГРОКУ (bug 74c15bb)

@@ -2,20 +2,19 @@
 """
 ИИ бота: держит дистанцию, обходит препятствия ПО ШИРИНЕ ТАНКА (узкие щели
 не считают проходимыми), уворачивается от пуль и мин, выбирается из
-застреваний, СОБИРАЕТ бонусы (ремонт, стихии, щит...), ставит мины под
+застреваний, СОБИРАЕТ бонусы (ремонт, щит, лазер...), ставит мины под
 догоняющего и строит стены-барьеры между собой и игроком.
 Сложность настраивается пресетом (1 лёгкий / 2 норм / 3 хардкор).
 """
 import math
 import random
-from settings import CHASSIS, HULL, WEAPONS, PERKS, DIFF_PRESETS
+from settings import CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, DIFF_PRESETS
 
 # сколько какой бонус стоит для бота (чем больше — тем охотнее едет)
 PU_VALUE = {
     "repair": 3.0, "shield": 2.4, "freeze": 2.4, "laser": 2.2,
-    "fire": 2.2, "electric": 2.0, "triple": 1.8, "rapid": 1.8,
-    "earth": 1.8, "boost": 1.5, "air": 1.4, "barrier": 1.3,
-    "mine": 1.2, "water": 1.6, "smoke": 0.7,
+    "triple": 1.8, "rapid": 1.8, "boost": 1.5, "barrier": 1.3,
+    "mine": 1.2, "smoke": 0.7,
 }
 
 
@@ -25,10 +24,11 @@ def _ang_diff(a, b):
 
 
 def random_build():
-    """Случайная сборка бота (шасси, корпус, дуло, перк) —
+    """Случайная сборка бота (шасси, корпус, дуло, перк, стихия) —
     каждый матч он ездит на новой машине."""
     return (random.choice(list(CHASSIS)), random.choice(list(HULL)),
-            random.choice(list(WEAPONS)), random.choice(list(PERKS)))
+            random.choice(list(WEAPONS)), random.choice(list(PERKS)),
+            random.choice(list(ELEMENTS)))
 
 
 class BotAI:

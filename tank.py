@@ -6,29 +6,32 @@
 """
 import math
 import pygame
-from settings import (CHASSIS, HULL, WEAPONS, PERKS, TANK_RADIUS, BULLET_DAMAGE,
+from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, TANK_RADIUS,
+                      BULLET_DAMAGE,
                       PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
                       PU_RAPID_TIME, PU_RAPID_MULT,
                       BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT,
-                      PU_ELEMENT_SHOTS, FIRE_TIME, FIRE_DPS,
+                      FIRE_TIME, FIRE_DPS,
                       EARTH_TIME, EARTH_MULT, SHOCK_TIME, SHOCK_MULT,
-                      AIR_PUSH, WATER_CLEAR_DMG,
+                      AIR_PUSH, WATER_CLEAR_DMG, WATER_SLOW_TIME,
                       PU_MINE_CARRY, BARRIER_MAX)
-from bullet import Bullet
+from bullet import Bullet, ELEMENT_COLORS
 
 
 class Tank:
     def __init__(self, x, y, angle, chassis_key, hull_key, color,
-                 weapon_key="standard", perk_key="none"):
+                 weapon_key="standard", perk_key="none", element_key="none"):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
         self.ch_key, self.hull_key = chassis_key, hull_key
         self.wpn_key, self.perk_key = weapon_key, perk_key
+        self.element_key = element_key      # шестая часть сборки — стихия
         self.chassis = CHASSIS[chassis_key]
         self.hull = HULL[hull_key]
         self.weapon = WEAPONS[weapon_key]
         self.perk = PERKS[perk_key]
+        self.elem = ELEMENTS[element_key]
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
         self.radius = TANK_RADIUS
@@ -49,10 +52,7 @@ class Tank:
         self.rapid_t = 0.0        # скорострел
         self.frozen_t = 0.0       # ЭМИ-заморозка
         self.laser_charges = 0    # заряды лазера
-        # стихии: какой элемент заряжен и сколько снарядов осталось
-        self.element = None       # None / fire / water / earth / electric / air
-        self.element_shots = 0
-        # негативные эффекты от стихий врага
+        # негативные эффекты от стихий врага (свою стихию мы зарядили в ангаре)
         self.burn_t = 0.0         # поджог: тикает уроном, броня не спасает
         self._burn_tick = 0.0
         self.mud_t = 0.0          # земля: вязнет
@@ -124,6 +124,11 @@ class Tank:
         else:
             pygame.draw.rect(s, self.light, (44, 22, 19, 7), border_radius=2)
             pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
+        # стихия: цветной ореол на срезе ствола — видно, чем стреляем
+        if self.element_key != "none":
+            col = ELEMENT_COLORS[self.element_key]
+            pygame.draw.circle(s, col, (62, 25), 3)
+            pygame.draw.circle(s, col, (62, 25), 6, 1)
         return s
 
     # ----- движение -----
@@ -176,14 +181,10 @@ class Tank:
         if self.triple > 0:
             angles = [self.angle - 12, self.angle, self.angle + 12]
             self.triple -= 1
-        dmg = BULLET_DAMAGE * self.weapon["damage_mult"]
-        spd = self.weapon["speed_mult"]
-        elem = None
-        if self.element_shots > 0 and self.element:
-            elem = self.element
-            self.element_shots -= 1
-            if self.element_shots <= 0:
-                self.element = None
+        # стихия из ангара заряжает КАЖДЫЙ снаряд: цена — часть урона
+        dmg = BULLET_DAMAGE * self.weapon["damage_mult"] * self.elem["damage_mult"]
+        spd = self.weapon["speed_mult"] * self.elem["speed_mult"]
+        elem = self.element_key if self.element_key != "none" else None
         for a in angles:
             bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
                                   element=elem))
@@ -246,6 +247,7 @@ class Tank:
             self.triple = 0
             self.laser_charges = 0
             self.take_damage(WATER_CLEAR_DMG, effects, sounds)
+            self.mud_t = max(self.mud_t, WATER_SLOW_TIME)   # мокрый — буксует
             msg = "СМЫТО: " + ", ".join(washed) if washed else "СМЫТО"
             effects.float_text(self.x, self.y - 50, msg, (80, 170, 255))
         elif elem == "air":
@@ -286,9 +288,6 @@ class Tank:
             self.rapid_t = PU_RAPID_TIME
         elif kind == "laser":
             self.laser_charges += 2
-        elif kind in ("fire", "water", "earth", "electric", "air"):
-            self.element = kind
-            self.element_shots = PU_ELEMENT_SHOTS
         elif kind == "mine":
             # мина больше не ставится сама — носим в боекомплекте (клавиша E)
             self.mine_carried = min(self.mine_carried + 1, PU_MINE_CARRY)
