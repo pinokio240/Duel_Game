@@ -13,7 +13,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       TANK_RADIUS, BULLET_BOUNCES,
                       SPECTATE_T,
                       ALLY_COLOR, BOSS_COLOR, BOSS_BUILD, BOSS_HP_MULT,
-                      BOSS_SCALE,
+                      BOSS_SCALE, TEAM_FOE_COLOR, TEAM_ALLY_COLOR,
                       BOT_COLORS, BOT_NAMES, MODE_NAMES,
                       BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
@@ -772,13 +772,46 @@ class Game:
                           self.arena.h - SCREEN_H)
 
     def _kill_all_foes(self):
-        """Кнопка «УБИТЬ СРАЗУ»: не ждать 70 секунд «выяснения» после вашей
-        смерти — враги дохнут сразу, раунд будет ничьим."""
-        for t in self.foes:
-            if t.alive:
-                t._die(self.effects, self.sounds)
+        """Кнопка «УБИТЬ СРАЗУ» (v2.6): не ждать 180 секунд «выяснения» —
+        ЖРЕБИЙ: случайный живой бот сразу забирает раунд, остальные
+        враги взрываются этим же кадром."""
+        alive = [t for t in self.foes if t.alive]
         self.spectate_t = 0.0
+        if not alive:
+            return
+        lucky = random.choice(alive)
+        for t in alive:
+            if t is not lucky:
+                t._die(self.effects, self.sounds)
         self.sounds.play("explode")
+        # раунд сразу за счастливчиком — как у последнего выжившего
+        self.winner = self.tanks.index(lucky)
+        self.score[self.winner] += 1
+        self.state = "round_end"
+        self.timer = ROUND_PAUSE_T
+        self.sounds.play("round")
+
+    def _team_ring_color(self, t):
+        """v2.6: цвет командной подсветки танка (или None вне команд).
+        Враги — КРАСНЫЙ, союзники (включая вас) — САЛАТОВЫЙ."""
+        if not self.team_mode:
+            return None
+        team = self.tank_team.get(t)
+        if team is None:
+            return None
+        return TEAM_FOE_COLOR if team == 1 else TEAM_ALLY_COLOR
+
+    def _team_pad(self, t):
+        """Светящийся круг под танком (v2.6): враги красным, союзники
+        салатовым. Рисуется ПОД спрайтом, статусы (щит/лёд/огонь) — над."""
+        col = self._team_ring_color(t)
+        if col is None:
+            return None
+        r = int(t.radius + 11)
+        pad = pygame.Surface((r * 2, r * 2), pygame.SRCALPHA)
+        pygame.draw.circle(pad, (col[0], col[1], col[2], 70), (r, r), r)
+        pygame.draw.circle(pad, col, (r, r), r, 2)
+        return pad
 
     # ================= обновление =================
     def update(self, dt):
@@ -1167,6 +1200,11 @@ class Game:
                 b.draw(self.world, ox, oy)
             for t in reversed(self.tanks):   # игрок рисуется поверх ботов
                 if t.alive:
+                    pad = self._team_pad(t)   # v2.6: подсветка команд
+                    if pad is not None:
+                        self.world.blit(
+                            pad, (int(t.x + ox - pad.get_width() / 2),
+                                  int(t.y + oy - pad.get_height() / 2)))
                     t.draw(self.world, ox, oy)
             self.effects.draw(self.world, ox, oy)
             for s in self.smokes:
@@ -1258,7 +1296,7 @@ class Game:
             "Q — стена   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
             "РЕЖИМЫ: 1вс1 · FFA до 5 · 2НА2 · 3НА3 · 4НА4 · 5НА5 · 2 ПРОТИВ БОССА (F2–F10).",
             "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
-            "После вашей смерти боты до 70 с выясняют победителя — кнопка «УБИТЬ СРАЗУ» не ждёт.",
+            "После вашей смерти боты до 180 с выясняют победителя; кнопка отдаёт раунд случайному боту.",
             "Неуязвимости больше нет. Консоль читера — Ё (`), работает на любой раскладке.",
         ]
         y = 310
@@ -1322,7 +1360,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.5", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.6", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1840,10 +1878,11 @@ class Game:
         pygame.draw.rect(self.screen, color, fill, border_radius=4)
         pygame.draw.rect(self.screen, (70, 80, 120), rect, 1, border_radius=4)
 
-    def _build_label(self, t, who=None):
+    def _build_label(self, t, who=None, color=None):
         """«ИГРОК — шасси + корпус + дуло + перк + стихия» с автоподбором
         размера шрифта: длинная сборка не должна налезать на центральный счёт.
-        Имя можно не передавать — возьмём display_name (СОЮЗНИК, БОСС)."""
+        Имя можно не передавать — возьмём display_name (СОЮЗНИК, БОСС).
+        color (v2.6) перекрашивает строку (командная подсветка HUD)."""
         who = who or t.display_name or "БОТ"
         label = "%s — %s + %s + %s + %s + %s" % (
             who, t.chassis["name"], t.hull["name"], t.weapon["name"],
@@ -1851,7 +1890,7 @@ class Game:
         size = 22
         while size > 13 and get_font(size).size(label)[0] > 500:
             size -= 1
-        return get_font(size).render(label, True, t.color)
+        return get_font(size).render(label, True, color or t.color)
 
     def _status_tags(self, t):
         """Статусы танка строкой (общие для HUD игрока и строк ботов)."""
@@ -1974,7 +2013,9 @@ class Game:
         """Компактная строка танка в HUD (v2.1): имя, HP, победы и статусы.
         v2.2: имя берём из display_name (СОЮЗНИК / БОСС), победы в командах
         считаются по стороне."""
-        img = self._build_label(t, t.display_name or BOT_NAMES[idx])
+        # v2.6: в командах строка танка красится цветом стороны
+        img = self._build_label(t, t.display_name or BOT_NAMES[idx],
+                                color=self._team_ring_color(t))
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y)))
         self._hp_bar(SCREEN_W - 330, y + 22, t, right=True)
         tags = self._status_tags(t)
@@ -2045,7 +2086,9 @@ class Game:
             if not t.alive:
                 continue
             cx, cy = int(x0 + t.x * k), int(y0 + t.y * k)
-            pygame.draw.circle(self.screen, t.color, (cx, cy), 3)
+            # v2.6: в командах миникарта красит точки цветом команды
+            col = self._team_ring_color(t) or t.color
+            pygame.draw.circle(self.screen, col, (cx, cy), 3)
             if t is self.player:
                 pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), 4, 1)
         pygame.draw.rect(self.screen, (150, 165, 230),
@@ -2289,7 +2332,7 @@ class Game:
                 self.spectate_t = float(sec)
                 self._con_say("Окно выяснения после вашей смерти: %d с." % sec)
             else:
-                self._con_say("Формат: ждать 70 / ждать 0")
+                self._con_say("Формат: ждать 180 / ждать 0")
             return
         if parts[0] == "счет":   # ё нормализована в е выше
             if len(parts) > 1 and parts[1].lstrip("-").isdigit():

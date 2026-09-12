@@ -1225,11 +1225,12 @@ def test_map_shuffle():
     check("классические спавны не перекрыты (40 карт)", blocked == 0)
 
 
-# ---------- 3q. ПОСЛЕ СМЕРТИ ИГРОКА v2.5: окно выяснения вместо грейса ----------
+# ---------- 3q. ПОСЛЕ СМЕРТИ ИГРОКА v2.6: окно 180 с + жребий кнопки ----------
 def test_spectate():
-    """v2.5: НЕУЯЗВИМОСТИ НЕТ. После смерти игрока живые боты (2+) в FFA
-    выясняют победителя SPECTATE_T секунд, потом умирают — ничья.
-    Один бот берёт раунд сразу. Кнопка «УБИТЬ СРАЗУ» — не ждать."""
+    """v2.6 (окно было 70 с — стало 180): НЕУЯЗВИМОСТИ НЕТ. После смерти
+    игрока живые боты (2+) в FFA выясняют победителя SPECTATE_T секунд,
+    потом умирают — ничья. Один бот берёт раунд сразу. Кнопка
+    «УБИТЬ СРАЗУ» — ЖРЕБИЙ: случайный живой бот забирает раунд."""
     from game import Game
     from settings import SPECTATE_T
 
@@ -1271,7 +1272,7 @@ def test_spectate():
     check("1вс1: бот-одиночка берёт раунд сразу после смерти игрока",
           g1.state == "round_end" and g1.winner == 1 and g1.score[1] == 1)
 
-    # --- FFA на 3: игрок умер при двух живых ботах — стартует окно 70 с
+    # --- FFA на 3: игрок умер при двух живых ботах — стартует окно 180 с
     g2 = Game()
     g2.mode = 3
     g2._reset_round()
@@ -1290,7 +1291,7 @@ def test_spectate():
     g2.draw()
     check("кнопка «УБИТЬ СРАЗУ» видна во время выяснения",
           bool([r for r, kd, d in g2._click_zones if kd == "kill_all"]))
-    # 70 секунд никто не победил — ВСЕ боты умирают, раунд ничья
+    # 180 секунд никто не победил — ВСЕ боты умирают, раунд ничья
     for _ in range(int(SPECTATE_T * 60) + 2):
         g2.update(1 / 60.0)
         if g2.state == "round_end":
@@ -1313,7 +1314,8 @@ def test_spectate():
     check("победа в выяснении уходит победившему боту",
           g3.state == "round_end" and g3.winner == 1 and g3.score[1] == 1)
 
-    # --- кнопка «УБИТЬ СРАЗУ» во время окна: боты мертвы сразу, ничья
+    # --- кнопка «УБИТЬ СРАЗУ» во время окна (v2.6): ЖРЕБИЙ — случайный
+    # живой бот сразу забирает раунд, остальные враги взрываются
     g4 = Game()
     g4.mode = 4
     g4._reset_round()
@@ -1325,9 +1327,28 @@ def test_spectate():
     check("в 1x1x1x1 окно тоже запустилось", g4.spectate_t == SPECTATE_T)
     g4._kill_all_foes()
     g4.update(1 / 60.0)
-    check("«УБИТЬ СРАЗУ» — боты мертвы, раунд ничья",
-          g4.state == "round_end" and g4.winner == -1
-          and not any(b.alive for b in g4.bots))
+    alive4 = [b for b in g4.bots if b.alive]
+    check("«УБИТЬ СРАЗУ» — жребий: один живой бот забрал раунд",
+          g4.state == "round_end" and len(alive4) == 1
+          and g4.winner == g4.tanks.index(alive4[0])
+          and g4.score[g4.winner] == 1 and g4.spectate_t == 0.0)
+
+    # --- жребий действительно СЛУЧАЙНЫЙ: за серию прогонов победителем
+    # бывают разные боты (30 бросков кубка на 3 стороны)
+    winners = set()
+    for _ in range(30):
+        gx = Game()
+        gx.mode = 4
+        gx._reset_round()
+        gx.state = "fight"
+        gx._fake_keys = FakeKeys(())
+        gx.player.alive = False
+        gx.player._die(fx, snd)
+        gx.update(1 / 60.0)
+        gx._kill_all_foes()
+        winners.add(gx.winner)
+    check("жребий кнопки выбирает разных ботов", len(winners) >= 2,
+          "(вариантов за 30 прогонов: %d)" % len(winners))
 
     # --- команда: окно НЕ запускается (союзники доигрывают за нас)
     g5 = Game()
@@ -1421,8 +1442,8 @@ def test_console():
     check("«хп 50 Игрок» выставляет прочность", p.hp == 50)
     g._con_execute("счёт 500")
     check("«счёт 500» накидывает очков", g.points == 500)
-    g._con_execute("ждать 70")
-    check("«ждать 70» ставит окно выяснения", g.spectate_t == 70)
+    g._con_execute("ждать 180")
+    check("«ждать 180» ставит окно выяснения", g.spectate_t == 180)
     g._con_execute("ждать 0")
     check("«ждать 0» снимает окно", g.spectate_t == 0)
 
@@ -1455,6 +1476,55 @@ def test_console():
     # регулятор консоли: неизвестное слово не роняет игру
     g2._con_execute("абракадабра 123")
     check("неизвестная команда не роняет игру", True)
+
+
+# ---------- 3s2. ПОДСВЕТКА КОМАНД v2.6: враги красным, союзники салатовым ----------
+def test_team_highlight():
+    """v2.6: в командных боях у каждого танка есть цвет стороны — враги
+    КРАСНЫЕ, союзники (включая игрока) САЛАТОВЫЕ: свечение под танком,
+    точки на миникарте и строки в HUD. В FFA подсветки нет."""
+    from game import Game
+    from settings import TEAM_FOE_COLOR, TEAM_ALLY_COLOR, SPECTATE_T
+
+    check("v2.6: окно выяснения = 180 с", SPECTATE_T == 180.0)
+
+    g = Game()
+    g.mode = 3                 # FFA — подсветки быть не должно
+    g._reset_round()
+    check("в FFA подсветки нет",
+          all(g._team_ring_color(t) is None for t in g.tanks)
+          and all(g._team_pad(t) is None for t in g.tanks))
+
+    g2 = Game()
+    g2.mode = 6                # 2 на 2: игрок + СОЮЗНИК против БОТ и БОТ-2
+    g2._reset_round()
+    allies = [t for t in g2.tanks if g2.tank_team[t] == 0]
+    foes = [t for t in g2.tanks if g2.tank_team[t] == 1]
+    check("2на2: составы по два танка", len(allies) == 2 and len(foes) == 2)
+    check("союзники (и игрок) подсвечены САЛАТОВЫМ",
+          all(g2._team_ring_color(t) == TEAM_ALLY_COLOR for t in allies))
+    check("враги подсвечены КРАСНЫМ",
+          all(g2._team_ring_color(t) == TEAM_FOE_COLOR for t in foes))
+    pads = [g2._team_pad(t) for t in g2.tanks]
+    check("свечение под танком — квадратный спрайт с кругом",
+          all(p is not None and p.get_width() == p.get_height() > 0
+              for p in pads))
+    # кадр с подсветкой (мир + миникарта + HUD) рисуется без падений
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.draw()
+    check("кадр командного боя с подсветкой рисуется", True)
+
+    # 5 на 5: пятеро салатовых против пятерых красных
+    g3 = Game()
+    g3.mode = 10
+    g3._reset_round()
+    a3 = [t for t in g3.tanks if g3.tank_team[t] == 0]
+    f3 = [t for t in g3.tanks if g3.tank_team[t] == 1]
+    check("5на5: 5 салатовых союзников и 5 красных врагов",
+          len(a3) == 5 and len(f3) == 5
+          and all(g3._team_ring_color(t) == TEAM_ALLY_COLOR for t in a3)
+          and all(g3._team_ring_color(t) == TEAM_FOE_COLOR for t in f3))
 
 
 # ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
@@ -1853,6 +1923,7 @@ if __name__ == "__main__":
     test_spectate()
     test_console()
     test_team_modes()
+    test_team_highlight()
     test_ice_immunity()
     test_big_teams()
     test_bigmap()
