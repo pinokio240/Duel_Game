@@ -12,7 +12,9 @@ import pygame
 from game import Game
 
 g = Game()
-g.build = ("medium", "medium", "standard", "none", "fire", (), ())   # стихия — в сборке
+# сборка из 8 частей: шасси, корпус, дуло, перк, стихия, проклятья,
+# облегчения, эффекты на врага
+g.build = ("medium", "medium", "standard", "none", "fire", (), (), ())   # стихия — в сборке
 g.state = "fight"
 g._reset_round()
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
@@ -31,11 +33,13 @@ g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 print("screenshot.png обновлён")
 
-# ангар: 5 панелей + жребий — отдельный снимок для проверки верстки
+# ангар: 5 панелей + жребий + эффекты на врага — снимок для проверки верстки
 g.state = "select"
-g.sel_el = 1   # «Огонь» выделен
-g.sel_curses = ["shaky"]       # взято одно проклятье
-g.sel_blessings = ["armor"]    # открыто два облегчения, взято одно
+g.sel_el = 1                    # «Огонь» выделен
+g.sel_curses = ["shaky", "rusty"]      # взято два проклятья
+g.sel_blessings = ["armor"]            # открыто три облегчения, взято одно
+g.sel_enemy_keys = ["e_sabotage"]      # саботаж на врага
+g.sel_en = 1                           # курсор на «Саботаже»
 g._draw_select()
 out = "/home/z/my-project/tool-results/garage.png"
 pygame.image.save(g.screen, out)

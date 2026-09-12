@@ -22,7 +22,7 @@ from bullet import Bullet, ELEMENT_COLORS
 class Tank:
     def __init__(self, x, y, angle, chassis_key, hull_key, color,
                  weapon_key="standard", perk_key="none", element_key="none",
-                 curses=(), blessings=()):
+                 curses=(), blessings=(), extra_mods=None):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
@@ -38,7 +38,8 @@ class Tank:
         self.curses_keys = tuple(curses)
         self.blessings_keys = tuple(blessings)
         self.mods = {"hp_mult": 1.0, "speed_mult": 1.0, "reload_mult": 1.0,
-                     "spread_deg": 0.0, "bullet_speed_mult": 1.0}
+                     "spread_deg": 0.0, "bullet_speed_mult": 1.0,
+                     "turn_mult": 1.0, "boost_mult": 1.0, "damage_mult": 1.0}
         for _table, _keys in ((CURSES, self.curses_keys),
                               (BLESSINGS, self.blessings_keys)):
             for _key in _keys:
@@ -47,6 +48,13 @@ class Tank:
                         self.mods[_f] += _v
                     else:
                         self.mods[_f] *= _v
+        # эффекты НА ВРАГА: готовый словарь модов (баффы/дебаффы боту)
+        if extra_mods:
+            for _f, _v in extra_mods.items():
+                if _f == "spread_deg":
+                    self.mods[_f] += _v
+                else:
+                    self.mods[_f] *= _v
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
         self.radius = TANK_RADIUS
@@ -93,13 +101,16 @@ class Tank:
             s *= SHOCK_MULT     # ток: мотор вполсилы
         if self.boost_t > 0:
             # правило турбо: с перком «Гонец» ускорение слабее,
-            # без перка — турбо работает как обычно
-            s *= BOOST_PERK_MULT if self.perk_key == BOOST_PERK_KEY else BOOST_MULT
+            # без перка — турбо работает как обычно; жребий может
+            # ослабить (Текущий бак) или усилить (Гоночный бак) турбо
+            s *= (BOOST_PERK_MULT if self.perk_key == BOOST_PERK_KEY
+                  else BOOST_MULT) * self.mods["boost_mult"]
         return s
 
     @property
     def turn_speed(self):
-        t = self.chassis["turn"] * self.perk["turn_mult"]  # градусов/сек
+        t = (self.chassis["turn"] * self.perk["turn_mult"]
+             * self.mods["turn_mult"])   # градусов/сек; жребий: Юркость и др.
         if self.shock_t > 0:
             t *= SHOCK_MULT
         return t
@@ -200,11 +211,13 @@ class Tank:
             angles = [self.angle - 12, self.angle, self.angle + 12]
             self.triple -= 1
         # стихия из ангара заряжает КАЖДЫЙ снаряд: цена — часть урона
-        dmg = BULLET_DAMAGE * self.weapon["damage_mult"] * self.elem["damage_mult"]
+        dmg = (BULLET_DAMAGE * self.weapon["damage_mult"]
+               * self.elem["damage_mult"] * self.mods["damage_mult"])
         spd = (self.weapon["speed_mult"] * self.elem["speed_mult"]
                * self.mods["bullet_speed_mult"])
         elem = self.element_key if self.element_key != "none" else None
-        sp = self.mods["spread_deg"]    # «Разбитый прицел» разбрасывает снаряды
+        # «Разбитый прицел» разбрасывает снаряды, «Твёрдые руки» лечат прицел
+        sp = max(0.0, self.mods["spread_deg"])
         for a in angles:
             if sp > 0:
                 a = a + random.uniform(-sp, sp)

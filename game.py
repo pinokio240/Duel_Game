@@ -4,11 +4,13 @@ import math
 import json
 import os
 import random
+import time
 import pygame
 from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       COL_P1, COL_P2, COL_GOLD, ROUNDS_TO_WIN, ROUND_BANNER_T,
                       ROUND_PAUSE_T, CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS,
-                      CURSES, BLESSINGS, MAX_CURSES,
+                      CURSES, BLESSINGS, MAX_CURSES, ENEMY_EFFECTS,
+                      MAX_ENEMY_EFFECTS,
                       BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
                       PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
@@ -17,7 +19,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       PU_MINE_ENEMY_DIST,
                       BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
-                      SCORE_CURSE_PENALTY, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
+                      SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
                       SCORE_PICKUP,
                       DIFF_PRESETS, BOT_DIFFICULTY)
@@ -35,7 +37,8 @@ PK_KEYS = list(PERKS)
 EL_KEYS = list(ELEMENTS)
 CR_KEYS = list(CURSES)
 BL_KEYS = list(BLESSINGS)
-JT_TOTAL = len(CR_KEYS) + len(BL_KEYS)   # карт жребия: 4 проклятия + 4 облегчения
+EE_KEYS = list(ENEMY_EFFECTS)
+JT_TOTAL = len(CR_KEYS) + len(BL_KEYS)   # карт жребия: 8 проклятий + 8 облегчений
 STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duel_stats.json")
 DIFF_NAMES = {1: "Лёгкий", 2: "Норм", 3: "Хардкор"}
 
@@ -154,16 +157,19 @@ class Game:
         self.world = pygame.Surface((SCREEN_W, SCREEN_H))  # сюда рисуем бой
 
         # состояние
-        self.state = "menu"       # menu/select/intro/fight/round_end/match_end/pause
+        self.state = "menu"       # menu/select/table/intro/fight/round_end/match_end/pause
         self.timer = 0.0
-        # сборка игрока: шасси, корпус, дуло, перк, стихия, проклятья, облегчения
-        self.build = ("medium", "medium", "standard", "none", "none", (), ())
+        # сборка игрока: шасси, корпус, дуло, перк, стихия,
+        # проклятья, облегчения, эффекты НА ВРАГА
+        self.build = ("medium", "medium", "standard", "none", "none", (), (), ())
         self.bot_build = ("medium", "medium", "standard", "none", "none")
         self.sel_ch, self.sel_hu = 1, 1     # курсоры в ангаре
         self.sel_wpn, self.sel_pk, self.sel_el = 0, 0, 0
-        self.sel_jt = 0                     # курсор жребия (0..7)
+        self.sel_jt = 0                     # курсор жребия (0..15)
         self.sel_curses = []                # взятые проклятья (ключи)
         self.sel_blessings = []             # взятые облегчения (ключи)
+        self.sel_en = 0                     # курсор эффектов на врага
+        self.sel_enemy_keys = []            # взятые эффекты НА ВРАГА (ключи)
         self.score = [0, 0]
         self.round = 1
         self.winner = 0
@@ -172,6 +178,10 @@ class Game:
         self.points = 0.0
         self.score_mult = 1.0
         self.final_score = 0
+        # таблица счёта: место забега и флаг рекорда после матча
+        self.table_place = 0
+        self.new_record = False
+        self._table_from = "menu"          # куда возвращаться из таблицы
 
         # объекты боя
         self.player = None
@@ -189,15 +199,24 @@ class Game:
 
     # ================= статистика матчей =================
     def _load_stats(self):
+        st = {"wins": 0, "losses": 0, "draws": 0, "best_score": 0,
+              "score_table": []}
         try:
             with open(STATS_FILE, "r", encoding="utf-8") as f:
                 d = json.load(f)
-            return {"wins": int(d.get("wins", 0)),
-                    "losses": int(d.get("losses", 0)),
-                    "draws": int(d.get("draws", 0)),
-                    "best_score": int(d.get("best_score", 0))}
+            st["wins"] = int(d.get("wins", 0))
+            st["losses"] = int(d.get("losses", 0))
+            st["draws"] = int(d.get("draws", 0))
+            st["best_score"] = int(d.get("best_score", 0))
+            rows = d.get("score_table", [])
+            if isinstance(rows, list):
+                st["score_table"] = [r for r in rows
+                                     if isinstance(r, dict) and "score" in r]
+                st["score_table"].sort(key=lambda r: -int(r["score"]))
+                del st["score_table"][10:]      # держим топ-10
         except Exception:
-            return {"wins": 0, "losses": 0, "draws": 0, "best_score": 0}
+            pass
+        return st
 
     def _save_stats(self):
         try:
@@ -212,9 +231,17 @@ class Game:
         self.player = Tank(cx - 400, cy, 0, self.build[0], self.build[1], COL_P1,
                            self.build[2], self.build[3], self.build[4],
                            self.build[5], self.build[6])
+        # эффекты НА ВРАГА: словарь модов для бота (баффы и дебаффы)
+        emods = {}
+        for key in self.build[7]:
+            for f, v in ENEMY_EFFECTS[key]["mods"].items():
+                if f == "spread_deg":
+                    emods[f] = emods.get(f, 0.0) + v
+                else:
+                    emods[f] = emods.get(f, 1.0) * v
         self.bot_tank = Tank(cx + 400, cy, 180, self.bot_build[0], self.bot_build[1],
                              COL_P2, self.bot_build[2], self.bot_build[3],
-                             self.bot_build[4])
+                             self.bot_build[4], extra_mods=emods or None)
         self.ai = BotAI(self.bot_tank, self.difficulty)
         self.bullets = []
         self.powerups = []
@@ -260,11 +287,26 @@ class Game:
         elif len(self.sel_blessings) < self._bless_cap():
             self.sel_blessings.append(key)
 
+    def _toggle_enemy(self, idx):
+        """Эффекты НА ВРАГА: баффы и дебаффы, любой режет счёт."""
+        key = EE_KEYS[idx]
+        if key in self.sel_enemy_keys:
+            self.sel_enemy_keys.remove(key)
+        elif len(self.sel_enemy_keys) < MAX_ENEMY_EFFECTS:
+            self.sel_enemy_keys.append(key)
+
+    def _fate_mult(self, curses, blessings, enemy):
+        """Множитель очков: проклятья ДОБАВЛЯЮТ 15% каждое (риск платит),
+        облегчения режут 10%, эффекты на врага — по своей цене."""
+        m = (1.0 + SCORE_CURSE_BONUS * len(curses)
+             - SCORE_BLESS_PENALTY * len(blessings))
+        for key in enemy:
+            m -= ENEMY_EFFECTS[key]["score_cut"]
+        return max(SCORE_MULT_FLOOR, m)
+
     def _score_mult(self):
-        """Множитель очков за взятый жребий (по ЗАФИКСИРОВАННОЙ сборке)."""
-        return max(SCORE_MULT_FLOOR,
-                   1.0 - SCORE_CURSE_PENALTY * len(self.build[5])
-                   - SCORE_BLESS_PENALTY * len(self.build[6]))
+        """Множитель очков за ЗАФИКСИРОВАННУЮ сборку."""
+        return self._fate_mult(self.build[5], self.build[6], self.build[7])
 
     # ================= ввод (клавиатура по событиям) =================
     def on_keydown(self, e):
@@ -274,6 +316,9 @@ class Game:
         if self.state == "menu":
             if k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.state = "select"
+            elif k == pygame.K_t:
+                self._table_from = "menu"
+                self.state = "table"           # ТАБЛИЦА СЧЕТА
             elif k == pygame.K_ESCAPE:
                 pygame.event.post(pygame.event.Event(pygame.QUIT))
             elif k in (pygame.K_1, pygame.K_KP1):
@@ -328,14 +373,27 @@ class Game:
                 else:
                     self._toggle_bless(self.sel_jt - len(CR_KEYS))
                 self.sounds.play("ric")
+            elif k == pygame.K_b:
+                self.sel_en = (self.sel_en - 1) % len(EE_KEYS)
+                self.sounds.play("ric")
+            elif k == pygame.K_n:
+                self.sel_en = (self.sel_en + 1) % len(EE_KEYS)
+                self.sounds.play("ric")
+            elif k == pygame.K_m:
+                self._toggle_enemy(self.sel_en)   # эффект НА ВРАГА
+                self.sounds.play("ric")
             elif k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
                               WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
                               EL_KEYS[self.sel_el],
-                              tuple(self.sel_curses), tuple(self.sel_blessings))
+                              tuple(self.sel_curses), tuple(self.sel_blessings),
+                              tuple(self.sel_enemy_keys))
                 self.start_match()
             elif k == pygame.K_ESCAPE:
                 self.state = "menu"
+        elif self.state == "table":
+            if k in (pygame.K_ESCAPE, pygame.K_RETURN, pygame.K_m):
+                self.state = self._table_from
         elif self.state == "fight":
             if k == pygame.K_ESCAPE:
                 self.state = "pause"
@@ -360,6 +418,9 @@ class Game:
                 self.score = [0, 0]
                 self.round = 1
                 self.state = "select"   # в ангар за новой сборкой
+            elif k == pygame.K_t:
+                self._table_from = "match_end"
+                self.state = "table"    # посмотреть таблицу счёта
             elif k in (pygame.K_m, pygame.K_ESCAPE):
                 self.state = "menu"
 
@@ -385,11 +446,32 @@ class Game:
                     if self.score[0] > self.score[1]:
                         self.stats["wins"] += 1
                         self.points += SCORE_MATCH_WIN
+                        res = "win"
                     elif self.score[1] > self.score[0]:
                         self.stats["losses"] += 1
+                        res = "loss"
                     else:
                         self.stats["draws"] += 1
+                        res = "draw"
                     self.final_score = int(self.points * self.score_mult)
+                    # --- ТАБЛИЦА СЧЕТА: забег попадает в топ-10 ---
+                    entry = {
+                        "score": self.final_score, "res": res,
+                        "rounds": "%d:%d" % tuple(self.score),
+                        "c": len(self.build[5]), "b": len(self.build[6]),
+                        "e": len(self.build[7]),
+                        "mult": round(self.score_mult, 2),
+                        "el": ELEMENTS[self.build[4]]["name"],
+                        "date": time.strftime("%d.%m %H:%M"),
+                    }
+                    table = self.stats.setdefault("score_table", [])
+                    table.append(entry)
+                    table.sort(key=lambda r: -int(r.get("score", 0)))
+                    del table[10:]
+                    self.table_place = next(
+                        i for i, r in enumerate(table) if r is entry) + 1
+                    self.new_record = (self.table_place == 1
+                                       and self.final_score > 0)
                     if self.final_score > self.stats.get("best_score", 0):
                         self.stats["best_score"] = self.final_score
                     self._save_stats()
@@ -689,6 +771,8 @@ class Game:
             self._draw_menu()
         elif self.state == "select":
             self._draw_select()
+        elif self.state == "table":
+            self._draw_table()
         elif in_battle:
             self._draw_hud()
             if self.state == "intro":
@@ -726,70 +810,71 @@ class Game:
     def _draw_menu(self):
         self.screen.fill((10, 12, 26))   # и из паузы в меню тоже чистый фон
         img = get_font(110).render("DUEL", True, COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 170)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 150)))
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
-        self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 255)))
+        self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
-            "Q — поставить стену (120 прочности)   E — положить мину",
-            "В ангаре: шасси, корпус, дуло, перк и стихия — 1800 сборок.",
-            "ЛАЗЕРНЫЙ ВЕЕР: возьмите бонусы «Лазер» и «Веер» — лучи веером!",
-            "Жребий (R/T/V): проклятья открывают облегчения, но режут очки.",
-            "Очки: за урон, подборы, раунды и победу. Рекорд — в статистике.",
-            "8 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
+            "Q — стена (120 прочности)   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
+            "Ангар: шасси, корпус, дуло, перк, стихия — 1800 сборок.",
+            "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ.",
+            "Облегчения помогают, но режут счёт; без проклятий — максимум одно.",
+            "На врага можно навесить баффы или дебаффы — это тоже режет счёт.",
+            "10 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
         ]
-        y = 340
+        y = 310
         for s in lines:
-            img = get_font(24, bold=False).render(s, True, COL_DIM)
+            img = get_font(22, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
-            y += 40
+            y += 34
         # выбор сложности
-        y += 10
-        img = get_font(22, bold=False).render("Сложность бота (1/2/3):", True, COL_DIM)
+        y += 6
+        img = get_font(20, bold=False).render("Сложность бота (1/2/3):", True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         for i, dkey in enumerate((1, 2, 3)):
             color = COL_GOLD if self.difficulty == dkey else (70, 80, 120)
-            img = get_font(22).render("%d %s" % (dkey, DIFF_NAMES[dkey]), True, color)
+            img = get_font(20).render("%d %s" % (dkey, DIFF_NAMES[dkey]), True, color)
             self.screen.blit(img, (SCREEN_W / 2 - 100 + i * 135, y - img.get_height() / 2))
-        # статистика матчей
-        y += 52
+        # статистика матчей и рекорд
+        y += 42
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
             self.stats["wins"], self.stats["losses"], self.stats["draws"],
             self.stats.get("best_score", 0))
-        img = get_font(20, bold=False).render(st, True, COL_DIM)
+        img = get_font(18, bold=False).render(st, True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
         # призыв
-        img = get_font(28).render("Enter — в ангар", True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 56)))
+        img = get_font(26).render("Enter — в ангар      T — ТАБЛИЦА СЧЕТА",
+                                  True, COL_P1)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 44)))
         # версия
-        img = get_font(16, bold=False).render("v1.6", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.7", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
         self.screen.fill((10, 12, 26))   # непрозрачный фон: старый бой не просвечивает
-        t1 = get_font(40).render("АНГАР", True, COL_TEXT)
-        self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 52)))
+        t1 = get_font(30).render("АНГАР", True, COL_TEXT)
+        self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 30)))
 
         ch = CHASSIS[CH_KEYS[self.sel_ch]]
-        hu = HULL[HU_KEYS[self.sel_hu]]
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
-        pk = PERKS[PK_KEYS[self.sel_pk]]
         el = ELEMENTS[EL_KEYS[self.sel_el]]
 
-        # --- пять панелей сборки ---
-        self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 128, True)
-        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 218, True)
-        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 308, True)
-        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 398, True)
-        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 488, True)
+        # --- пять компактных панелей сборки ---
+        self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 96)
+        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 162)
+        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 228)
+        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 294)
+        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 360)
 
-        # --- жребий: проклятья и облегчения ---
-        mult = max(SCORE_MULT_FLOOR,
-                   1.0 - SCORE_CURSE_PENALTY * len(self.sel_curses)
-                   - SCORE_BLESS_PENALTY * len(self.sel_blessings))
-        self._fate_panel(586, mult)
+        # --- жребий: проклятья (+очки) и облегчения (-очки) ---
+        mult = self._fate_mult(self.sel_curses, self.sel_blessings,
+                               self.sel_enemy_keys)
+        self._fate_panel(422, 460, mult)
 
-        # итоговые характеристики — с учётом проклятий и облегчений
+        # --- эффекты НА ВРАГА ---
+        self._enemy_panel(552)
+
+        # итоговые характеристики — с учётом жребия
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
                        WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
                        EL_KEYS[self.sel_el],
@@ -797,34 +882,37 @@ class Game:
         stats_line = ("Скорость: %.0f px/с    Прочность: %d    Броня: %d    "
                       "Урон: %d    Выстрел: %.2f с"
                       % (preview.speed, preview.max_hp, ch["armor"],
-                         round(BULLET_DAMAGE * wp["damage_mult"] * el["damage_mult"]),
+                         round(BULLET_DAMAGE * wp["damage_mult"]
+                               * el["damage_mult"] * preview.mods["damage_mult"]),
                          preview.reload_time))
         if preview.mods["spread_deg"] > 0:
             stats_line += "    Разброс: %d°" % round(preview.mods["spread_deg"])
-        img = get_font(20).render(stats_line, True,
+        img = get_font(18).render(stats_line, True,
                                   (255, 150, 90) if preview.speed < 110 else COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 672)))
-        img = get_font(21).render("Enter — в бой      Esc — назад      Очки: x%.2f"
-                                  % mult, True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 702)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 614)))
+        img = get_font(21).render("Enter — в бой      Esc — назад      "
+                                  "Очки за забег: x%.2f" % mult, True, COL_P1)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 644)))
 
-        # превью танка игрока (в углу, чтобы не мешать панелям)
+        # превью танка игрока (внизу справа, чтобы не мешать панелям)
         img = pygame.transform.scale_by(preview._sprite, 1.6)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W - 120, 60)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W - 100, 664)))
 
-    def _fate_panel(self, y, mult):
-        """Жребий: 4 проклятья (красные) и 4 облегчения (зелёные).
-        R/T — курсор, V — взять/снять. Без проклятий — максимум одно облегчение."""
-        t = get_font(24).render("ЖРЕБИЙ   (R / T — выбор, V — взять/снять)",
-                                True, COL_GOLD)
-        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 50)))
+    def _fate_panel(self, y_cur, y_bless, mult):
+        """Жребий: 8 проклятий (красные) и 8 облегчений (зелёные).
+        R/T — курсор, V — взять/снять. Без проклятий — максимум одно
+        облегчение. Проклятья ослабляют ТОЛЬКО ВАС, но ДЕЛАЮТ ОЧКИ."""
+        t = get_font(17).render(
+            "ЖРЕБИЙ   (R / T — курсор, V — взять/снять)   проклятья +%d%% очков"
+            % round(SCORE_CURSE_BONUS * 100), True, COL_GOLD)
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y_cur - 38)))
         n_cur = len(CR_KEYS)
-        step = min(140, (SCREEN_W - 140) // JT_TOTAL)
-        box_w, box_h = step - 22, 56
-        name_f = get_font(14)
+        step = min(150, (SCREEN_W - 140) // n_cur)
+        box_w, box_h = step - 18, 36
+        name_f = get_font(12)
 
         def _wrap(name):
-            if name_f.size(name)[0] <= box_w - 8 or " " not in name:
+            if name_f.size(name)[0] <= box_w - 6 or " " not in name:
                 return [name]
             words = name.split(" ")
             best = None
@@ -835,37 +923,38 @@ class Game:
                     best = (w, a, b)
             return [best[1], best[2]]
 
-        for i in range(JT_TOTAL):
-            if i < n_cur:
-                item, is_curse = CURSES[CR_KEYS[i]], True
-                taken = CR_KEYS[i] in self.sel_curses
-            else:
-                item, is_curse = BLESSINGS[BL_KEYS[i - n_cur]], False
-                taken = BL_KEYS[i - n_cur] in self.sel_blessings
-            edge = (255, 90, 110) if is_curse else (90, 230, 140)
-            x = SCREEN_W / 2 + (i - (JT_TOTAL - 1) / 2) * step
-            box = pygame.Rect(0, 0, box_w, box_h)
-            box.center = (int(x), y)
-            bg = pygame.Rect(box.x - 4, box.y - 4, box.w + 8, box.h + 8)
-            pygame.draw.rect(self.screen,
-                             (58, 28, 42) if is_curse else (22, 46, 34),
-                             bg, border_radius=8)
-            if taken:   # взято — светлая заливка
+        def _row(y, table, keys, taken_keys, is_curse):
+            for i, key in enumerate(keys):
+                item = table[key]
+                taken = key in taken_keys
+                cur = (i if is_curse else n_cur + i) == self.sel_jt
+                edge = (255, 90, 110) if is_curse else (90, 230, 140)
+                x = SCREEN_W / 2 + (i - (len(keys) - 1) / 2) * step
+                box = pygame.Rect(0, 0, box_w, box_h)
+                box.center = (int(x), y)
+                bg = pygame.Rect(box.x - 3, box.y - 3, box.w + 6, box.h + 6)
                 pygame.draw.rect(self.screen,
-                                 (96, 40, 58) if is_curse else (30, 66, 48),
-                                 box, border_radius=8)
-            pygame.draw.rect(self.screen, edge if taken else (60, 70, 110),
-                             box, 3 if taken else 1, border_radius=8)
-            if i == self.sel_jt:   # курсор — белая рамка снаружи
-                pygame.draw.rect(self.screen, COL_TEXT,
-                                 box.inflate(8, 8), 2, border_radius=10)
-            color = COL_TEXT if (taken or i == self.sel_jt) else COL_DIM
-            lines = _wrap(item["name"])
-            dy = box.centery - (len(lines) * 17) // 2 + 8
-            for ln in lines:
-                img = name_f.render(ln, True, color)
-                self.screen.blit(img, img.get_rect(center=(box.centerx, dy)))
-                dy += 17
+                                 (58, 28, 42) if is_curse else (22, 46, 34),
+                                 bg, border_radius=7)
+                if taken:   # взято — светлая заливка
+                    pygame.draw.rect(self.screen,
+                                     (96, 40, 58) if is_curse else (30, 66, 48),
+                                     box, border_radius=7)
+                pygame.draw.rect(self.screen, edge if taken else (60, 70, 110),
+                                 box, 3 if taken else 1, border_radius=7)
+                if cur:   # курсор — белая рамка снаружи
+                    pygame.draw.rect(self.screen, COL_TEXT,
+                                     box.inflate(6, 6), 2, border_radius=9)
+                color = COL_TEXT if (taken or cur) else COL_DIM
+                lines = _wrap(item["name"])
+                dy = box.centery - (len(lines) * 14) // 2 + 7
+                for ln in lines:
+                    img = name_f.render(ln, True, color)
+                    self.screen.blit(img, img.get_rect(center=(box.centerx, dy)))
+                    dy += 14
+
+        _row(y_cur, CURSES, CR_KEYS, self.sel_curses, True)
+        _row(y_bless, BLESSINGS, BL_KEYS, self.sel_blessings, False)
 
         # подпись под жребием: что под курсором и правила
         if self.sel_jt < n_cur:
@@ -876,34 +965,91 @@ class Game:
             item, is_curse = BLESSINGS[BL_KEYS[j]], False
             taken = BL_KEYS[j] in self.sel_blessings
         edge = (255, 90, 110) if is_curse else (90, 230, 140)
-        img = get_font(15).render("%s — %s   [%s]"
+        img = get_font(14).render("%s — %s   [%s]"
                                   % (item["name"], item["desc"],
                                      "ВЗЯТО" if taken else "свободно"),
                                   True, edge)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 42)))
-        rule = ("Без проклятий — максимум одно облегчение, каждое проклятье "
-                "открывает ещё одно (макс. %d). Проклятье -%d%% очков, "
-                "облегчение -%d%% — сейчас x%.2f"
-                % (MAX_CURSES, SCORE_CURSE_PENALTY * 100,
-                   SCORE_BLESS_PENALTY * 100, mult))
-        img = get_font(14, bold=False).render(rule, True, COL_DIM)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 62)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 30)))
+        rule = ("Проклятья ослабляют ТОЛЬКО ВАС, но +%d%% очков каждое (макс. %d). "
+                "Облегчения -%d%% очков: без проклятий — одно, каждое проклятье "
+                "открывает ещё. Сейчас x%.2f"
+                % (round(SCORE_CURSE_BONUS * 100), MAX_CURSES,
+                   round(SCORE_BLESS_PENALTY * 100), mult))
+        img = get_font(12, bold=False).render(rule, True, COL_DIM)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 46)))
 
-    def _choice_panel(self, title, keys, idx, table, y, compact=False):
-        t = get_font(26).render(title, True, COL_GOLD)
-        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 46)))
+    def _enemy_panel(self, y):
+        """Эффекты НА ВРАГА: баффы и дебаффы боту — любой режет счёт."""
+        t = get_font(17).render(
+            "НА ВРАГА   (B / N — курсор, M — взять/снять)   любой эффект режет счёт",
+            True, (255, 170, 80))
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 28)))
+        step = min(180, (SCREEN_W - 140) // len(EE_KEYS))
+        box_w, box_h = step - 16, 36
+        name_f = get_font(12)
+
+        def _wrap(name):
+            if name_f.size(name)[0] <= box_w - 6 or " " not in name:
+                return [name]
+            words = name.split(" ")
+            best = None
+            for j in range(1, len(words)):
+                a, b = " ".join(words[:j]), " ".join(words[j:])
+                w = max(name_f.size(a)[0], name_f.size(b)[0])
+                if best is None or w < best[0]:
+                    best = (w, a, b)
+            return [best[1], best[2]]
+
+        for i, key in enumerate(EE_KEYS):
+            item = ENEMY_EFFECTS[key]
+            taken = key in self.sel_enemy_keys
+            x = SCREEN_W / 2 + (i - (len(EE_KEYS) - 1) / 2) * step
+            box = pygame.Rect(0, 0, box_w, box_h)
+            box.center = (int(x), y)
+            bg = pygame.Rect(box.x - 3, box.y - 3, box.w + 6, box.h + 6)
+            pygame.draw.rect(self.screen, (62, 44, 26), bg, border_radius=7)
+            if taken:
+                pygame.draw.rect(self.screen, (92, 62, 34), box, border_radius=7)
+            pygame.draw.rect(self.screen,
+                             (255, 170, 80) if taken else (60, 70, 110),
+                             box, 3 if taken else 1, border_radius=7)
+            if i == self.sel_en:
+                pygame.draw.rect(self.screen, COL_TEXT,
+                                 box.inflate(6, 6), 2, border_radius=9)
+            color = COL_TEXT if (taken or i == self.sel_en) else COL_DIM
+            lines = _wrap(item["name"])
+            dy = box.centery - (len(lines) * 14) // 2 + 7
+            for ln in lines:
+                img = name_f.render(ln, True, color)
+                self.screen.blit(img, img.get_rect(center=(box.centerx, dy)))
+                dy += 14
+
+        item = ENEMY_EFFECTS[EE_KEYS[self.sel_en]]
+        taken = EE_KEYS[self.sel_en] in self.sel_enemy_keys
+        img = get_font(14).render("%s — %s   [счёт -%d%%]   [%s]"
+                                  % (item["name"], item["desc"],
+                                     round(item["score_cut"] * 100),
+                                     "ВЗЯТО" if taken else "свободно"),
+                                  True, (255, 190, 110))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 28)))
+        img2 = get_font(12, bold=False).render(
+            "Максимум %d эффекта; дебафф -10%% очков, бафф -5%% — и это НЕ "
+            "открывает облегчения" % MAX_ENEMY_EFFECTS, True, COL_DIM)
+        self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 44)))
+
+    def _choice_panel(self, title, keys, idx, table, y):
+        """Компактная панель выбора: заголовок сверху, карточки в ряд."""
+        t = get_font(16).render(title, True, COL_GOLD)
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 34)))
         n = len(keys)
-        box_h = 64 if compact else 84
-        # 5-6 предметов не должны вылезать за экран — сужаем коробки
-        step = min(260 if compact else 330, (SCREEN_W - 140) // n)
-        box_w = step - 26
-        small = box_w < 235
-        name_f = get_font(20 if small else 24)
-        desc_f = get_font(13 if small else 16, bold=False)
+        step = min(240, (SCREEN_W - 140) // n)
+        box_w, box_h = step - 20, 44
+        name_f = get_font(14)
+        desc_f = get_font(11, bold=False)
 
         def _wrap(desc):
             """Длинная подпись в узкой коробке — переносим на 2 строки."""
-            if desc_f.size(desc)[0] <= box_w - 8 or " " not in desc:
+            if desc_f.size(desc)[0] <= box_w - 6 or " " not in desc:
                 return [desc]
             words = desc.split(" ")
             best = None
@@ -920,29 +1066,82 @@ class Game:
             sel = (i == idx)
             box = pygame.Rect(0, 0, box_w, box_h)
             box.center = (int(x), y)
-            bg = pygame.Rect(box.x - 6, box.y - 6, box.w + 12, box.h + 12)
-            pygame.draw.rect(self.screen, (30, 40, 75), bg, border_radius=10)
+            bg = pygame.Rect(box.x - 4, box.y - 4, box.w + 8, box.h + 8)
+            pygame.draw.rect(self.screen, (30, 40, 75), bg, border_radius=8)
             pygame.draw.rect(self.screen, COL_P1 if sel else (60, 70, 110), box,
-                             3 if sel else 1, border_radius=8)
+                             3 if sel else 1, border_radius=7)
             dlines = _wrap(item["desc"])
-            name_y = box.y + (13 if len(dlines) > 1 else 18)
+            name_y = box.y + (11 if len(dlines) > 1 else 14)
             img = name_f.render(item["name"], True, COL_TEXT if sel else COL_DIM)
             self.screen.blit(img, img.get_rect(center=(box.centerx, name_y)))
-            dy = box.y + (31 if len(dlines) > 1 else 44)
+            dy = box.y + (24 if len(dlines) > 1 else 29)
             for dl in dlines:
                 img2 = desc_f.render(dl, True, COL_DIM)
                 self.screen.blit(img2, img2.get_rect(center=(box.centerx, dy)))
-                dy += 16 if small else 20
+                dy += 12
+
+    def _draw_table(self):
+        """ТАБЛИЦА СЧЕТА: топ-10 забегов (хранится в duel_stats.json)."""
+        self.screen.fill((10, 12, 26))
+        t1 = get_font(38).render("ТАБЛИЦА СЧЕТА", True, COL_GOLD)
+        self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 52)))
+        sub = get_font(15, bold=False).render(
+            "топ-10 забегов · проклятья +%d%% очков, облегчения и эффекты на врага режут счёт"
+            % round(SCORE_CURSE_BONUS * 100), True, COL_DIM)
+        self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 88)))
+        rows = self.stats.get("score_table", [])
+        if not rows:
+            img = get_font(22, bold=False).render(
+                "Пока пусто — сыграйте матч, и забег попадёт в таблицу!",
+                True, COL_TEXT)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 300)))
+        else:
+            medal = ((255, 208, 0), (192, 198, 215), (205, 127, 50))
+            row_f = get_font(17)
+            dim_f = get_font(15, bold=False)
+            y = 126
+            for i, r in enumerate(rows):
+                col = medal[i] if i < 3 else COL_DIM
+                img = row_f.render("#%d" % (i + 1), True, col)
+                self.screen.blit(img, (150 - img.get_width(), y))
+                img = get_font(20 if i == 0 else 18).render(
+                    str(r.get("score", 0)), True, col if i < 3 else COL_TEXT)
+                self.screen.blit(img, img.get_rect(midleft=(190, y + 9)))
+                res = r.get("res", "draw")
+                rtxt, rcol = (("ПОБЕДА", COL_P1) if res == "win" else
+                              ("ПОРАЖЕНИЕ", COL_P2) if res == "loss" else
+                              ("НИЧЬЯ", COL_DIM))
+                img = dim_f.render("%s %s" % (rtxt, r.get("rounds", "")),
+                                   True, rcol)
+                self.screen.blit(img, img.get_rect(midleft=(300, y + 9)))
+                img = dim_f.render(
+                    "прокл.%d облег.%d враг%d" % (r.get("c", 0), r.get("b", 0),
+                                                  r.get("e", 0)), True, COL_DIM)
+                self.screen.blit(img, img.get_rect(midleft=(490, y + 9)))
+                img = dim_f.render("x%.2f" % r.get("mult", 1.0), True, COL_GOLD)
+                self.screen.blit(img, img.get_rect(midleft=(700, y + 9)))
+                img = dim_f.render(str(r.get("el", "-")), True, (170, 190, 255))
+                self.screen.blit(img, img.get_rect(midleft=(795, y + 9)))
+                img = dim_f.render(str(r.get("date", "")), True, (95, 105, 145))
+                self.screen.blit(img, img.get_rect(midright=(1130, y + 9)))
+                if (self._table_from == "match_end"
+                        and i + 1 == self.table_place):
+                    img = dim_f.render("← ваш забег", True, COL_GOLD)
+                    self.screen.blit(img, img.get_rect(midleft=(1145, y + 9)))
+                y += 36
+        img = get_font(20).render("Esc / Enter — назад", True, COL_P1)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 668)))
 
     def _draw_match_end(self):
         win = self.score[0] > self.score[1]
         color = COL_P1 if win else COL_P2
+        rec = "  НОВЫЙ РЕКОРД!" if self.new_record else ""
         self._banner("ПОБЕДА!" if win else "ПОРАЖЕНИЕ", color,
-                     "Счёт %d : %d      Enter — реванш   A — ангар   M — меню"
-                     % tuple(self.score),
-                     sub2="ОЧКИ: %d   (жребий x%.2f)   РЕКОРД: %d"
+                     "Счёт %d : %d      Enter — реванш   A — ангар   "
+                     "T — таблица   M — меню" % tuple(self.score),
+                     sub2="ОЧКИ: %d  (множитель x%.2f)   МЕСТО В ТАБЛИЦЕ: #%d%s"
                           % (self.final_score, self.score_mult,
-                             self.stats.get("best_score", 0)))
+                             max(1, self.table_place), rec))
 
     # ----- HUD во время боя -----
     def _hp_bar(self, x, y, tank, right=False):
@@ -974,12 +1173,16 @@ class Game:
         # --- игрок (слева) ---
         self.screen.blit(self._build_label(p, "ИГРОК"), (70, 62))
         self._hp_bar(70, 92, p)
-        self._mini_info(p, 70, 116)
+        self._mini_info(p, 70, 116,
+                        extra=("НА ВРАГА %d" % len(self.build[7]))
+                        if self.build[7] else "")
         # --- бот (справа) ---
         img = self._build_label(b, "БОТ")
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, 62)))
         self._hp_bar(SCREEN_W - 330, 92, b, right=True)
-        self._mini_info(b, SCREEN_W - 70, 116, right=True)
+        self._mini_info(b, SCREEN_W - 70, 116, right=True,
+                        extra=("ЭФФЕКТЫ ИГРОКА %d" % len(self.build[7]))
+                        if self.build[7] else "")
         # --- счёт по центру ---
         img = get_font(44).render("%d : %d" % tuple(self.score), True, COL_TEXT)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 86)))
@@ -989,12 +1192,12 @@ class Game:
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 120)))
         pts = int(self.points * self.score_mult)
         label = "ОЧКИ %d" % pts
-        if self.score_mult < 1.0:
+        if abs(self.score_mult - 1.0) > 1e-9:
             label += "  ·  жребий x%.2f" % self.score_mult
         img = get_font(15, bold=False).render(label, True, COL_GOLD)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 141)))
 
-    def _mini_info(self, t, x, y, right=False):
+    def _mini_info(self, t, x, y, right=False, extra=""):
         # перезарядка
         k = 1 - t.cooldown / t.reload_time
         k = max(0.0, min(1.0, k))
@@ -1047,6 +1250,8 @@ class Game:
             sfx.append("ПРОКЛЯТЬЯ %d" % len(t.curses_keys))
         if t.blessings_keys:
             sfx.append("ОБЛЕГЧЕНИЯ %d" % len(t.blessings_keys))
+        if extra:
+            sfx.append(extra)
         row_y = y + 32
         if sfx:
             img = get_font(16, bold=False).render("   ".join(sfx), True, (160, 200, 255))
