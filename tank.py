@@ -5,9 +5,10 @@
 * множитель дула * множитель перка. Хотели имбу? Их нет.
 """
 import math
+import random
 import pygame
-from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, TANK_RADIUS,
-                      BULLET_DAMAGE,
+from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS,
+                      TANK_RADIUS, BULLET_DAMAGE,
                       PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
                       PU_RAPID_TIME, PU_RAPID_MULT,
                       BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT,
@@ -20,7 +21,8 @@ from bullet import Bullet, ELEMENT_COLORS
 
 class Tank:
     def __init__(self, x, y, angle, chassis_key, hull_key, color,
-                 weapon_key="standard", perk_key="none", element_key="none"):
+                 weapon_key="standard", perk_key="none", element_key="none",
+                 curses=(), blessings=()):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
@@ -32,10 +34,24 @@ class Tank:
         self.weapon = WEAPONS[weapon_key]
         self.perk = PERKS[perk_key]
         self.elem = ELEMENTS[element_key]
+        # жребий: проклятья и облегчения (только у игрока, берутся в ангаре)
+        self.curses_keys = tuple(curses)
+        self.blessings_keys = tuple(blessings)
+        self.mods = {"hp_mult": 1.0, "speed_mult": 1.0, "reload_mult": 1.0,
+                     "spread_deg": 0.0, "bullet_speed_mult": 1.0}
+        for _table, _keys in ((CURSES, self.curses_keys),
+                              (BLESSINGS, self.blessings_keys)):
+            for _key in _keys:
+                for _f, _v in _table[_key]["mods"].items():
+                    if _f == "spread_deg":
+                        self.mods[_f] += _v
+                    else:
+                        self.mods[_f] *= _v
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
         self.radius = TANK_RADIUS
-        self.max_hp = max(20, int(round(self.hull["hp"] * self.perk["hp_mult"])))
+        self.max_hp = max(20, int(round(self.hull["hp"] * self.perk["hp_mult"]
+                                        * self.mods["hp_mult"])))
         self.hp = self.max_hp
         self.armor = self.chassis["armor"]  # сглаживание урона
         self.cooldown = 0.0
@@ -70,6 +86,7 @@ class Tank:
         s = self.chassis["speed"] * (1.0 - self.hull["weight"]
                                      * self.chassis.get("wmult", 1.0))
         s *= self.weapon["move_mult"] * self.perk["speed_mult"]
+        s *= self.mods["speed_mult"]        # жребий: форсаж или ржавые гусеницы
         if self.mud_t > 0:
             s *= EARTH_MULT     # увяз в земле
         if self.shock_t > 0:
@@ -89,7 +106,8 @@ class Tank:
 
     @property
     def reload_time(self):
-        r = self.hull["reload"] * self.weapon["reload_mult"] * self.perk["reload_mult"]
+        r = (self.hull["reload"] * self.weapon["reload_mult"]
+             * self.perk["reload_mult"] * self.mods["reload_mult"])
         if self.rapid_t > 0:
             r *= PU_RAPID_MULT
         return r
@@ -183,9 +201,13 @@ class Tank:
             self.triple -= 1
         # стихия из ангара заряжает КАЖДЫЙ снаряд: цена — часть урона
         dmg = BULLET_DAMAGE * self.weapon["damage_mult"] * self.elem["damage_mult"]
-        spd = self.weapon["speed_mult"] * self.elem["speed_mult"]
+        spd = (self.weapon["speed_mult"] * self.elem["speed_mult"]
+               * self.mods["bullet_speed_mult"])
         elem = self.element_key if self.element_key != "none" else None
+        sp = self.mods["spread_deg"]    # «Разбитый прицел» разбрасывает снаряды
         for a in angles:
+            if sp > 0:
+                a = a + random.uniform(-sp, sp)
             bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
                                   element=elem))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка

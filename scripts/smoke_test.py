@@ -184,7 +184,7 @@ def test_elements():
     # сборка игрока доезжает до танка: элемент попадает в конструктор
     from game import Game as _G
     g = _G()
-    g.build = ("light", "light", "standard", "sprinter", "electric")
+    g.build = ("light", "light", "standard", "sprinter", "electric", (), ())
     g._reset_round()
     check("стихия из ангара доезжает до танка",
           g.player.element_key == "electric" and
@@ -272,6 +272,213 @@ def test_mine_rules():
     pygame.quit()
 
 
+# ---------- 3e. ЛАЗЕРНЫЙ ВЕЕР: лазер + веер = три луча разом ----------
+def test_laser_fan():
+    from game import Game
+    from settings import PU_LASER_FAN_DAMAGE, PU_LASER_DAMAGE
+
+    beams = []
+
+    class _Fx:
+        def beam(self, *a):
+            beams.append(a)
+
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    g = Game()
+    g.state = "fight"
+    g._reset_round()
+    g.effects = _Fx()
+    p, bot = g.player, g.bot_tank
+    # чистая полоса карты «Классика» (центральная колонна выше/ниже)
+    p.x, p.y, p.angle = 350, 250, 0
+    bot.x, bot.y = 750, 250
+    hp0 = bot.hp
+
+    # лазер + веер: ОДНО нажатие — три луча, тратятся и лазер, и веер
+    p.laser_charges = 2
+    p.triple = 1
+    p.cooldown = 0
+    g.fire_weapon(p)
+    check("лазерный веер: три луча разом", len(beams) == 3,
+          "(лучей %d)" % len(beams))
+    check("веер тратит заряд лазера и заряд веера",
+          p.laser_charges == 1 and p.triple == 0)
+    check("каждый луч веера бьёт на %d" % PU_LASER_FAN_DAMAGE,
+          abs((hp0 - bot.hp) - max(5, round(PU_LASER_FAN_DAMAGE - bot.armor))) < 0.51,
+          "(урон %.0f, броня %d)" % (hp0 - bot.hp, bot.armor))
+    check("после веера идёт полная перезарядка", p.cooldown > 0)
+
+    # лазер БЕЗ веера — обычный одиночный луч полной силы
+    n0 = len(beams)
+    hp1 = bot.hp
+    p.cooldown = 0
+    g.fire_weapon(p)
+    check("лазер без веера — один луч", len(beams) - n0 == 1)
+    check("обычный лазер бьёт на %d" % PU_LASER_DAMAGE,
+          abs((hp1 - bot.hp) - max(5, round(PU_LASER_DAMAGE - bot.armor))) < 0.51,
+          "(урон %.0f)" % (hp1 - bot.hp))
+    check("веер без лазера остаётся снарядами (лучей больше не стало)",
+          len(beams) == n0 + 1 and p.triple == 0)
+    pygame.quit()
+
+
+# ---------- 3f. ЖРЕБИЙ: проклятья и облегчения ----------
+def test_fate():
+    from game import Game
+    from settings import (CURSES, BLESSINGS, MAX_CURSES, BULLET_DAMAGE,
+                          SCORE_CURSE_PENALTY, SCORE_BLESS_PENALTY,
+                          SCORE_MULT_FLOOR)
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    g = Game()
+    # правило: без проклятий — максимум ОДНО облегчение
+    g._toggle_bless(0)
+    check("первое облегчение берётся и без проклятий", len(g.sel_blessings) == 1)
+    g._toggle_bless(1)
+    check("второе облегчение без проклятий НЕ берётся", len(g.sel_blessings) == 1)
+    g._toggle_curse(0)
+    check("проклятье берётся", len(g.sel_curses) == 1)
+    g._toggle_bless(1)
+    check("проклятье открыло второе облегчение", len(g.sel_blessings) == 2)
+    g._toggle_curse(0)   # сняли проклятье — лишнее облегчение слетает
+    check("снял проклятье — лишнее облегчение снялось само",
+          len(g.sel_curses) == 0 and len(g.sel_blessings) == 1)
+
+    # потолок: 3 проклятья и 4 облегчения
+    g2 = Game()
+    for i in range(4):
+        g2._toggle_curse(i)
+    for i in range(4):
+        g2._toggle_bless(i)
+    check("больше %d проклятий не взять" % MAX_CURSES,
+          len(g2.sel_curses) == MAX_CURSES)
+    check("3 проклятья открывают все 4 облегчения",
+          len(g2.sel_blessings) == 4)
+
+    # модификаторы доезжают до танка и работают
+    base = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
+    g2.build = ("medium", "medium", "standard", "none", "none",
+                tuple(g2.sel_curses), tuple(g2.sel_blessings))
+    g2._reset_round()
+    p = g2.player
+    check("проклятья/облегчения доезжают до танка",
+          len(p.curses_keys) == 3 and len(p.blessings_keys) == 4)
+    # хрупкость 0.75 + укрепление 1.25 = 0.9375 от 110 HP
+    check("HP пересчитано жребием",
+          p.max_hp == max(20, int(round(110 * 0.75 * 1.25))),
+          "(hp %d)" % p.max_hp)
+    check("скорость: ржавые 0.85 x форсаж 1.15",
+          abs(p.speed - base.speed * 0.85 * 1.15) < 0.01,
+          "(%.1f vs %.1f)" % (p.speed, base.speed * 0.85 * 1.15))
+    check("перезарядка: отточенный ствол -20%",
+          abs(p.reload_time - base.reload_time * 0.8) < 1e-6)
+    # проклятье и облегчение на одну характеристику гасят друг друга
+    tr = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none", "none",
+              ("long_reload",), ("refined",))
+    check("долгая перезарядка x1.25 гасится отточенной x0.8",
+          abs(tr.reload_time - base.reload_time) < 1e-9,
+          "(%.3f vs %.3f)" % (tr.reload_time, base.reload_time))
+    check("снаряды быстрее: дальний бой x1.15",
+          abs(p.mods["bullet_speed_mult"] - 1.15) < 1e-9)
+
+    # разбитый прицел реально разбрасывает снаряды
+    import math
+    g3 = Game()
+    g3.state = "fight"
+    g3.build = ("medium", "medium", "standard", "none", "none", ("shaky",), ())
+    g3._reset_round()
+    sh = g3.player
+    check("разбитый прицел: разброс 7°", sh.mods["spread_deg"] == 7.0)
+    seen = set()
+    for _ in range(30):
+        sh.cooldown = 0
+        sh.mag_ammo = sh.mag_size
+        bs = []
+        sh.try_shoot(bs, _Fx(), _Snd())
+        ang = math.degrees(math.atan2(bs[0].vy, bs[0].vx))
+        seen.add(round(ang - sh.angle, 2))
+    check("разброс реально виден в выстрелах", len(seen) > 5,
+          "(разных углов %d)" % len(seen))
+
+    # множитель очков: -15% за проклятье, -10% за облегчение, пол x0.30
+    g4 = Game()
+    g4.build = ("medium", "medium", "standard", "none", "none", (), ())
+    check("без жребия очки x1.00", abs(g4._score_mult() - 1.0) < 1e-9)
+    g4.build = ("medium", "medium", "standard", "none", "none", ("fragile",), ())
+    check("проклятье режет очки на %.0f%%" % (SCORE_CURSE_PENALTY * 100),
+          abs(g4._score_mult() - (1 - SCORE_CURSE_PENALTY)) < 1e-9)
+    g4.build = ("medium", "medium", "standard", "none", "none",
+                ("fragile", "rusty", "shaky"),
+                ("armor", "overdrive", "refined", "swift"))
+    check("жирный жребий упирается в пол x%.2f" % SCORE_MULT_FLOOR,
+          abs(g4._score_mult() - SCORE_MULT_FLOOR) < 1e-9,
+          "(x%.2f)" % g4._score_mult())
+    pygame.quit()
+
+
+# ---------- 3g. ОЧКИ: за урон, раунды и победу; рекорд ----------
+def test_points():
+    from game import Game
+    from settings import SCORE_ROUND_WIN, SCORE_MATCH_WIN
+    from bullet import Bullet
+
+    g = Game()
+    g.state = "fight"
+    g._reset_round()
+    g._fake_keys = FakeKeys(())
+    p, bot = g.player, g.bot_tank
+    # чистая полоса, враг заморожен — пуля гарантированно долетает
+    p.x, p.y, p.angle = 350, 250, 0
+    bot.x, bot.y = 650, 250
+    bot.frozen_t = 3.0
+    g.bullets.append(Bullet(380, 250, 0, p))
+    for _ in range(30):
+        g.update(1 / 60.0)
+    check("очки капают за урон врагу", g.points > 0, "(%.0f)" % g.points)
+
+    # победа в раунде — плюс очки
+    g.state = "fight"
+    g.bot_tank.alive = False
+    g.player.alive = True
+    g.update(1 / 60.0)
+    check("победа в раунде +%d очков" % SCORE_ROUND_WIN,
+          g.winner == 0 and g.points >= SCORE_ROUND_WIN,
+          "(%.0f)" % g.points)
+
+    # матч завершается — итог умножается на жребий и пишется рекорд
+    g.score_mult = 0.5
+    g.score = [4, 2]
+    g.state = "fight"
+    g.bot_tank.alive = False
+    g.player.alive = True
+    g.update(1 / 60.0)      # фиксирует победителя, раунд 5:2
+    g.state = "round_end"
+    g.timer = 0.01
+    g.update(1 / 60.0)      # листает в match_end: +300 и итог
+    check("матч завершён, итоговые очки посчитаны с жребием",
+          g.state == "match_end" and
+          g.final_score == int(g.points * g.score_mult),
+          "(сырых %.0f, итог %d)" % (g.points, g.final_score))
+    check("рекорд очков пишется в статистику",
+          g.stats["best_score"] >= g.final_score)
+    pygame.quit()
+
+
 # ---------- 4. обойма «Спарки»: 2 снаряда, потом долгая перезарядка ----------
 def test_magazine():
     t = Tank(0, 0, 0, "medium", "medium", COL, "twin", "none")
@@ -321,10 +528,14 @@ def test_battle():
     check("бой идёт без ошибок 8 сек", g.state in ("fight", "round_end"))
     g.draw()  # HUD/арена/стены рисуются без исключений
 
-    # гараж: 5 панелей (шасси/корпус/дуло/перк/стихия) рисуется
+    # гараж: 5 панелей + жребий рисуется
     g.state = "select"
     g._draw_select()
-    check("ангар: 5 панелей, включая стихию, работает", True)
+    check("ангар: 5 панелей + жребий (R/T/V) рисуется", True)
+    # V в ангаре берёт облегчение (курсор на первой зелёной карте, индекс 4)
+    g.sel_jt = 4
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_v))
+    check("V берёт облегчение в ангаре", len(g.sel_blessings) == 1)
     g.state = "fight"
 
     # регрессия победителя: убили бота — очко ИГРОКУ (bug 74c15bb)
@@ -380,6 +591,9 @@ if __name__ == "__main__":
     test_elements()
     test_barrier()
     test_mine_rules()
+    test_laser_fan()
+    test_fate()
+    test_points()
     test_magazine()
     test_battle()
     print()

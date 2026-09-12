@@ -12,7 +12,7 @@ import pygame
 from game import Game
 
 g = Game()
-g.build = ("medium", "medium", "standard", "none", "fire")   # стихия — в сборке
+g.build = ("medium", "medium", "standard", "none", "fire", (), ())   # стихия — в сборке
 g.state = "fight"
 g._reset_round()
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
@@ -31,9 +31,11 @@ g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 print("screenshot.png обновлён")
 
-# ангар с 5 панелями — отдельный снимок для проверки вёрстки
+# ангар: 5 панелей + жребий — отдельный снимок для проверки верстки
 g.state = "select"
 g.sel_el = 1   # «Огонь» выделен
+g.sel_curses = ["shaky"]       # взято одно проклятье
+g.sel_blessings = ["armor"]    # открыто два облегчения, взято одно
 g._draw_select()
 out = "/home/z/my-project/tool-results/garage.png"
 pygame.image.save(g.screen, out)

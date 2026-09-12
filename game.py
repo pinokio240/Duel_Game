@@ -8,13 +8,18 @@ import pygame
 from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       COL_P1, COL_P2, COL_GOLD, ROUNDS_TO_WIN, ROUND_BANNER_T,
                       ROUND_PAUSE_T, CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS,
+                      CURSES, BLESSINGS, MAX_CURSES,
                       BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
                       PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
+                      PU_LASER_FAN_DAMAGE, PU_LASER_FAN_SPREAD,
                       PU_SMOKE_TIME, PU_SMOKE_RADIUS, PU_FREEZE_TIME,
                       PU_MINE_ENEMY_DIST,
                       BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
+                      SCORE_CURSE_PENALTY, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
+                      SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
+                      SCORE_PICKUP,
                       DIFF_PRESETS, BOT_DIFFICULTY)
 from arena import Arena, LAYOUTS
 from tank import Tank
@@ -28,6 +33,9 @@ HU_KEYS = list(HULL)
 WP_KEYS = list(WEAPONS)
 PK_KEYS = list(PERKS)
 EL_KEYS = list(ELEMENTS)
+CR_KEYS = list(CURSES)
+BL_KEYS = list(BLESSINGS)
+JT_TOTAL = len(CR_KEYS) + len(BL_KEYS)   # карт жребия: 4 проклятия + 4 облегчения
 STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duel_stats.json")
 DIFF_NAMES = {1: "Лёгкий", 2: "Норм", 3: "Хардкор"}
 
@@ -148,14 +156,22 @@ class Game:
         # состояние
         self.state = "menu"       # menu/select/intro/fight/round_end/match_end/pause
         self.timer = 0.0
-        self.build = ("medium", "medium", "standard", "none", "none")   # сборка игрока
+        # сборка игрока: шасси, корпус, дуло, перк, стихия, проклятья, облегчения
+        self.build = ("medium", "medium", "standard", "none", "none", (), ())
         self.bot_build = ("medium", "medium", "standard", "none", "none")
         self.sel_ch, self.sel_hu = 1, 1     # курсоры в ангаре
         self.sel_wpn, self.sel_pk, self.sel_el = 0, 0, 0
+        self.sel_jt = 0                     # курсор жребия (0..7)
+        self.sel_curses = []                # взятые проклятья (ключи)
+        self.sel_blessings = []             # взятые облегчения (ключи)
         self.score = [0, 0]
         self.round = 1
         self.winner = 0
         self.difficulty = BOT_DIFFICULTY
+        # очки за матч (сырые), множитель жребия и итог
+        self.points = 0.0
+        self.score_mult = 1.0
+        self.final_score = 0
 
         # объекты боя
         self.player = None
@@ -178,9 +194,10 @@ class Game:
                 d = json.load(f)
             return {"wins": int(d.get("wins", 0)),
                     "losses": int(d.get("losses", 0)),
-                    "draws": int(d.get("draws", 0))}
+                    "draws": int(d.get("draws", 0)),
+                    "best_score": int(d.get("best_score", 0))}
         except Exception:
-            return {"wins": 0, "losses": 0, "draws": 0}
+            return {"wins": 0, "losses": 0, "draws": 0, "best_score": 0}
 
     def _save_stats(self):
         try:
@@ -193,7 +210,8 @@ class Game:
     def _reset_round(self):
         cx, cy = SCREEN_W / 2, SCREEN_H / 2
         self.player = Tank(cx - 400, cy, 0, self.build[0], self.build[1], COL_P1,
-                           self.build[2], self.build[3], self.build[4])
+                           self.build[2], self.build[3], self.build[4],
+                           self.build[5], self.build[6])
         self.bot_tank = Tank(cx + 400, cy, 180, self.bot_build[0], self.bot_build[1],
                              COL_P2, self.bot_build[2], self.bot_build[3],
                              self.bot_build[4])
@@ -213,10 +231,40 @@ class Game:
         self.bot_build = random_build()
         self.score = [0, 0]
         self.round = 1
+        self.points = 0.0
+        self.score_mult = self._score_mult()   # жребий уже учтён в сборке
         self._reset_round()
         self.state = "intro"
         self.timer = ROUND_BANNER_T
         self.sounds.play("round")
+
+    # ================= жребий: проклятья и облегчения =================
+    def _bless_cap(self):
+        """Сколько облегчений можно взять: 1 + каждое проклятье."""
+        return 1 + len(self.sel_curses)
+
+    def _toggle_curse(self, idx):
+        key = CR_KEYS[idx]
+        if key in self.sel_curses:
+            self.sel_curses.remove(key)
+            # проклятий стало меньше — лишние облегчения придётся снять
+            while len(self.sel_blessings) > self._bless_cap():
+                self.sel_blessings.pop()
+        elif len(self.sel_curses) < MAX_CURSES:
+            self.sel_curses.append(key)
+
+    def _toggle_bless(self, idx):
+        key = BL_KEYS[idx]
+        if key in self.sel_blessings:
+            self.sel_blessings.remove(key)
+        elif len(self.sel_blessings) < self._bless_cap():
+            self.sel_blessings.append(key)
+
+    def _score_mult(self):
+        """Множитель очков за взятый жребий (по ЗАФИКСИРОВАННОЙ сборке)."""
+        return max(SCORE_MULT_FLOOR,
+                   1.0 - SCORE_CURSE_PENALTY * len(self.build[5])
+                   - SCORE_BLESS_PENALTY * len(self.build[6]))
 
     # ================= ввод (клавиатура по событиям) =================
     def on_keydown(self, e):
@@ -268,10 +316,23 @@ class Game:
             elif k == pygame.K_g:
                 self.sel_el = (self.sel_el + 1) % len(EL_KEYS)
                 self.sounds.play("ric")
+            elif k == pygame.K_r:
+                self.sel_jt = (self.sel_jt - 1) % JT_TOTAL
+                self.sounds.play("ric")
+            elif k == pygame.K_t:
+                self.sel_jt = (self.sel_jt + 1) % JT_TOTAL
+                self.sounds.play("ric")
+            elif k == pygame.K_v:
+                if self.sel_jt < len(CR_KEYS):
+                    self._toggle_curse(self.sel_jt)
+                else:
+                    self._toggle_bless(self.sel_jt - len(CR_KEYS))
+                self.sounds.play("ric")
             elif k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
                               WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
-                              EL_KEYS[self.sel_el])
+                              EL_KEYS[self.sel_el],
+                              tuple(self.sel_curses), tuple(self.sel_blessings))
                 self.start_match()
             elif k == pygame.K_ESCAPE:
                 self.state = "menu"
@@ -323,10 +384,14 @@ class Game:
                     self.state = "match_end"
                     if self.score[0] > self.score[1]:
                         self.stats["wins"] += 1
+                        self.points += SCORE_MATCH_WIN
                     elif self.score[1] > self.score[0]:
                         self.stats["losses"] += 1
                     else:
                         self.stats["draws"] += 1
+                    self.final_score = int(self.points * self.score_mult)
+                    if self.final_score > self.stats.get("best_score", 0):
+                        self.stats["best_score"] = self.final_score
                     self._save_stats()
                     self.sounds.play("win" if self.score[0] > self.score[1] else "lose")
                 else:
@@ -360,6 +425,8 @@ class Game:
         if keys[pygame.K_SPACE]:
             self.fire_weapon(self.player)
 
+        hp0 = self.bot_tank.hp   # для очков: сколько HP отнимем за этот кадр
+
         # снаряды бьют стены-барьеры (а стены блокируют и обзор бота)
         walls = self.arena.walls_only()
         for b in self.bullets:
@@ -381,6 +448,9 @@ class Game:
         self._powerups_step(dt)
 
         if not self.player.alive or not self.bot_tank.alive:
+            # очки за урон в этом кадре (включая добивание)
+            if self.bot_tank.hp < hp0:
+                self.points += hp0 - self.bot_tank.hp
             if self.player.alive:
                 self.winner = 0   # выжил игрок
             elif self.bot_tank.alive:
@@ -389,25 +459,48 @@ class Game:
                 self.winner = -1  # оба подорвались — ничья, очко никому
             if self.winner >= 0:
                 self.score[self.winner] += 1
+                if self.winner == 0:
+                    self.points += SCORE_ROUND_WIN
+            else:
+                self.points += SCORE_ROUND_DRAW
             self.state = "round_end"
             self.timer = ROUND_PAUSE_T
             self.sounds.play("round")
+        elif self.bot_tank.hp < hp0:
+            # очки за урон врагу: снаряды, лазер, мины, пожар — 1:1 за HP
+            self.points += hp0 - self.bot_tank.hp
 
     # ================= оружие (снаряды и лазер) =================
     def fire_weapon(self, t):
-        """Единая точка стрельбы: если есть заряды лазера — луч, иначе снаряд."""
+        """Единая точка стрельбы: если есть заряды лазера — луч, иначе снаряд.
+        ЛАЗЕРНЫЙ ВЕЕР: при активном веере лазер стреляет ТРЕМЯ лучами
+        и тратит 1 заряд веера."""
         if not t.alive or t.frozen_t > 0 or t.cooldown > 0:
             return
         if t.laser_charges > 0:
             t.laser_charges -= 1
-            self.fire_laser(t)
+            fan = t.triple > 0
+            if fan:
+                t.triple -= 1
+            self.fire_laser(t, fan=fan)
             t.cooldown = t.reload_time
         else:
             t.try_shoot(self.bullets, self.effects, self.sounds)
 
-    def fire_laser(self, shooter):
-        """Мгновенный луч: пробивает всё до первой стены, поджигает первого врага."""
-        rad = math.radians(shooter.angle)
+    def fire_laser(self, shooter, fan=False):
+        """Мгновенный луч: пробивает всё до первой стены.
+        Веер (fan=True) — три луча с разбросом, каждый слабее."""
+        if fan:
+            for off in (-PU_LASER_FAN_SPREAD, 0.0, PU_LASER_FAN_SPREAD):
+                self._laser_ray(shooter, shooter.angle + off,
+                                PU_LASER_FAN_DAMAGE)
+        else:
+            self._laser_ray(shooter, shooter.angle, PU_LASER_DAMAGE)
+        self.sounds.play("laser")
+
+    def _laser_ray(self, shooter, angle_deg, dmg):
+        """Один луч: лучевая трассировка до стены, поджигает первого врага."""
+        rad = math.radians(angle_deg)
         sx = shooter.x + math.cos(rad) * (shooter.radius + 16)
         sy = shooter.y + math.sin(rad) * (shooter.radius + 16)
         x, y = sx, sy
@@ -427,8 +520,7 @@ class Game:
         self.effects.beam(sx, sy, x, y, shooter.light)
         self.effects.burst(x, y, shooter.light, 8, 190, 0.3, 3)
         if hit:
-            hit.take_damage(PU_LASER_DAMAGE, self.effects, self.sounds)
-        self.sounds.play("laser")
+            hit.take_damage(dmg, self.effects, self.sounds)
 
     # ================= зрение (стены + дым) =================
     def vision_blocked(self, x1, y1, x2, y2):
@@ -563,6 +655,8 @@ class Game:
         else:
             # мина и стена носятся в боекомплекте (E / Q) — всё в apply_powerup
             t.apply_powerup(pu.kind)
+        if t is self.player:
+            self.points += SCORE_PICKUP   # очки за подбор бонуса
         self.effects.float_text(t.x, t.y - 54, info["name"], info["color"])
         self.sounds.play("pickup")
 
@@ -602,18 +696,20 @@ class Game:
                              "карта «%s»" % self.arena.name)
             elif self.state == "round_end":
                 if self.winner == 0:
-                    self._banner("РАУНД ЗА ИГРОКОМ", COL_P1)
+                    self._banner("РАУНД ЗА ИГРОКОМ", COL_P1,
+                                 sub2="+%d ОЧКОВ" % SCORE_ROUND_WIN)
                 elif self.winner == 1:
                     self._banner("РАУНД ЗА БОТОМ", COL_P2)
                 else:
-                    self._banner("НИЧЬЯ", COL_TEXT)
+                    self._banner("НИЧЬЯ", COL_TEXT,
+                                 sub2="+%d ОЧКОВ" % SCORE_ROUND_DRAW)
             elif self.state == "match_end":
                 self._draw_match_end()
             elif self.state == "pause":
                 self._banner("ПАУЗА", COL_TEXT,
                              "Esc — продолжить   A — ангар   M — меню")
 
-    def _banner(self, text, color, sub=""):
+    def _banner(self, text, color, sub="", sub2=None):
         dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
         dim.fill((5, 6, 14, 150))
         self.screen.blit(dim, (0, 0))
@@ -622,6 +718,10 @@ class Game:
         if sub:
             img2 = get_font(26, bold=False).render(sub, True, COL_DIM)
             self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, SCREEN_H / 2 + 40)))
+        if sub2:
+            img3 = get_font(24).render(sub2, True, COL_GOLD)
+            self.screen.blit(img3, img3.get_rect(
+                center=(SCREEN_W / 2, SCREEN_H / 2 + (84 if sub else 46))))
 
     def _draw_menu(self):
         self.screen.fill((10, 12, 26))   # и из паузы в меню тоже чистый фон
@@ -632,10 +732,11 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — поставить стену (120 прочности)   E — положить мину",
-            "В ангаре: шасси, корпус, дуло, перк и СТИХИЯ — 1800 комбинаций.",
-            "Стихия заряжает каждый снаряд: огонь, вода, земля, ток, воздух.",
-            "8 арен, 10 бонусов: стены, мины, лазер, дым, ЭМИ.",
-            "Бот собирает бонусы и строит стены — не зевайте!",
+            "В ангаре: шасси, корпус, дуло, перк и стихия — 1800 сборок.",
+            "ЛАЗЕРНЫЙ ВЕЕР: возьмите бонусы «Лазер» и «Веер» — лучи веером!",
+            "Жребий (R/T/V): проклятья открывают облегчения, но режут очки.",
+            "Очки: за урон, подборы, раунды и победу. Рекорд — в статистике.",
+            "8 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
         ]
         y = 340
         for s in lines:
@@ -652,15 +753,16 @@ class Game:
             self.screen.blit(img, (SCREEN_W / 2 - 100 + i * 135, y - img.get_height() / 2))
         # статистика матчей
         y += 52
-        st = "Побед: %d   Поражений: %d   Ничьих: %d" % (
-            self.stats["wins"], self.stats["losses"], self.stats["draws"])
+        st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
+            self.stats["wins"], self.stats["losses"], self.stats["draws"],
+            self.stats.get("best_score", 0))
         img = get_font(20, bold=False).render(st, True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
         # призыв
         img = get_font(28).render("Enter — в ангар", True, COL_P1)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 56)))
         # версия
-        img = get_font(16, bold=False).render("v1.5", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.6", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
@@ -673,39 +775,119 @@ class Game:
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
         pk = PERKS[PK_KEYS[self.sel_pk]]
         el = ELEMENTS[EL_KEYS[self.sel_el]]
-        speed = (ch["speed"] * (1 - hu["weight"] * ch.get("wmult", 1.0))
-                 * wp["move_mult"] * pk["speed_mult"])
-        hp = max(20, int(round(hu["hp"] * pk["hp_mult"])))
-        reload = hu["reload"] * wp["reload_mult"] * pk["reload_mult"]
-        dmg = round(BULLET_DAMAGE * wp["damage_mult"] * el["damage_mult"])
 
-        # --- пять панелей выбора (компактно, чтобы всё влезло) ---
+        # --- пять панелей сборки ---
         self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 128, True)
-        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 224, True)
-        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 320, True)
-        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 416, True)
-        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 512, True)
+        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 218, True)
+        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 308, True)
+        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 398, True)
+        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 488, True)
 
-        # --- итоговые характеристики ---
-        x, y = SCREEN_W / 2, 580
-        rows = [
-            "Скорость: %.0f px/с    Прочность: %d    Броня: %d    Урон: %d    Выстрел: %.2f с"
-            % (speed, hp, ch["armor"], dmg, reload),
-        ]
-        if speed < 110:
-            rows.append("ВНИМАНИЕ: с такой сборкой вы будете ОЧЕНЬ медленными!")
-        rows.append("Enter — в бой      Esc — назад")
-        for i, s in enumerate(rows):
-            color = (255, 120, 90) if i == 1 else (COL_TEXT if i != len(rows) - 1 else COL_P1)
-            img = get_font(24 if i != 1 else 22).render(s, True, color)
-            self.screen.blit(img, img.get_rect(center=(x, y + i * 34)))
+        # --- жребий: проклятья и облегчения ---
+        mult = max(SCORE_MULT_FLOOR,
+                   1.0 - SCORE_CURSE_PENALTY * len(self.sel_curses)
+                   - SCORE_BLESS_PENALTY * len(self.sel_blessings))
+        self._fate_panel(586, mult)
 
-        # превью танка игрока (в углу, чтобы не мешать панелям)
+        # итоговые характеристики — с учётом проклятий и облегчений
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
                        WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
-                       EL_KEYS[self.sel_el])
+                       EL_KEYS[self.sel_el],
+                       tuple(self.sel_curses), tuple(self.sel_blessings))
+        stats_line = ("Скорость: %.0f px/с    Прочность: %d    Броня: %d    "
+                      "Урон: %d    Выстрел: %.2f с"
+                      % (preview.speed, preview.max_hp, ch["armor"],
+                         round(BULLET_DAMAGE * wp["damage_mult"] * el["damage_mult"]),
+                         preview.reload_time))
+        if preview.mods["spread_deg"] > 0:
+            stats_line += "    Разброс: %d°" % round(preview.mods["spread_deg"])
+        img = get_font(20).render(stats_line, True,
+                                  (255, 150, 90) if preview.speed < 110 else COL_TEXT)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 672)))
+        img = get_font(21).render("Enter — в бой      Esc — назад      Очки: x%.2f"
+                                  % mult, True, COL_P1)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 702)))
+
+        # превью танка игрока (в углу, чтобы не мешать панелям)
         img = pygame.transform.scale_by(preview._sprite, 1.6)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W - 120, 60)))
+
+    def _fate_panel(self, y, mult):
+        """Жребий: 4 проклятья (красные) и 4 облегчения (зелёные).
+        R/T — курсор, V — взять/снять. Без проклятий — максимум одно облегчение."""
+        t = get_font(24).render("ЖРЕБИЙ   (R / T — выбор, V — взять/снять)",
+                                True, COL_GOLD)
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 50)))
+        n_cur = len(CR_KEYS)
+        step = min(140, (SCREEN_W - 140) // JT_TOTAL)
+        box_w, box_h = step - 22, 56
+        name_f = get_font(14)
+
+        def _wrap(name):
+            if name_f.size(name)[0] <= box_w - 8 or " " not in name:
+                return [name]
+            words = name.split(" ")
+            best = None
+            for j in range(1, len(words)):
+                a, b = " ".join(words[:j]), " ".join(words[j:])
+                w = max(name_f.size(a)[0], name_f.size(b)[0])
+                if best is None or w < best[0]:
+                    best = (w, a, b)
+            return [best[1], best[2]]
+
+        for i in range(JT_TOTAL):
+            if i < n_cur:
+                item, is_curse = CURSES[CR_KEYS[i]], True
+                taken = CR_KEYS[i] in self.sel_curses
+            else:
+                item, is_curse = BLESSINGS[BL_KEYS[i - n_cur]], False
+                taken = BL_KEYS[i - n_cur] in self.sel_blessings
+            edge = (255, 90, 110) if is_curse else (90, 230, 140)
+            x = SCREEN_W / 2 + (i - (JT_TOTAL - 1) / 2) * step
+            box = pygame.Rect(0, 0, box_w, box_h)
+            box.center = (int(x), y)
+            bg = pygame.Rect(box.x - 4, box.y - 4, box.w + 8, box.h + 8)
+            pygame.draw.rect(self.screen,
+                             (58, 28, 42) if is_curse else (22, 46, 34),
+                             bg, border_radius=8)
+            if taken:   # взято — светлая заливка
+                pygame.draw.rect(self.screen,
+                                 (96, 40, 58) if is_curse else (30, 66, 48),
+                                 box, border_radius=8)
+            pygame.draw.rect(self.screen, edge if taken else (60, 70, 110),
+                             box, 3 if taken else 1, border_radius=8)
+            if i == self.sel_jt:   # курсор — белая рамка снаружи
+                pygame.draw.rect(self.screen, COL_TEXT,
+                                 box.inflate(8, 8), 2, border_radius=10)
+            color = COL_TEXT if (taken or i == self.sel_jt) else COL_DIM
+            lines = _wrap(item["name"])
+            dy = box.centery - (len(lines) * 17) // 2 + 8
+            for ln in lines:
+                img = name_f.render(ln, True, color)
+                self.screen.blit(img, img.get_rect(center=(box.centerx, dy)))
+                dy += 17
+
+        # подпись под жребием: что под курсором и правила
+        if self.sel_jt < n_cur:
+            item, is_curse = CURSES[CR_KEYS[self.sel_jt]], True
+            taken = CR_KEYS[self.sel_jt] in self.sel_curses
+        else:
+            j = self.sel_jt - n_cur
+            item, is_curse = BLESSINGS[BL_KEYS[j]], False
+            taken = BL_KEYS[j] in self.sel_blessings
+        edge = (255, 90, 110) if is_curse else (90, 230, 140)
+        img = get_font(15).render("%s — %s   [%s]"
+                                  % (item["name"], item["desc"],
+                                     "ВЗЯТО" if taken else "свободно"),
+                                  True, edge)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 42)))
+        rule = ("Без проклятий — максимум одно облегчение, каждое проклятье "
+                "открывает ещё одно (макс. %d). Проклятье -%d%% очков, "
+                "облегчение -%d%% — сейчас x%.2f"
+                % (MAX_CURSES, SCORE_CURSE_PENALTY * 100,
+                   SCORE_BLESS_PENALTY * 100, mult))
+        img = get_font(14, bold=False).render(rule, True, COL_DIM)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 62)))
 
     def _choice_panel(self, title, keys, idx, table, y, compact=False):
         t = get_font(26).render(title, True, COL_GOLD)
@@ -756,7 +938,11 @@ class Game:
         win = self.score[0] > self.score[1]
         color = COL_P1 if win else COL_P2
         self._banner("ПОБЕДА!" if win else "ПОРАЖЕНИЕ", color,
-                     "Счёт %d : %d      Enter — реванш   A — ангар   M — меню" % tuple(self.score))
+                     "Счёт %d : %d      Enter — реванш   A — ангар   M — меню"
+                     % tuple(self.score),
+                     sub2="ОЧКИ: %d   (жребий x%.2f)   РЕКОРД: %d"
+                          % (self.final_score, self.score_mult,
+                             self.stats.get("best_score", 0)))
 
     # ----- HUD во время боя -----
     def _hp_bar(self, x, y, tank, right=False):
@@ -772,23 +958,25 @@ class Game:
         pygame.draw.rect(self.screen, color, fill, border_radius=4)
         pygame.draw.rect(self.screen, (70, 80, 120), rect, 1, border_radius=4)
 
+    def _build_label(self, t, who):
+        """«ИГРОК — шасси + корпус + дуло + перк + стихия» с автоподбором
+        размера шрифта: длинная сборка не должна налезать на центральный счёт."""
+        label = "%s — %s + %s + %s + %s + %s" % (
+            who, t.chassis["name"], t.hull["name"], t.weapon["name"],
+            t.perk["name"], t.elem["name"])
+        size = 22
+        while size > 13 and get_font(size).size(label)[0] > 500:
+            size -= 1
+        return get_font(size).render(label, True, t.color)
+
     def _draw_hud(self):
         p, b = self.player, self.bot_tank
         # --- игрок (слева) ---
-        img = get_font(22).render("ИГРОК — %s + %s + %s + %s + %s"
-                                  % (p.chassis["name"], p.hull["name"],
-                                     p.weapon["name"], p.perk["name"],
-                                     p.elem["name"]),
-                                  True, COL_P1)
-        self.screen.blit(img, (70, 62))
+        self.screen.blit(self._build_label(p, "ИГРОК"), (70, 62))
         self._hp_bar(70, 92, p)
         self._mini_info(p, 70, 116)
         # --- бот (справа) ---
-        img = get_font(22).render("БОТ — %s + %s + %s + %s + %s"
-                                  % (b.chassis["name"], b.hull["name"],
-                                     b.weapon["name"], b.perk["name"],
-                                     b.elem["name"]),
-                                  True, COL_P2)
+        img = self._build_label(b, "БОТ")
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, 62)))
         self._hp_bar(SCREEN_W - 330, 92, b, right=True)
         self._mini_info(b, SCREEN_W - 70, 116, right=True)
@@ -799,6 +987,12 @@ class Game:
                                               % (ROUNDS_TO_WIN, self.arena.name),
                                               True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 120)))
+        pts = int(self.points * self.score_mult)
+        label = "ОЧКИ %d" % pts
+        if self.score_mult < 1.0:
+            label += "  ·  жребий x%.2f" % self.score_mult
+        img = get_font(15, bold=False).render(label, True, COL_GOLD)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 141)))
 
     def _mini_info(self, t, x, y, right=False):
         # перезарядка
@@ -830,13 +1024,16 @@ class Game:
             sfx.append("СТЕНА x%d (Q)" % t.barrier_charges)
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
-        if t.triple > 0:
+        # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
+        if t.laser_charges > 0 and t.triple > 0:
+            sfx.append("ЛАЗЕРНЫЙ ВЕЕР %d/%d" % (t.laser_charges, t.triple))
+        elif t.triple > 0:
             sfx.append("ВЕЕР x%d" % t.triple)
         if t.boost_t > 0:
             sfx.append("ТУРБО %.0f" % t.boost_t)
         if t.rapid_t > 0:
             sfx.append("СКОРОСТРЕЛ %.0f" % t.rapid_t)
-        if t.laser_charges > 0:
+        if t.laser_charges > 0 and t.triple <= 0:
             sfx.append("ЛАЗЕР x%d" % t.laser_charges)
         if t.frozen_t > 0:
             sfx.append("ЭМИ!")
@@ -846,6 +1043,10 @@ class Game:
             sfx.append("УВЯЗ!")
         if t.shock_t > 0:
             sfx.append("ТОК!")
+        if t.curses_keys:
+            sfx.append("ПРОКЛЯТЬЯ %d" % len(t.curses_keys))
+        if t.blessings_keys:
+            sfx.append("ОБЛЕГЧЕНИЯ %d" % len(t.blessings_keys))
         row_y = y + 32
         if sfx:
             img = get_font(16, bold=False).render("   ".join(sfx), True, (160, 200, 255))
