@@ -285,11 +285,13 @@ class Game:
 
     # ================= создание боя =================
     def _tank_count(self):
-        """Сколько танков выезжает: в FFA номер режима = число танков,
-        в командах 6 = «2 на 2» (4 танка), 7 = «2 против босса» (3 танка),
+        """Сколько танков выезжает: в FFA номер режима = число танков
+        (2..5 и большие FFA v2.7: 11…15 → 6…10), в командах
+        6 = «2 на 2» (4 танка), 7 = «2 против босса» (3 танка),
         8 = «3 на 3» (6 танков), 9 = «4 на 4» (8 танков),
         10 = «5 на 5» (10 танков, v2.5)."""
-        return {6: 4, 7: 3, 8: 6, 9: 8, 10: 10}.get(self.mode, self.mode)
+        return {6: 4, 7: 3, 8: 6, 9: 8, 10: 10,
+                11: 6, 12: 7, 13: 8, 14: 9, 15: 10}.get(self.mode, self.mode)
 
     def _spawn_points(self, n):
         """Точки появления для n танков: 1вс1 — классика по краям, FFA —
@@ -299,7 +301,7 @@ class Game:
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
         if n == 2:
             ring = [(cx - 520, cy), (cx + 520, cy)]
-        elif self.mode >= 6:
+        elif self.mode in (6, 7, 8, 9, 10):
             # командные режимы: наша команда — нижняя шеренга,
             # чужая — верхняя (сразу видно, кто с кем)
             if self.mode == 7:          # 2 против босса: нас двое, он один
@@ -319,10 +321,14 @@ class Game:
                        for j in range(foes_n)]
             ring = our_pts + foe_pts
         else:
+            # FFA-кольцо вокруг центра; v2.7: большие FFA (6-10 танков)
+            # стоят на КРУПНЫХ картах — радиус больше, чтобы по 240 px
+            # между танками оставалось и без рандомного раскидывания
+            rr = 380 if self.arena.w <= 3000 else 620
             ring = []
             for i in range(n):
                 a = math.radians(90 + i * 360.0 / n)   # игрок — снизу
-                ring.append((cx + math.cos(a) * 380, cy + math.sin(a) * 380))
+                ring.append((cx + math.cos(a) * rr, cy + math.sin(a) * rr))
         out = []
         for x, y in ring:
             out.append(self._free_spawn(x, y, out))
@@ -349,12 +355,14 @@ class Game:
 
     def _reset_round(self):
         # арена переразыгрывается КАЖДЫЙ РАУНД и перемешивается (v2.1);
-        # v2.5: командные режимы играют на КРУПНЫХ картах (3888x2187)
+        # v2.5: командные режимы играют на КРУПНЫХ картах (3888x2187);
+        # v2.7: большие FFA (6-10 танков) — на тех же крупных картах
         self.arena = Arena(random.randrange(len(LAYOUTS)), shuffle=True,
                            team=self.mode >= 6)
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
         pts = self._spawn_points(self._tank_count())
-        self.team_mode = self.mode >= 6
+        # v2.7: команды — ТОЛЬКО режимы 6-10 (большие FFA 11-15 — каждый сам за себя)
+        self.team_mode = self.mode in (6, 7, 8, 9, 10)
         self.tank_team = {}
         self.player = Tank(
             pts[0][0], pts[0][1],
@@ -451,7 +459,8 @@ class Game:
         self.bot_builds = [random_build()
                            for _ in range(self._tank_count() - 1)]
         # в FFA счёт на каждого танка, в командах — на две стороны
-        self.score = [0] * (2 if self.mode >= 6 else self.mode)
+        self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                            else self._tank_count())
         self.round = 1
         self.points = 0.0
         self.score_mult = self._score_mult()   # жребий уже учтён в сборке
@@ -649,7 +658,8 @@ class Game:
                 self.state = "fight"
             elif k == pygame.K_a:
                 # выход в ангар: матч сбрасывается — сборка-то меняется
-                self.score = [0] * (2 if self.mode >= 6 else self.mode)
+                self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                                    else self._tank_count())
                 self.round = 1
                 self.state = "select"
             elif k == pygame.K_m:
@@ -658,7 +668,8 @@ class Game:
             if k == pygame.K_RETURN:
                 self.start_match()
             elif k == pygame.K_a:
-                self.score = [0] * (2 if self.mode >= 6 else self.mode)
+                self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                                    else self._tank_count())
                 self.round = 1
                 self.state = "select"   # в ангар за новой сборкой
             elif k == pygame.K_t:
@@ -739,7 +750,8 @@ class Game:
         elif kind == "p_resume":
             self.state = "fight"
         elif kind == "to_garage":                 # из паузы и из конца матча
-            self.score = [0] * (2 if self.mode >= 6 else self.mode)
+            self.score = [0] * (2 if self.mode in (6, 7, 8, 9, 10)
+                                else self._tank_count())
             self.round = 1
             self.state = "select"
             self.sounds.play("ric")
@@ -1302,16 +1314,16 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "РЕЖИМЫ: 1вс1 · FFA до 5 · 2НА2 · 3НА3 · 4НА4 · 5НА5 · 2 ПРОТИВ БОССА (F2–F10).",
+            "РЕЖИМЫ: 1вс1 · FFA ДО 10 · 2НА2 · 3НА3 · 4НА4 · 5НА5 · 2 ПРОТИВ БОССА.",
             "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
             "После вашей смерти боты до 180 с выясняют победителя; кнопка отдаёт раунд случайному боту.",
             "Неуязвимости больше нет. Консоль читера — Ё (`), работает на любой раскладке.",
         ]
-        y = 310
+        y = 306
         for s in lines:
             img = get_font(21, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
-            y += 34
+            y += 30
         # выбор сложности (1/2/3 или клик)
         y += 6
         img = get_font(20, bold=False).render("Сложность бота (1/2/3 или клик):",
@@ -1328,32 +1340,40 @@ class Game:
                              2, border_radius=7)
             self.screen.blit(img, r)
             self._click_zones.append((r.inflate(14, 12), "menu_diff", dkey))
-        # РЕЖИМ БОЯ (v2.1+): FFA, 2на2…5на5, 2 против босса.
-        # v2.5: кнопок 9 — раскладка динамическая, шрифт 16, зазор 16
-        y += 42
-        img = get_font(20, bold=False).render("Режим боя (клик или F2–F10):",
-                                              True, COL_DIM)
+        # РЕЖИМ БОЯ (v2.1+): два ряда кнопок (v2.7) — FFA и команды.
+        # раскладка динамическая, шрифт 16, зазор 16
+        y += 40
+        img = get_font(20, bold=False).render(
+            "Режим боя (клик; F2–F10 — первые девять):", True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         mode_lbl = {2: "1×1", 3: "1×1×1", 4: "1×1×1×1", 5: "1×1×1×1×1",
-                    6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4", 10: "5×5"}
+                    6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4", 10: "5×5",
+                    11: "FFA×6", 12: "FFA×7", 13: "FFA×8",
+                    14: "FFA×9", 15: "FFA×10"}
         gap = 18
         fmode = get_font(16)
-        btns = [(fmode.render(mode_lbl[m], True,
-                              COL_GOLD if self.mode == m else (70, 80, 120)), m)
-                for m in (2, 3, 4, 5, 6, 7, 8, 9, 10)]
-        total = sum(im.get_width() for im, _ in btns) + gap * (len(btns) - 1)
-        bx = SCREEN_W / 2 - 100 + (724 - total) / 2.0   # полоса 540..1264
-        for im, m in btns:
-            r = im.get_rect(midleft=(bx, y))   # левый край ровно в bx
-            hov = r.inflate(14, 12).collidepoint(self._mouse)
-            pygame.draw.rect(self.screen, COL_P1 if hov else (40, 50, 90),
-                             r.inflate(14 if hov else 10, 12 if hov else 8),
-                             2, border_radius=7)
-            self.screen.blit(im, r)
-            self._click_zones.append((r.inflate(14, 12), "menu_mode", m))
-            bx += im.get_width() + gap
+
+        def mode_row(modes, yy):
+            btns = [(fmode.render(mode_lbl[m], True,
+                                  COL_GOLD if self.mode == m else (70, 80, 120)), m)
+                    for m in modes]
+            total = sum(im.get_width() for im, _ in btns) + gap * (len(btns) - 1)
+            bx = SCREEN_W / 2 - 100 + (724 - total) / 2.0   # полоса 540..1264
+            for im, m in btns:
+                r = im.get_rect(midleft=(bx, yy))   # левый край ровно в bx
+                hov = r.inflate(14, 12).collidepoint(self._mouse)
+                pygame.draw.rect(self.screen, COL_P1 if hov else (40, 50, 90),
+                                 r.inflate(14 if hov else 10, 12 if hov else 8),
+                                 2, border_radius=7)
+                self.screen.blit(im, r)
+                self._click_zones.append((r.inflate(14, 12), "menu_mode", m))
+                bx += im.get_width() + gap
+
+        mode_row((2, 3, 4, 5, 11, 12, 13, 14, 15), y)   # все против всех
+        y += 34
+        mode_row((6, 7, 8, 9, 10), y)                   # команды и босс
         # статистика матчей и рекорд
-        y += 42
+        y += 38
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
             self.stats["wins"], self.stats["losses"], self.stats["draws"],
             self.stats.get("best_score", 0))
@@ -1368,7 +1388,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.6.2", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.7", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1978,8 +1998,9 @@ class Game:
             # --- FFA и команды: танки компактными строками справа ---
             for i, b in enumerate(self.bots):
                 self._bot_row(b, i, 62 + i * 52)
-            # победы цветными сегментами (низ по центру)
-            seg_f = get_font(26)
+            # победы цветными сегментами (низ по центру); при толпе
+            # (FFA 8-10, v2.7) шрифт мельче — полоса не налезает на края
+            seg_f = get_font(26 if len(self.tanks) <= 7 else 15)
             dot = seg_f.render(" · ", True, COL_DIM)
             if self.team_mode:
                 segs = [seg_f.render("КОМАНДА %d" % self.score[0], True, COL_P1),

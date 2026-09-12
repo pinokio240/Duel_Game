@@ -1627,6 +1627,79 @@ def test_emp_blast():
           and g7.bots[0].frozen_t == PU_FREEZE_TIME)
 
 
+# ---------- 3s4. БОЛЬШИЕ FFA v2.7: все против всех на 6..10 танков ----------
+def test_ffa_big():
+    """v2.7: режимы 11-15 — «каждый сам за себя» на 6/7/8/9/10 танков.
+    team_mode выключен, у каждого бота свой team-номер и цвет, счёт на
+    каждого танка, КРУПНАЯ карта, кольцо спавнов без слипаний."""
+    import math
+    from game import Game, get_font
+    from settings import MODE_NAMES, BOT_NAMES, SCREEN_W, TEAM_ARENA_W
+
+    for mode, n in ((11, 6), (12, 7), (13, 8), (14, 9), (15, 10)):
+        g = Game()
+        g.mode = mode
+        g.start_match()
+        g.state = "fight"
+        g._fake_keys = FakeKeys(())
+        check("FFA %d: название «%s»" % (n, MODE_NAMES[mode]),
+              "%d танков" % n in MODE_NAMES[mode])
+        check("FFA %d: танков %d, ботов %d" % (n, n, n - 1),
+              len(g.tanks) == n and len(g.bots) == n - 1)
+        check("FFA %d: не команда, враги — все боты" % n,
+              g.team_mode is False and len(g.foes) == n - 1)
+        check("FFA %d: счёт на каждого танка" % n, len(g.score) == n)
+        check("FFA %d: карта крупная %dx%d" % (n, g.arena.w, g.arena.h),
+              g.arena.w == TEAM_ARENA_W)
+        pts = [(t.x, t.y) for t in g.tanks]
+        ok_pts = all(math.hypot(x1 - x2, y1 - y2) > 200
+                     for i, (x1, y1) in enumerate(pts)
+                     for x2, y2 in pts[i + 1:])
+        check("FFA %d: все живы, спавны дальше 200 px" % n,
+              all(t.alive for t in g.tanks) and ok_pts)
+        check("FFA %d: team-номера уникальны" % n,
+              len(set(g.tank_team[t] for t in g.tanks)) == n)
+
+    # FFA на 8: добили всех ботов, кроме одного, — раунд за выжившим
+    g13 = Game()
+    g13.mode = 13
+    g13.start_match()
+    g13.state = "fight"
+    g13._fake_keys = FakeKeys(())
+    surv = g13.bots[3]
+    g13.player._die(g13.effects, g13.sounds)   # и игрок — иначе живых двое
+    for b in g13.bots:
+        if b is not surv:
+            b._die(g13.effects, g13.sounds)
+    g13.update(1 / 60.0)
+    check("FFA 8: остался один — раунд за выжившим ботом",
+          g13.state == "round_end"
+          and g13.winner == g13.tanks.index(surv)
+          and g13.score[g13.winner] == 1)
+
+    # FFA на 10: игрок умер — окно выяснения; кнопка — жребий
+    g15 = Game()
+    g15.mode = 15
+    g15.start_match()
+    g15.state = "fight"
+    g15._fake_keys = FakeKeys(())
+    g15.player._die(g15.effects, g15.sounds)
+    g15.update(1 / 60.0)
+    check("FFA 10: игрок умер — боты выясняют отношения",
+          g15.spectate_t > 0.0 and g15.state == "fight")
+    g15._kill_all_foes()
+    check("FFA 10: «УБИТЬ СРАЗУ» отдало раунд случайному боту",
+          g15.state == "round_end" and g15.winner > 0
+          and g15.score[g15.winner] == 1)
+
+    # полоса побед внизу при 10 танках влезает в экран (шрифт уже 15)
+    seg_w = sum(get_font(15).size(
+        "%s 0" % ("ВЫ" if i == 0 else BOT_NAMES[i - 1]))[0]
+        for i in range(10)) + 9 * get_font(15).size(" · ")[0]
+    check("FFA 10: полоса побед влезает в экран (%d px < %d)"
+          % (seg_w, SCREEN_W), seg_w < SCREEN_W - 40)
+
+
 # ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
 def test_team_modes():
     import math
@@ -2025,6 +2098,7 @@ if __name__ == "__main__":
     test_team_modes()
     test_team_highlight()
     test_emp_blast()
+    test_ffa_big()
     test_ice_immunity()
     test_big_teams()
     test_bigmap()

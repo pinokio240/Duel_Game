@@ -126,8 +126,8 @@ class Arena:
     def __init__(self, variant=0, shuffle=False, team=False):
         """shuffle=True — случайное зеркало и/или случайные баррикады:
         одна и та же карта каждый раз играет по-новому.
-        team=True — командная карта: крупнее обычной (v2.5), там много
-        танков и нужен разгон."""
+        team=True — БОЛЬШАЯ карта: крупнее обычной (v2.5), там много
+        танков; с v2.7 на них играют и большие FFA (6-10 танков)."""
         self.variant = variant % len(LAYOUTS)
         self.w, self.h = ((TEAM_ARENA_W, TEAM_ARENA_H) if team
                           else (ARENA_W, ARENA_H))
@@ -158,7 +158,7 @@ class Arena:
         self.obstacles = obs
         self.rects = self.walls + self.obstacles
         self.name = (MAP_NAMES[self.variant]
-                     + (" [командная]" if team else "")
+                     + (" [большая]" if team else "")
                      + (" ★" if tags else ""))
         self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
         self._bg = self._make_background()

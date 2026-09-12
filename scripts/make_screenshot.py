@@ -37,15 +37,18 @@ g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 print("screenshot.png обновлён")
 
-# ----- кадр режима «все против всех» на 5 танков -----
-g.mode = 5
-g.score = [0] * g.mode
+# ----- кадр режима «все против всех» — БОЛЬШОЙ FFA на 8 танков (v2.7) -----
+g.mode = 13
+g.score = [0] * 8
 g.bot_builds = [("light", "light", "shotgun", "sprinter", "electric"),
                 ("heavy", "armored", "howitzer", "turtle", "fire"),
                 ("medium", "medium", "rapidgun", "gunner", "poison"),
-                ("sport", "compact", "long", "none", "vamp")]
+                ("sport", "compact", "long", "none", "vamp"),
+                ("light", "compact", "twin", "sprinter", "water"),
+                ("heavy", "heavy", "standard", "gunner", "earth"),
+                ("sport", "light", "shotgun", "none", "ice")]
 g._reset_round()
-g.arena = Arena(5)          # «Соты» — красиво для толпы
+g.arena = Arena(5, team=True)   # «Соты» на КРУПНОЙ карте — красиво для толпы
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 for _ in range(300):        # полминуты боя: следы, снаряды, дым
     g.update(1 / 60.0)

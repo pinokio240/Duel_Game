@@ -63,6 +63,12 @@ if __name__ == "__main__":
     # — раунды длиннее, лимиты выше
     for m in (3, 4, 5):
         play_match(m, max_sec=1800)
+    # v2.7: большие FFA на КРУПНЫХ картах — 6/7/8/9/10 танков
+    play_match(11, max_sec=900)
+    play_match(12, max_sec=900)
+    play_match(13, max_sec=900)
+    play_match(14, max_sec=900)
+    play_match(15, max_sec=1200)
     # командные режимы на больших картах: 2на2, 3на3, 4на4, 5на5 и 2 против БОССА
     play_match(6, max_sec=900)
     play_match(8, max_sec=900)
