@@ -195,6 +195,9 @@ class Game:
         self.powerup_t = POWERUP_INTERVAL * 0.6
 
         self._fake_keys = None  # только для автотестов
+        # мышь: кликабельные зоны текущего кадра и позиция курсора
+        self._click_zones = []
+        self._mouse = (0, 0)
         self.stats = self._load_stats()
 
     # ================= статистика матчей =================
@@ -423,6 +426,82 @@ class Game:
                 self.state = "table"    # посмотреть таблицу счёта
             elif k in (pygame.K_m, pygame.K_ESCAPE):
                 self.state = "menu"
+
+    # ============ мышь: клик по карточкам, жребию и кнопкам ============
+    def _button(self, centerx, centery, label, kind, data=None,
+                w=240, h=44, fs=20):
+        """Нарисовать кнопку и зарегистрировать её как кликабельную."""
+        r = pygame.Rect(0, 0, w, h)
+        r.center = (int(centerx), int(centery))
+        hover = r.collidepoint(self._mouse)
+        pygame.draw.rect(self.screen, (46, 58, 104) if hover else (30, 40, 75),
+                         r, border_radius=9)
+        pygame.draw.rect(self.screen, COL_P1 if hover else (70, 80, 120), r,
+                         2 if hover else 1, border_radius=9)
+        img = get_font(fs).render(label, True, COL_TEXT)
+        self.screen.blit(img, img.get_rect(center=r.center))
+        self._click_zones.append((r, kind, data))
+        return r
+
+    def on_click(self, pos):
+        """Клик мышью: зона, нарисованной последней, — в приоритете."""
+        for rect, kind, data in reversed(self._click_zones):
+            if rect.collidepoint(pos):
+                self._handle_click(kind, data)
+                return True
+        return False
+
+    def _handle_click(self, kind, data):
+        attr = {"ch": "sel_ch", "hu": "sel_hu", "wpn": "sel_wpn",
+                "pk": "sel_pk", "el": "sel_el"}.get(kind)
+        if attr is not None:                      # карточка сборки — выбрать её
+            if getattr(self, attr) != data:
+                setattr(self, attr, data)
+                self.sounds.play("ric")
+        elif kind == "fate":                      # проклятье/облегчение
+            self.sel_jt = data
+            if data < len(CR_KEYS):
+                self._toggle_curse(data)
+            else:
+                self._toggle_bless(data - len(CR_KEYS))
+            self.sounds.play("ric")
+        elif kind == "enemy":                     # эффект НА ВРАГА
+            self.sel_en = data
+            self._toggle_enemy(data)
+            self.sounds.play("ric")
+        elif kind == "menu_diff":
+            self.difficulty = data
+            self.sounds.play("ric")
+        elif kind == "menu_start":
+            self.state = "select"
+            self.sounds.play("ric")
+        elif kind == "open_table":
+            self._table_from = data if data else self._table_from
+            self.state = "table"
+            self.sounds.play("ric")
+        elif kind == "table_back":
+            self.state = self._table_from
+            self.sounds.play("ric")
+        elif kind == "go_fight":
+            self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
+                          WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
+                          EL_KEYS[self.sel_el],
+                          tuple(self.sel_curses), tuple(self.sel_blessings),
+                          tuple(self.sel_enemy_keys))
+            self.start_match()
+        elif kind == "garage_menu":
+            self.state = "menu"
+        elif kind == "p_resume":
+            self.state = "fight"
+        elif kind == "to_garage":                 # из паузы и из конца матча
+            self.score = [0, 0]
+            self.round = 1
+            self.state = "select"
+            self.sounds.play("ric")
+        elif kind == "p_menu" or kind == "me_menu":
+            self.state = "menu"
+        elif kind == "me_rematch":
+            self.start_match()
 
     # ================= обновление =================
     def update(self, dt):
@@ -744,6 +823,7 @@ class Game:
 
     # ================= отрисовка =================
     def draw(self):
+        self._click_zones = []   # кликабельные зоны пересобираются каждый кадр
         ox, oy = self.effects.offset()
         self.world.fill((0, 0, 0))
         self.arena.draw(self.world, ox, oy)
@@ -789,9 +869,21 @@ class Game:
                                  sub2="+%d ОЧКОВ" % SCORE_ROUND_DRAW)
             elif self.state == "match_end":
                 self._draw_match_end()
+                for i, (lbl, kd, dta) in enumerate((
+                        ("РЕВАНШ (Enter)", "me_rematch", None),
+                        ("АНГАР (A)", "to_garage", None),
+                        ("ТАБЛИЦА (T)", "open_table", "match_end"),
+                        ("МЕНЮ (M)", "me_menu", None))):
+                    self._button(SCREEN_W / 2 + (i - 1.5) * 240,
+                                 SCREEN_H / 2 + 152, lbl, kd, data=dta, w=222)
             elif self.state == "pause":
                 self._banner("ПАУЗА", COL_TEXT,
                              "Esc — продолжить   A — ангар   M — меню")
+                for i, (lbl, kd) in enumerate((("ПРОДОЛЖИТЬ", "p_resume"),
+                                               ("АНГАР", "to_garage"),
+                                               ("МЕНЮ", "p_menu"))):
+                    self._button(SCREEN_W / 2 + (i - 1) * 258,
+                                 SCREEN_H / 2 + 118, lbl, kd, w=236)
 
     def _banner(self, text, color, sub="", sub2=None):
         dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
@@ -816,7 +908,7 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена (120 прочности)   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "Ангар: шасси, корпус, дуло, перк, стихия — 1800 сборок.",
+            "Ангар — всё выбирается КЛИКОМ мыши: 1800 сборок.",
             "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ.",
             "Облегчения помогают, но режут счёт; без проклятий — максимум одно.",
             "На врага можно навесить баффы или дебаффы — это тоже режет счёт.",
@@ -827,14 +919,22 @@ class Game:
             img = get_font(22, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
             y += 34
-        # выбор сложности
+        # выбор сложности (1/2/3 или клик)
         y += 6
-        img = get_font(20, bold=False).render("Сложность бота (1/2/3):", True, COL_DIM)
+        img = get_font(20, bold=False).render("Сложность бота (1/2/3 или клик):",
+                                              True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         for i, dkey in enumerate((1, 2, 3)):
             color = COL_GOLD if self.difficulty == dkey else (70, 80, 120)
-            img = get_font(20).render("%d %s" % (dkey, DIFF_NAMES[dkey]), True, color)
-            self.screen.blit(img, (SCREEN_W / 2 - 100 + i * 135, y - img.get_height() / 2))
+            img = get_font(20).render("%d %s" % (dkey, DIFF_NAMES[dkey]),
+                                      True, color)
+            r = img.get_rect(midleft=(SCREEN_W / 2 - 100 + i * 135, y))
+            hov = r.inflate(14, 12).collidepoint(self._mouse)
+            pygame.draw.rect(self.screen, COL_P1 if hov else (40, 50, 90),
+                             r.inflate(14 if hov else 10, 12 if hov else 8),
+                             2, border_radius=7)
+            self.screen.blit(img, r)
+            self._click_zones.append((r.inflate(14, 12), "menu_diff", dkey))
         # статистика матчей и рекорд
         y += 42
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
@@ -842,12 +942,16 @@ class Game:
             self.stats.get("best_score", 0))
         img = get_font(18, bold=False).render(st, True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
-        # призыв
-        img = get_font(26).render("Enter — в ангар      T — ТАБЛИЦА СЧЕТА",
-                                  True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 44)))
+        # большие кнопки: в ангар и в таблицу счёта
+        self._button(SCREEN_W / 2 - 165, y + 58, "В АНГАР ▶", "menu_start",
+                     w=300, h=48, fs=23)
+        self._button(SCREEN_W / 2 + 165, y + 58, "ТАБЛИЦА СЧЕТА", "open_table",
+                     data="menu", w=300, h=48, fs=21)
+        img = get_font(16, bold=False).render(
+            "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v1.7", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.8", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
@@ -860,11 +964,16 @@ class Game:
         el = ELEMENTS[EL_KEYS[self.sel_el]]
 
         # --- пять компактных панелей сборки ---
-        self._choice_panel("ШАССИ   (A / D)", CH_KEYS, self.sel_ch, CHASSIS, 96)
-        self._choice_panel("КОРПУС   (W / S)", HU_KEYS, self.sel_hu, HULL, 162)
-        self._choice_panel("ДУЛО   (Q / E)", WP_KEYS, self.sel_wpn, WEAPONS, 228)
-        self._choice_panel("ПЕРК   (Z / C)", PK_KEYS, self.sel_pk, PERKS, 294)
-        self._choice_panel("СТИХИЯ   (F / G)", EL_KEYS, self.sel_el, ELEMENTS, 360)
+        self._choice_panel("ШАССИ — клик или A / D", CH_KEYS, self.sel_ch,
+                           CHASSIS, 96, "ch")
+        self._choice_panel("КОРПУС — клик или W / S", HU_KEYS, self.sel_hu,
+                           HULL, 162, "hu")
+        self._choice_panel("ДУЛО — клик или Q / E", WP_KEYS, self.sel_wpn,
+                           WEAPONS, 228, "wpn")
+        self._choice_panel("ПЕРК — клик или Z / C", PK_KEYS, self.sel_pk,
+                           PERKS, 294, "pk")
+        self._choice_panel("СТИХИЯ — клик или F / G", EL_KEYS, self.sel_el,
+                           ELEMENTS, 360, "el")
 
         # --- жребий: проклятья (+очки) и облегчения (-очки) ---
         mult = self._fate_mult(self.sel_curses, self.sel_blessings,
@@ -890,9 +999,14 @@ class Game:
         img = get_font(18).render(stats_line, True,
                                   (255, 150, 90) if preview.speed < 110 else COL_TEXT)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 614)))
-        img = get_font(21).render("Enter — в бой      Esc — назад      "
-                                  "Очки за забег: x%.2f" % mult, True, COL_P1)
+        img = get_font(21).render("Очки за забег: x%.2f      "
+                                  "Enter — в бой, Esc — меню (или кнопки ниже)"
+                                  % mult, True, COL_P1)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 644)))
+        self._button(SCREEN_W / 2 - 95, 688, "В БОЙ ▶", "go_fight",
+                     w=270, h=32, fs=18)
+        self._button(SCREEN_W / 2 + 150, 688, "МЕНЮ", "garage_menu",
+                     w=130, h=32, fs=17)
 
         # превью танка игрока (внизу справа, чтобы не мешать панелям)
         img = pygame.transform.scale_by(preview._sprite, 1.6)
@@ -903,8 +1017,9 @@ class Game:
         R/T — курсор, V — взять/снять. Без проклятий — максимум одно
         облегчение. Проклятья ослабляют ТОЛЬКО ВАС, но ДЕЛАЮТ ОЧКИ."""
         t = get_font(17).render(
-            "ЖРЕБИЙ   (R / T — курсор, V — взять/снять)   проклятья +%d%% очков"
-            % round(SCORE_CURSE_BONUS * 100), True, COL_GOLD)
+            "ЖРЕБИЙ — клик по карточке: взять/снять   (R / T курсор, V — взять)"
+            "   проклятья +%d%% очков" % round(SCORE_CURSE_BONUS * 100),
+            True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y_cur - 38)))
         n_cur = len(CR_KEYS)
         step = min(150, (SCREEN_W - 140) // n_cur)
@@ -940,12 +1055,17 @@ class Game:
                     pygame.draw.rect(self.screen,
                                      (96, 40, 58) if is_curse else (30, 66, 48),
                                      box, border_radius=7)
-                pygame.draw.rect(self.screen, edge if taken else (60, 70, 110),
-                                 box, 3 if taken else 1, border_radius=7)
+                hov = box.collidepoint(self._mouse)
+                pygame.draw.rect(self.screen,
+                                 edge if (taken or hov) else (60, 70, 110),
+                                 box, 3 if taken else (2 if hov else 1),
+                                 border_radius=7)
                 if cur:   # курсор — белая рамка снаружи
                     pygame.draw.rect(self.screen, COL_TEXT,
                                      box.inflate(6, 6), 2, border_radius=9)
-                color = COL_TEXT if (taken or cur) else COL_DIM
+                color = COL_TEXT if (taken or cur or hov) else COL_DIM
+                self._click_zones.append((box, "fate",
+                                          i if is_curse else n_cur + i))
                 lines = _wrap(item["name"])
                 dy = box.centery - (len(lines) * 14) // 2 + 7
                 for ln in lines:
@@ -981,8 +1101,8 @@ class Game:
     def _enemy_panel(self, y):
         """Эффекты НА ВРАГА: баффы и дебаффы боту — любой режет счёт."""
         t = get_font(17).render(
-            "НА ВРАГА   (B / N — курсор, M — взять/снять)   любой эффект режет счёт",
-            True, (255, 170, 80))
+            "НА ВРАГА — клик: взять/снять   (B / N курсор, M — взять)"
+            "   любой эффект режет счёт", True, (255, 170, 80))
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 28)))
         step = min(180, (SCREEN_W - 140) // len(EE_KEYS))
         box_w, box_h = step - 16, 36
@@ -1010,13 +1130,17 @@ class Game:
             pygame.draw.rect(self.screen, (62, 44, 26), bg, border_radius=7)
             if taken:
                 pygame.draw.rect(self.screen, (92, 62, 34), box, border_radius=7)
+            hov = box.collidepoint(self._mouse)
             pygame.draw.rect(self.screen,
-                             (255, 170, 80) if taken else (60, 70, 110),
-                             box, 3 if taken else 1, border_radius=7)
+                             (255, 170, 80) if (taken or hov)
+                             else (60, 70, 110),
+                             box, 3 if taken else (2 if hov else 1),
+                             border_radius=7)
             if i == self.sel_en:
                 pygame.draw.rect(self.screen, COL_TEXT,
                                  box.inflate(6, 6), 2, border_radius=9)
-            color = COL_TEXT if (taken or i == self.sel_en) else COL_DIM
+            color = COL_TEXT if (taken or i == self.sel_en or hov) else COL_DIM
+            self._click_zones.append((box, "enemy", i))
             lines = _wrap(item["name"])
             dy = box.centery - (len(lines) * 14) // 2 + 7
             for ln in lines:
@@ -1037,8 +1161,9 @@ class Game:
             "открывает облегчения" % MAX_ENEMY_EFFECTS, True, COL_DIM)
         self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 44)))
 
-    def _choice_panel(self, title, keys, idx, table, y):
-        """Компактная панель выбора: заголовок сверху, карточки в ряд."""
+    def _choice_panel(self, title, keys, idx, table, y, kind=None):
+        """Компактная панель выбора: заголовок сверху, карточки в ряд.
+        kind — метка для мыши: клик по карточке выбирает её."""
         t = get_font(16).render(title, True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 34)))
         n = len(keys)
@@ -1068,11 +1193,18 @@ class Game:
             box.center = (int(x), y)
             bg = pygame.Rect(box.x - 4, box.y - 4, box.w + 8, box.h + 8)
             pygame.draw.rect(self.screen, (30, 40, 75), bg, border_radius=8)
-            pygame.draw.rect(self.screen, COL_P1 if sel else (60, 70, 110), box,
-                             3 if sel else 1, border_radius=7)
+            hov = box.collidepoint(self._mouse)
+            pygame.draw.rect(self.screen,
+                             COL_P1 if sel else ((160, 175, 220) if hov
+                                                  else (60, 70, 110)),
+                             box, 3 if sel else (2 if hov else 1),
+                             border_radius=7)
             dlines = _wrap(item["desc"])
             name_y = box.y + (11 if len(dlines) > 1 else 14)
-            img = name_f.render(item["name"], True, COL_TEXT if sel else COL_DIM)
+            img = name_f.render(item["name"],
+                                True, COL_TEXT if (sel or hov) else COL_DIM)
+            if kind:
+                self._click_zones.append((box, kind, i))
             self.screen.blit(img, img.get_rect(center=(box.centerx, name_y)))
             dy = box.y + (24 if len(dlines) > 1 else 29)
             for dl in dlines:
@@ -1129,8 +1261,9 @@ class Game:
                     img = dim_f.render("← ваш забег", True, COL_GOLD)
                     self.screen.blit(img, img.get_rect(midleft=(1145, y + 9)))
                 y += 36
-        img = get_font(20).render("Esc / Enter — назад", True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 668)))
+        self._button(SCREEN_W / 2, 634, "НАЗАД", "table_back", w=250, h=42)
+        img = get_font(17, bold=False).render("Esc / Enter — назад", True, COL_DIM)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 672)))
 
     def _draw_match_end(self):
         win = self.score[0] > self.score[1]
@@ -1276,6 +1409,10 @@ class Game:
                 if e.type == pygame.QUIT:
                     pygame.quit()
                     return
+                if e.type == pygame.MOUSEMOTION:
+                    self._mouse = e.pos          # для подсветки наведения
+                elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 1:
+                    self.on_click(e.pos)         # мышь: выбор и кнопки
                 self.on_keydown(e)
             self.update(dt)
             self.draw()

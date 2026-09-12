@@ -732,6 +732,85 @@ def test_battle():
     # pygame.quit() между тестами НЕ делаем: повторные quit/init
     # инвалидируют кэш шрифтов SDL и роняют процесс (segfault).
 
+# ---------- 6. мышь: клик по карточкам, жребию и кнопкам ----------
+def test_mouse():
+    from game import Game, CH_KEYS, PK_KEYS, EL_KEYS, CR_KEYS
+    g = Game()
+
+    def click(ga, kind, data=None):
+        ga.draw()   # кликабельные зоны пересобираются на каждом кадре
+        for rect, kd, dta in ga._click_zones:
+            if kd == kind and (data is None or dta == data):
+                ga.on_click(rect.center)
+                return
+        raise AssertionError("нет кликабельной зоны %s(%s)" % (kind, data))
+
+    # меню: сложность и большие кнопки
+    g.state = "menu"
+    click(g, "menu_diff", 3)
+    check("клик по «3 Сложно» выбирает сложность", g.difficulty == 3)
+    click(g, "menu_start")
+    check("клик «В АНГАР» открывает ангар", g.state == "select")
+
+    # ангар: клик по карточке = выбрать её
+    click(g, "ch", 0)
+    check("клик по карточке шасси выбирает его", g.sel_ch == 0)
+    click(g, "pk", 2)
+    check("клик по карточке перка выбирает его", g.sel_pk == 2)
+    click(g, "el", 4)
+    check("клик по карточке стихии выбирает её", g.sel_el == 4)
+
+    # жребий: клик взять/снять + лимиты облегчений
+    click(g, "fate", 0)
+    check("клик берёт проклятье", len(g.sel_curses) == 1)
+    click(g, "fate", 8)
+    click(g, "fate", 9)
+    check("с одним проклятьем кликами взяты 2 облегчения",
+          len(g.sel_blessings) == 2)
+    click(g, "fate", 0)   # снять проклятье — лишние облегчения снимутся сами
+    check("проклятье снято кликом, облегчений осталось 1",
+          len(g.sel_curses) == 0 and len(g.sel_blessings) == 1)
+    click(g, "enemy", 1)
+    check("клик берёт эффект НА ВРАГА", len(g.sel_enemy_keys) == 1)
+
+    # кнопка «В БОЙ»: сборка собирается, матч стартует
+    click(g, "go_fight")
+    check("клик «В БОЙ» стартует матч", g.state == "intro")
+    check("в build попали кликнутые шасси/перк/стихия",
+          g.build[0] == CH_KEYS[0] and g.build[3] == PK_KEYS[2]
+          and g.build[4] == EL_KEYS[4])
+
+    # пауза: кнопки ПРОДОЛЖИТЬ / АНГАР
+    g.state = "pause"
+    click(g, "p_resume")
+    check("клик «ПРОДОЛЖИТЬ» снимает с паузы", g.state == "fight")
+    g.state = "pause"
+    click(g, "to_garage")
+    check("клик «АНГАР» в паузе: счёт сброшен",
+          g.state == "select" and g.score == [0, 0])
+
+    # конец матча: кнопки ТАБЛИЦА / МЕНЮ
+    g2 = Game()
+    g2.state = "fight"
+    g2._reset_round()
+    g2.state = "match_end"
+    click(g2, "open_table", "match_end")
+    check("клик «ТАБЛИЦА» с конца матча открывает таблицу",
+          g2.state == "table" and g2._table_from == "match_end")
+    click(g2, "table_back")
+    check("клик «НАЗАД» возвращает с таблицы", g2.state == "match_end")
+    click(g2, "me_menu")
+    check("клик «МЕНЮ» с конца матча", g2.state == "menu")
+
+    # таблица из меню и обратно
+    g.state = "menu"
+    click(g, "open_table", "menu")
+    check("клик «ТАБЛИЦА СЧЕТА» в меню", g.state == "table")
+    click(g, "table_back")
+    check("клик «НАЗАД» вернул в меню", g.state == "menu")
+    check("карт проклятий в жребии по-прежнему 8", len(CR_KEYS) == 8)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -747,6 +826,7 @@ if __name__ == "__main__":
     test_score_table()
     test_magazine()
     test_battle()
+    test_mouse()
     print()
     if FAILED:
         print("ПРОВАЛЕНО: %d -> %s" % (len(FAILED), FAILED))
