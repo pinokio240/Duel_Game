@@ -8,13 +8,14 @@ import math
 import random
 import pygame
 from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS,
-                      TANK_RADIUS, BULLET_DAMAGE,
+                      TANK_RADIUS, BULLET_DAMAGE, BULLET_BOUNCES,
                       PU_SHIELD_TIME, PU_BOOST_TIME, PU_TRIPLE_SHOTS, PU_REPAIR_HP,
                       PU_RAPID_TIME, PU_RAPID_MULT,
                       BOOST_MULT, BOOST_PERK_KEY, BOOST_PERK_MULT,
                       FIRE_TIME, FIRE_DPS,
                       EARTH_TIME, EARTH_MULT, SHOCK_TIME, SHOCK_MULT,
                       AIR_PUSH, WATER_CLEAR_DMG, WATER_SLOW_TIME,
+                      ICE_TIME, POISON_TIME, POISON_DPS,
                       PU_MINE_CARRY, BARRIER_MAX)
 from bullet import Bullet, ELEMENT_COLORS
 
@@ -74,13 +75,17 @@ class Tank:
         self.boost_t = 0.0
         self.triple = 0
         self.rapid_t = 0.0        # скорострел
-        self.frozen_t = 0.0       # ЭМИ-заморозка
+        self.frozen_t = 0.0       # ЭМИ-заморозка / лёд
         self.laser_charges = 0    # заряды лазера
         # негативные эффекты от стихий врага (свою стихию мы зарядили в ангаре)
         self.burn_t = 0.0         # поджог: тикает уроном, броня не спасает
         self._burn_tick = 0.0
         self.mud_t = 0.0          # земля: вязнет
         self.shock_t = 0.0        # ток: мотор вполсилы
+        self.poison_t = 0.0       # яд: травится, броня не спасает
+        self._poison_tick = 0.0
+        # рикошеты: базовое число + бонус перка «Рикошет»
+        self.bullet_bounces = BULLET_BOUNCES + int(self.perk.get("bounces", 0))
         # ручные бустеры: мины и стены-барьеры носятся в боекомплекте
         self.mine_carried = 0
         self.barrier_charges = 0
@@ -150,6 +155,21 @@ class Tank:
             pygame.draw.rect(s, self.light, (44, 22, 26, 7), border_radius=2)
             pygame.draw.rect(s, self.light, (66, 21, 5, 9), border_radius=1)
             pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
+        elif self.wpn_key == "shotgun":
+            # дробовик: короткий широкий ствол с раструбом-чашей
+            pygame.draw.rect(s, self.light, (42, 20, 18, 10), border_radius=2)
+            pygame.draw.rect(s, self.light, (58, 16, 7, 18), border_radius=2)
+            pygame.draw.rect(s, self.color, (39, 17, 7, 16), border_radius=2)
+        elif self.wpn_key == "rapidgun":
+            # пулемёт: тонкий длинный ствол с коробом-магазином
+            pygame.draw.rect(s, self.light, (42, 23, 26, 4), border_radius=1)
+            pygame.draw.rect(s, self.light, (48, 14, 10, 8), border_radius=2)
+            pygame.draw.rect(s, self.color, (39, 20, 7, 10), border_radius=2)
+        elif self.wpn_key == "howitzer":
+            # гаубица: очень толстый короткий ствол с дульным тормозом
+            pygame.draw.rect(s, self.light, (42, 18, 26, 14), border_radius=3)
+            pygame.draw.rect(s, self.light, (64, 15, 5, 20), border_radius=1)
+            pygame.draw.rect(s, self.color, (38, 15, 8, 20), border_radius=2)
         else:
             pygame.draw.rect(s, self.light, (44, 22, 19, 7), border_radius=2)
             pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
@@ -210,6 +230,15 @@ class Tank:
         if self.triple > 0:
             angles = [self.angle - 12, self.angle, self.angle + 12]
             self.triple -= 1
+        # Дробовик: залп из нескольких дробин с разбросом;
+        # Пулемёт: одиночные снаряды с лёгким джиттером ствола
+        pellets = int(self.weapon.get("pellets", 1))
+        jitter = self.weapon.get("pellet_spread", 0.0)
+        if pellets > 1:
+            angles = [a + random.uniform(-jitter, jitter)
+                      for a in angles for _ in range(pellets)]
+        elif jitter:
+            angles = [a + random.uniform(-jitter, jitter) for a in angles]
         # стихия из ангара заряжает КАЖДЫЙ снаряд: цена — часть урона
         dmg = (BULLET_DAMAGE * self.weapon["damage_mult"]
                * self.elem["damage_mult"] * self.mods["damage_mult"])
@@ -222,7 +251,8 @@ class Tank:
             if sp > 0:
                 a = a + random.uniform(-sp, sp)
             bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
-                                  element=elem))
+                                  element=elem, bounces=self.bullet_bounces,
+                                  big=self.weapon.get("bigshot", False)))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
         if self.mag_ammo > 1:
             self.mag_ammo -= 1
@@ -271,6 +301,13 @@ class Tank:
         elif elem == "electric":
             self.shock_t = SHOCK_TIME
             effects.float_text(self.x, self.y - 50, "ТОК!", (255, 240, 110))
+        elif elem == "ice":
+            self.frozen_t = max(self.frozen_t, ICE_TIME)
+            effects.float_text(self.x, self.y - 50, "ЛЁД!", (120, 255, 255))
+        elif elem == "poison":
+            self.poison_t = POISON_TIME
+            self._poison_tick = 0.0
+            effects.float_text(self.x, self.y - 50, "ЯД!", (150, 255, 60))
         elif elem == "water":
             washed = []
             if self.shield_t > 0: washed.append("щит")
@@ -310,6 +347,29 @@ class Tank:
             if self.hp <= 0:
                 self._die(effects, sounds)
 
+    def _poison_step(self, dt, effects, sounds):
+        """Яд: тикает уроном как пожар, но зелёным; броня не спасает."""
+        if self.poison_t <= 0 or not self.alive:
+            return
+        self.poison_t -= dt
+        self._poison_tick -= dt
+        if self._poison_tick <= 0:
+            self._poison_tick = 0.5
+            self.hp -= POISON_DPS * 0.5
+            effects.burst(self.x, self.y, (150, 255, 60), 3, 80, 0.3, 2)
+            if self.hp <= 0:
+                self._die(effects, sounds)
+
+    def heal(self, amount, effects):
+        """Лечение (ремонт, вампиризм): выше максимума не лечим."""
+        if not self.alive or amount <= 0:
+            return
+        before = self.hp
+        self.hp = min(self.max_hp, self.hp + amount)
+        if self.hp > before:
+            effects.float_text(self.x, self.y - 50, "+%d" % (self.hp - before),
+                               (120, 230, 150))
+
     def apply_powerup(self, kind):
         if kind == "shield":
             self.shield_t = PU_SHIELD_TIME
@@ -339,6 +399,7 @@ class Tank:
         self.mud_t = max(0.0, self.mud_t - dt)
         self.shock_t = max(0.0, self.shock_t - dt)
         self.burn_t = max(0.0, self.burn_t - dt)
+        self.poison_t = max(0.0, self.poison_t - dt)
 
     # ----- отрисовка -----
     def draw(self, surf, ox=0, oy=0):
@@ -359,3 +420,5 @@ class Tank:
             pygame.draw.circle(surf, (180, 130, 60), (cx, cy), self.radius + 7, 2)
         if self.shock_t > 0:
             pygame.draw.circle(surf, (255, 240, 110), (cx, cy), self.radius + 11, 1)
+        if self.poison_t > 0:
+            pygame.draw.circle(surf, (150, 255, 60), (cx, cy), self.radius + 11, 2)

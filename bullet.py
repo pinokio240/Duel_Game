@@ -2,7 +2,8 @@
 """Снаряды с рикошетами от стен и препятствий + элементальные заряды."""
 import math
 import pygame
-from settings import BULLET_SPEED, BULLET_DAMAGE, BULLET_BOUNCES
+from settings import (BULLET_SPEED, BULLET_DAMAGE, BULLET_BOUNCES,
+                      VAMP_HEAL_RATIO)
 
 ELEMENT_COLORS = {
     "fire":     (255, 110, 0),
@@ -10,12 +11,15 @@ ELEMENT_COLORS = {
     "earth":    (180, 130, 60),
     "electric": (255, 240, 110),
     "air":      (190, 235, 255),
+    "ice":      (120, 255, 255),
+    "poison":   (150, 255, 60),
+    "vamp":     (255, 80, 160),
 }
 
 
 class Bullet:
     def __init__(self, x, y, angle, owner, damage=BULLET_DAMAGE, speed_mult=1.0,
-                 element=None):
+                 element=None, bounces=None, big=False):
         rad = math.radians(angle)
         self.x = float(x)
         self.y = float(y)
@@ -24,12 +28,13 @@ class Bullet:
         self.vy = math.sin(rad) * v
         self.owner = owner
         self.damage = damage
-        self.bounces = BULLET_BOUNCES
+        # рикошеты: базовые из настроек; перк «Рикошет» добавляет свои
+        self.bounces = BULLET_BOUNCES if bounces is None else bounces
         self.age = 0.0
         self.dead = False
         self.element = element
         self.color = ELEMENT_COLORS.get(element, owner.color)
-        self.big = speed_mult > 1.1   # тяжёлый снаряд «Дальней» рисуется крупнее
+        self.big = big or speed_mult > 1.1   # тяжёлые снаряды рисуются крупнее
         self.prev = (self.x, self.y)  # точка в начале кадра (для шлейфа и отскока)
 
     def update(self, dt, arena, tanks, effects, sounds):
@@ -76,9 +81,18 @@ class Bullet:
                     continue  # даём вылететь из своего ствола
                 if (t.x - self.x) ** 2 + (t.y - self.y) ** 2 < (t.radius + 4) ** 2:
                     t.take_damage(self.damage, effects, sounds)
-                    if self.element:
+                    # ПРАВИЛО СВОЕЙ СТИХИИ: земля/ток/вода/лёд/яд не действуют
+                    # на того, кто выпустил снаряд (рикошет не замедляет себя);
+                    # урон при само-попадании честно остаётся
+                    if self.element and t is not self.owner:
                         t.apply_element(self.element, self.vx, self.vy,
                                         arena, effects, sounds)
+                    # ВАМПИРИЗМ: стрелявшему возвращается часть урона снаряда
+                    if (self.element == "vamp" and self.owner is not None
+                            and self.owner is not t and self.owner.alive):
+                        self.owner.heal(
+                            max(1, int(round(self.damage * VAMP_HEAL_RATIO))),
+                            effects)
                     effects.burst(self.x, self.y, self.color, 10, 220, 0.4, 3)
                     self.dead = True
                     return

@@ -108,7 +108,8 @@ def test_elements():
     # стихии больше НЕТ на карте — она теперь выбирается в ангаре
     check("на карте 10 бонусов, стихий среди них нет",
           len(PU_INFO) == 10 and not
-          (set(PU_INFO) & {"fire", "water", "earth", "electric", "air"}))
+          (set(PU_INFO) & {"fire", "water", "earth", "electric", "air",
+                           "ice", "poison", "vamp"}))
 
     # сборка бота: 5 компонентов, все ключи валидны
     rb = random_build()
@@ -327,7 +328,7 @@ def test_laser_fan():
 
 # ---------- 3f. ЖРЕБИЙ: проклятья (+очки) и облегчения (-очки) ----------
 def test_fate():
-    from game import Game
+    from game import Game, CR_KEYS, BL_KEYS
     from settings import (CURSES, BLESSINGS, MAX_CURSES, BOOST_MULT,
                           SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY,
                           SCORE_MULT_FLOOR)
@@ -355,17 +356,16 @@ def test_fate():
     check("снял проклятье — лишнее облегчение снялось само",
           len(g.sel_curses) == 0 and len(g.sel_blessings) == 1)
 
-    # потолок: %d проклятий и %d облегчений (в колоде по 8 карт)
+    # потолок v2.0: можно взять ВСЕ 8 проклятий и ВСЕ 8 облегчений
     g2 = Game()
-    for i in range(MAX_CURSES + 1):
+    for i in range(len(CR_KEYS)):
         g2._toggle_curse(i)
-    for i in range(MAX_CURSES + 1):
+    check("все %d проклятий берутся разом" % len(CR_KEYS),
+          len(g2.sel_curses) == MAX_CURSES == len(CR_KEYS))
+    for i in range(len(BL_KEYS)):
         g2._toggle_bless(i)
-    check("больше %d проклятий не взять" % MAX_CURSES,
-          len(g2.sel_curses) == MAX_CURSES)
-    check("%d проклятий открывают %d облегчений"
-          % (MAX_CURSES, MAX_CURSES + 1),
-          len(g2.sel_blessings) == MAX_CURSES + 1)
+    check("с 8 проклятьями потолок облегчений 9 — берутся все 8",
+          len(g2.sel_blessings) == len(BL_KEYS))
 
     # новые проклятья реально работают на танке
     base = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
@@ -405,7 +405,7 @@ def test_fate():
     p = g2.player
     check("проклятья/облегчения доезжают до танка",
           len(p.curses_keys) == MAX_CURSES and
-          len(p.blessings_keys) == MAX_CURSES + 1)
+          len(p.blessings_keys) == len(BL_KEYS))
     # хрупкость 0.75 + укрепление 1.25 = 0.9375 от 110 HP
     check("HP пересчитано жребием",
           p.max_hp == max(20, int(round(110 * 0.75 * 1.25))),
@@ -415,8 +415,8 @@ def test_fate():
           "(%.1f vs %.1f)" % (p.speed, base.speed * 0.85 * 1.15))
     check("перезарядка: долгая x1.25 гасится отточенной x0.8",
           abs(p.reload_time - base.reload_time) < 1e-6)
-    check("снаряды быстрее: дальний бой x1.15",
-          abs(p.mods["bullet_speed_mult"] - 1.15) < 1e-9)
+    check("снаряды: сырой порох 0.85 гасится дальним боем 1.15",
+          abs(p.mods["bullet_speed_mult"] - 0.85 * 1.15) < 1e-9)
 
     # разбитый прицел реально разбрасывает снаряды
     import math
@@ -839,6 +839,216 @@ def test_mouse():
     check("карт проклятий в жребии по-прежнему 8", len(CR_KEYS) == 8)
 
 
+# ---------- 3j. НОВЫЕ ДУЛА: дробовик, пулемёт, гаубица ----------
+def test_new_weapons():
+    import math
+    from settings import WEAPONS, BULLET_DAMAGE
+    from tank import Tank
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+    check("в арсенале 6 дул", len(WEAPONS) == 6)
+
+    sh = Tank(0, 0, 0, "medium", "medium", COL, "shotgun", "none")
+    bs = []
+    sh.cooldown = 0
+    sh.try_shoot(bs, fx, snd)
+    check("дробовик: залп из 5 дробин",
+          len(bs) == 5 and WEAPONS["shotgun"]["pellets"] == 5)
+    check("дробовик: каждая дробина слабая (x0.5)",
+          abs(bs[0].damage - BULLET_DAMAGE * 0.5 * 1.10) < 0.1,
+          "(dmg=%.1f)" % bs[0].damage)
+    angles = [math.degrees(math.atan2(b.vy, b.vx)) for b in bs]
+    check("дробовик: дробины летят веером", max(angles) - min(angles) > 4,
+          "(разлет %.0f°)" % (max(angles) - min(angles)))
+
+    mg = Tank(0, 0, 0, "medium", "medium", COL, "rapidgun", "none")
+    check("пулемёт: обойма на 6", mg.mag_size == 6)
+    bm = []
+    mg.cooldown = 0
+    mg.try_shoot(bm, fx, snd)
+    check("пулемёт: очередями по одному, снаряд лёгкий, пауза mag_cd",
+          len(bm) == 1
+          and abs(bm[0].damage - BULLET_DAMAGE * 0.5 * 1.10) < 0.1
+          and abs(mg.cooldown - WEAPONS["rapidgun"]["mag_cd"]) < 1e-6)
+
+    hw = Tank(0, 0, 0, "medium", "medium", COL, "howitzer", "none")
+    bh = []
+    hw.cooldown = 0
+    hw.try_shoot(bh, fx, snd)
+    check("гаубица: снаряд x2 урона и крупный",
+          abs(bh[0].damage - BULLET_DAMAGE * 2.0 * 1.10) < 0.1 and bh[0].big,
+          "(dmg=%.0f)" % bh[0].damage)
+    check("гаубица: танк еле ползёт (орудие x0.8)",
+          abs(hw.speed - 175 * (1 - 0.15) * 0.8) < 0.6,
+          "(%.1f)" % hw.speed)
+
+
+# ---------- 3k. ПЕРК РИКОШЕТ: +2 отскока каждому снаряду ----------
+def test_ricochet():
+    from settings import BULLET_BOUNCES, PERKS
+    from tank import Tank
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+    check("перк «Рикошет» в списке перков", "ricochet" in PERKS)
+    base = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
+    rk = Tank(0, 0, 0, "medium", "medium", COL, "standard", "ricochet")
+    check("без перка у снаряда %d рикошет" % BULLET_BOUNCES,
+          base.bullet_bounces == BULLET_BOUNCES)
+    check("«Рикошет»: +2 отскока каждому снаряду",
+          rk.bullet_bounces == BULLET_BOUNCES + PERKS["ricochet"]["bounces"])
+    bullets = []
+    rk.cooldown = 0
+    rk.try_shoot(bullets, fx, snd)
+    check("снаряд «Рикошета» несёт %d отскока" % (BULLET_BOUNCES + 2),
+          bullets[0].bounces == BULLET_BOUNCES + 2,
+          "(bounces=%d)" % bullets[0].bounces)
+    check("цена рикошета: прочность -15%%",
+          rk.max_hp == int(round(110 * 0.85)), "(hp %d)" % rk.max_hp)
+
+
+# ---------- 3l. НОВЫЕ СТИХИИ: лёд, яд, вампиризм + правило своей стихии ----------
+def test_new_elements():
+    from settings import (ELEMENTS, ICE_TIME, POISON_TIME, POISON_DPS,
+                          VAMP_HEAL_RATIO)
+    from tank import Tank
+    from bullet import Bullet
+    from arena import Arena
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+    a = Arena(0)
+    check("в колоде 9 стихий", len(ELEMENTS) == 9)
+
+    # лёд: вмораживает (скорость 0)
+    t = Tank(0, 0, 0, "medium", "medium", COL)
+    t.apply_element("ice", 1, 0, a, fx, snd)
+    check("лёд вмораживает врага на %.1f с (скорость 0)" % ICE_TIME,
+          t.frozen_t == ICE_TIME and t.speed == 0.0)
+
+    # яд: травит со временем, броня не спасает
+    t2 = Tank(0, 0, 0, "medium", "medium", COL)
+    t2.apply_element("poison", 1, 0, a, fx, snd)
+    hp0 = t2.hp
+    for _ in range(30):
+        t2._poison_step(1 / 60.0, fx, snd)
+    check("яд тикает уроном %.1f/с" % POISON_DPS,
+          abs((hp0 - t2.hp) - POISON_DPS * 0.5) < 0.01 and t2.poison_t > 0,
+          "(потеря %.1f)" % (hp0 - t2.hp))
+
+    # вампиризм: стрелявшему возвращается 40% урона снаряда
+    shooter = Tank(640, 360, 0, "medium", "medium", COL)
+    victim = Tank(700, 360, 0, "medium", "medium", (255, 46, 122))
+    shooter.hp = 40
+    bv = Bullet(victim.x, victim.y, 0, shooter, damage=30, element="vamp")
+    bv.age = 1.0
+    bv.update(1 / 60.0, a.walls_only(), (shooter, victim), fx, snd)
+    check("вампиризм: стрелявшему +%d HP" % int(round(30 * VAMP_HEAL_RATIO)),
+          shooter.hp == 40 + int(round(30 * VAMP_HEAL_RATIO)),
+          "(hp %d)" % shooter.hp)
+
+    # ПРАВИЛО СВОЕЙ СТИХИИ: свой рикошет бьёт по HP, но НЕ замедляет
+    me = Tank(640, 360, 0, "medium", "medium", COL)
+    foe = Tank(200, 200, 0, "medium", "medium", (255, 46, 122))
+    b = Bullet(me.x, me.y, 0, me, damage=30, element="earth")
+    b.age = 1.0
+    hp0 = me.hp
+    b.update(1 / 60.0, a.walls_only(), (me, foe), fx, snd)
+    check("свой снаряд в себя: урон есть, земля НЕ вяжет",
+          me.hp < hp0 and me.mud_t == 0,
+          "(dmg %.0f, mud %.1f)" % (hp0 - me.hp, me.mud_t))
+    b2 = Bullet(me.x, me.y, 0, foe, damage=30, element="earth")
+    b2.age = 1.0
+    b2.update(1 / 60.0, a.walls_only(), (me, foe), fx, snd)
+    check("чужая земля вяжет как раньше", me.mud_t > 0)
+
+
+# ---------- 3m. ЛИМИТЫ v2.0 и ТУЛТИПЫ ПОД КУРСОРОМ ----------
+def test_limits_tooltip():
+    from game import Game
+    from settings import CHASSIS, MAX_CURSES, MAX_ENEMY_EFFECTS
+
+    g = Game()
+    check("лимит проклятий поднят до 8", MAX_CURSES == 8)
+    check("лимит эффектов на врага поднят до 8", MAX_ENEMY_EFFECTS == 8)
+
+    # тултип: наводим мышь на карточку «Лёгкое» шасси (пример игрока)
+    g.state = "select"
+    g.draw()
+    zones = [r for r, kd, d in g._click_zones if kd == "ch" and d == 0]
+    check("карточка шасси кликабельна", bool(zones))
+    g._mouse = zones[0].center
+    g.draw()   # перерисовываем кадр с курсором на карточке
+    check("наведение на «Лёгкое» выдает тултип",
+          g._tooltip is not None
+          and g._tooltip[0] == CHASSIS["light"]["name"],
+          "(%s)" % (g._tooltip[0] if g._tooltip else "-"))
+    lines = g._tooltip[2]
+    check("в тултипе характеристики и описание (крупно, не 11px)",
+          len(lines) >= 3 and any("Скорость" in l for l in lines))
+
+    # тултип проклятья: объясняет награду +15%
+    g._mouse = next(r.center for r, kd, d in g._click_zones
+                    if kd == "fate" and d == 0)
+    g.draw()
+    check("тултип проклятья объясняет награду +15%",
+          g._tooltip is not None and any("+15%" in l for l in g._tooltip[2]))
+    # тултип баффа врага (e_harden, индекс 6): награда +10%
+    g._mouse = next(r.center for r, kd, d in g._click_zones
+                    if kd == "enemy" and d == 6)
+    g.draw()
+    check("тултип баффа врага объясняет награду +10%",
+          g._tooltip is not None and any("+10%" in l for l in g._tooltip[2]))
+    # тултип нового дула: дробовик
+    g._mouse = next(r.center for r, kd, d in g._click_zones
+                    if kd == "wpn" and d == 3)
+    g.draw()
+    check("тултип дробовика показывает залп из 5",
+          g._tooltip is not None and any("5" in l and "дробин" in l
+                                         for l in g._tooltip[2]))
+
+
+# ---------- 3n. ТАБЛИЦА ПЕРЕЖИВЁТ ЗАКРЫТИЕ ИГРЫ ----------
+def test_stats_persist():
+    import os
+    from game import Game, STATS_FILE
+
+    g = Game()
+    g.stats["score_table"] = [{"score": 777, "res": "win", "rounds": "5:0",
+                               "c": 1, "b": 0, "e": 0, "mult": 1.15,
+                               "el": "Огонь", "date": "01.01 00:00"}]
+    g._save_stats()
+    check("duel_stats.json записан на диск", os.path.exists(STATS_FILE))
+    g2 = Game()   # «новый запуск игры» — читает тот же файл
+    check("таблица переживёт закрытие игры: запись читается из файла",
+          any(r.get("score") == 777 for r in g2.stats["score_table"]))
+    # прибираем за собой
+    g2.stats["score_table"] = [r for r in g2.stats["score_table"]
+                               if r.get("score") != 777]
+    g2._save_stats()
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -850,6 +1060,11 @@ if __name__ == "__main__":
     test_laser_fan()
     test_fate()
     test_enemy_effects()
+    test_new_weapons()
+    test_ricochet()
+    test_new_elements()
+    test_limits_tooltip()
+    test_stats_persist()
     test_points()
     test_score_table()
     test_magazine()

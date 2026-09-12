@@ -20,6 +20,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
                       SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
+                      ICE_TIME, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
                       SCORE_PICKUP,
                       DIFF_PRESETS, BOT_DIFFICULTY)
@@ -41,6 +42,25 @@ EE_KEYS = list(ENEMY_EFFECTS)
 JT_TOTAL = len(CR_KEYS) + len(BL_KEYS)   # карт жребия: 8 проклятий + 8 облегчений
 STATS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "duel_stats.json")
 DIFF_NAMES = {1: "Лёгкий", 2: "Норм", 3: "Хардкор"}
+
+
+def _wrap_px(text, font, maxw):
+    """Разбивает строку на несколько, чтобы влезла в maxw пикселей."""
+    if font.size(text)[0] <= maxw:
+        return [text]
+    words = text.split()
+    if not words:
+        return [text]
+    lines, cur = [], words[0]
+    for w in words[1:]:
+        t = cur + " " + w
+        if font.size(t)[0] <= maxw:
+            cur = t
+        else:
+            lines.append(cur)
+            cur = w
+    lines.append(cur)
+    return lines
 
 
 class Smoke:
@@ -198,6 +218,9 @@ class Game:
         # мышь: кликабельные зоны текущего кадра и позиция курсора
         self._click_zones = []
         self._mouse = (0, 0)
+        # тултип: (заголовок, цвет, [строки]) — появляется при наведении
+        # на карточку в ангаре и рисуется ПОВЕРХ всего в конце кадра
+        self._tooltip = None
         self.stats = self._load_stats()
 
     # ================= статистика матчей =================
@@ -291,7 +314,7 @@ class Game:
             self.sel_blessings.append(key)
 
     def _toggle_enemy(self, idx):
-        """Эффекты НА ВРАГА: баффы и дебаффы, любой режет счёт."""
+        """Эффекты НА ВРАГА: баффы врагу ДОБАВЛЯЮТ очки, дебаффы режут."""
         key = EE_KEYS[idx]
         if key in self.sel_enemy_keys:
             self.sel_enemy_keys.remove(key)
@@ -584,6 +607,8 @@ class Game:
         self.bot_tank.update(dt)
         self.player._burn_step(dt, self.effects, self.sounds)
         self.bot_tank._burn_step(dt, self.effects, self.sounds)
+        self.player._poison_step(dt, self.effects, self.sounds)
+        self.bot_tank._poison_step(dt, self.effects, self.sounds)
         self.player.control(dt, self.arena, fwd, tn, (self.bot_tank,))
         self.ai.update(dt, self)
         if keys[pygame.K_SPACE]:
@@ -911,10 +936,10 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена (120 прочности)   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "Ангар — всё выбирается КЛИКОМ мыши: 1800 сборок.",
-            "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ.",
-            "Облегчения помогают, но режут счёт; без проклятий — максимум одно.",
-            "Баффы врагу ДОБАВЛЯЮТ очки, дебаффы режут — 12 эффектов на выбор.",
+            "Ангар — всё кликом мыши: 6750 сборок. Наведи курсор на карточку — вылезет подсказка!",
+            "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ (можно взять все 8).",
+            "Баффы врагу ДОБАВЛЯЮТ очки, дебаффы режут — 12 эффектов, лимит 8.",
+            "Свои стихии вас НЕ замедляют. 6 дул, 9 стихий, перк РИКОШЕТ.",
             "10 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
         ]
         y = 310
@@ -954,11 +979,145 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v1.9", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.0", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
+
+    # ================= тултипы ангарa =================
+    def _tt_for(self, kind, key):
+        """Содержимое тултипа для карточки сборки: название, цвет,
+        и ЧИТАЕМЫЙ список того, что эта деталь делает."""
+        if kind == "ch":
+            c = CHASSIS[key]
+            lines = ["Скорость: %d px/с   ·   Разворот: %d°/с" % (c["speed"], c["turn"]),
+                     "Броня: %d (сглаживает каждый удар)" % c["armor"]]
+            if abs(c.get("wmult", 1.0) - 1.0) > 1e-9:
+                lines.append("Чувствует вес корпуса: x%.2f" % c["wmult"])
+            lines.append(c["desc"])
+            return c["name"], COL_P1, lines
+        if kind == "hu":
+            h = HULL[key]
+            lines = ["Прочность: %d HP" % h["hp"],
+                     "Вес: %.2f — во столько замедляет танк" % h["weight"],
+                     "Базовая перезарядка: %.2f с" % h["reload"],
+                     h["desc"]]
+            return h["name"], COL_P1, lines
+        if kind == "wpn":
+            w = WEAPONS[key]
+            lines = ["Урон снаряда: x%.2f   ·   Скорость снаряда: x%.2f"
+                     % (w["damage_mult"], w["speed_mult"]),
+                     "Полная перезарядка: x%.2f" % w["reload_mult"]]
+            if w["mag"] > 1:
+                lines.append("Обойма: %d снаряда, пауза %.2f с"
+                             % (w["mag"], w["mag_cd"]))
+            if w.get("pellets", 1) > 1:
+                lines.append("Дробин за выстрел: %d с разлётом ±%.0f°"
+                             % (w["pellets"], w["pellet_spread"]))
+            if w.get("pellet_spread") and w.get("pellets", 1) <= 1:
+                lines.append("Разброс ствола: ±%.0f°" % w["pellet_spread"])
+            if w.get("bigshot"):
+                lines.append("Особо крупный снаряд")
+            if abs(w["move_mult"] - 1.0) > 1e-9:
+                lines.append("Танк едет: x%.2f (орудие тяжёлое)" % w["move_mult"])
+            lines.append(w["desc"])
+            return w["name"], COL_P1, lines
+        if kind == "pk":
+            p = PERKS[key]
+            names = {"hp_mult": "Прочность", "speed_mult": "Скорость",
+                     "reload_mult": "Перезарядка", "turn_mult": "Разворот"}
+            lines = []
+            for f, label in names.items():
+                if abs(p[f] - 1.0) > 1e-9:
+                    pct = round((p[f] - 1.0) * 100)
+                    lines.append("%s: %+d%%" % (label, pct))
+            if p.get("bounces"):
+                lines.append("Рикошеты: +%d к каждому снаряду" % p["bounces"])
+            lines.append(p["desc"])
+            return p["name"], COL_P1, lines
+        if kind == "el":
+            e = ELEMENTS[key]
+            lines = ["Урон снаряда: x%.2f   ·   Скорость снаряда: x%.2f"
+                     % (e["damage_mult"], e["speed_mult"]),
+                     e["desc"]]
+            eff = {"fire": "ПОДЖОГ: 4 с по 6 урона/с — броня не спасает",
+                   "water": "СМЫВАЕТ бонусы врага + буксование 1.2 с",
+                   "earth": "ВЯЗКОСТЬ: враг еле ползёт 2.5 с",
+                   "electric": "ТОК: мотор врага вполсилы 1.3 с",
+                   "air": "ПОРЫВ: отшвыривает врага на 90 px",
+                   "ice": "ЛЁД: вмораживает врага на %.1f с" % ICE_TIME,
+                   "poison": "ЯД: %.0f с по %.0f урона/с — броня не спасает"
+                             % (POISON_TIME, POISON_DPS),
+                   "vamp": "ЛЕЧИТ вам %d%% урона каждого попадания"
+                           % round(VAMP_HEAL_RATIO * 100)}
+            if key in eff:
+                lines.append(eff[key])
+            lines.append("Свои стихии на ВАС не действуют — сам себя не замедлишь.")
+            return e["name"], (170, 190, 255), lines
+        return key, COL_TEXT, []
+
+    def _tt_fate(self, key, is_curse, taken):
+        """Тултип карты жребия: проклятье (красная) или облегчение (зелёная)."""
+        table = CURSES if is_curse else BLESSINGS
+        item = table[key]
+        if is_curse:
+            head = "ПРОКЛЯТЬЕ — ослабляет ТОЛЬКО ВАС"
+            lines = [head, item["desc"],
+                     "Награда: +%d%% очков за забег"
+                     % round(SCORE_CURSE_BONUS * 100)]
+        else:
+            head = "ОБЛЕГЧЕНИЕ — помогает вам"
+            lines = [head, item["desc"],
+                     "Цена: -%d%% очков за забег"
+                     % round(SCORE_BLESS_PENALTY * 100)]
+        lines.append("Клик или V — %s" % ("СНЯТЬ (взято)" if taken else "ВЗЯТЬ"))
+        return item["name"], (255, 90, 110) if is_curse else (90, 230, 140), lines
+
+    def _tt_enemy(self, key, taken):
+        """Тултип эффекта НА ВРАГА: бафф добавляет очки, дебафф режет."""
+        item = ENEMY_EFFECTS[key]
+        buff = "score_bonus" in item
+        if buff:
+            head = "БАФФ — УСИЛИТЬ врага (усиленный враг платит)"
+            lines = [head, item["desc"],
+                     "Награда: +%d%% очков за забег"
+                     % round(item["score_bonus"] * 100)]
+        else:
+            head = "ДЕБАФФ — ОСЛАБИТЬ врага"
+            lines = [head, item["desc"],
+                     "Цена: -%d%% очков за забег" % round(item["score_cut"] * 100)]
+        lines.append("Клик или M — %s" % ("СНЯТЬ (взято)" if taken else "ВЗЯТЬ"))
+        return item["name"], (120, 230, 150) if buff else (255, 170, 80), lines
+
+    def _draw_tooltip(self):
+        """Окошко-подсказка у курсора: крупный шрифт, рисуется поверх всего."""
+        if not self._tooltip:
+            return
+        title, color, lines = self._tooltip
+        ft = get_font(18)
+        fb = get_font(15, bold=False)
+        pad, maxw = 12, 400
+        wrapped = []
+        for ln in lines:
+            wrapped.extend(_wrap_px(ln, fb, maxw - 2 * pad))
+        w = max(ft.size(title)[0],
+                max((fb.size(l)[0] for l in wrapped), default=0)) + 2 * pad
+        h = 36 + len(wrapped) * 21 + pad
+        x = min(max(self._mouse[0] + 20, 6), SCREEN_W - w - 6)
+        y = min(max(self._mouse[1] + 20, 6), SCREEN_H - h - 6)
+        bg = pygame.Surface((w, h), pygame.SRCALPHA)
+        bg.fill((10, 14, 30, 242))
+        self.screen.blit(bg, (x, y))
+        pygame.draw.rect(self.screen, color, (x, y, w, h), 2, border_radius=9)
+        img = ft.render(title, True, color)
+        self.screen.blit(img, (x + pad, y + 7))
+        yy = y + 36
+        for l in wrapped:
+            img = fb.render(l, True, COL_TEXT)
+            self.screen.blit(img, (x + pad, yy))
+            yy += 21
 
     def _draw_select(self):
         self.screen.fill((10, 12, 26))   # непрозрачный фон: старый бой не просвечивает
+        self._tooltip = None             # тултип собирается заново каждый кадр
         t1 = get_font(30).render("АНГАР", True, COL_TEXT)
         self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 30)))
 
@@ -981,10 +1140,10 @@ class Game:
         # --- жребий: проклятья (+очки) и облегчения (-очки) ---
         mult = self._fate_mult(self.sel_curses, self.sel_blessings,
                                self.sel_enemy_keys)
-        self._fate_panel(422, 460, mult)
+        self._fate_panel(432, 468, mult)
 
         # --- эффекты НА ВРАГА ---
-        self._enemy_panel(552)
+        self._enemy_panel(558)
 
         # итоговые характеристики — с учётом жребия
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
@@ -1001,19 +1160,22 @@ class Game:
             stats_line += "    Разброс: %d°" % round(preview.mods["spread_deg"])
         img = get_font(18).render(stats_line, True,
                                   (255, 150, 90) if preview.speed < 110 else COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 614)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 620)))
         img = get_font(21).render("Очки за забег: x%.2f      "
                                   "Enter — в бой, Esc — меню (или кнопки ниже)"
                                   % mult, True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 644)))
-        self._button(SCREEN_W / 2 - 95, 688, "В БОЙ ▶", "go_fight",
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 649)))
+        self._button(SCREEN_W / 2 - 95, 690, "В БОЙ ▶", "go_fight",
                      w=270, h=32, fs=18)
-        self._button(SCREEN_W / 2 + 150, 688, "МЕНЮ", "garage_menu",
+        self._button(SCREEN_W / 2 + 150, 690, "МЕНЮ", "garage_menu",
                      w=130, h=32, fs=17)
 
         # превью танка игрока (внизу справа, чтобы не мешать панелям)
         img = pygame.transform.scale_by(preview._sprite, 1.6)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W - 100, 664)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W - 100, 668)))
+
+        # тултип рисуется САМЫМ ПОСЛЕДНИМ — поверх всех панелей и кнопок
+        self._draw_tooltip()
 
     def _fate_panel(self, y_cur, y_bless, mult):
         """Жребий: 8 проклятий (красные) и 8 облегчений (зелёные).
@@ -1069,6 +1231,8 @@ class Game:
                 color = COL_TEXT if (taken or cur or hov) else COL_DIM
                 self._click_zones.append((box, "fate",
                                           i if is_curse else n_cur + i))
+                if hov:   # окошко-подсказка над картой жребия
+                    self._tooltip = self._tt_fate(key, is_curse, taken)
                 lines = _wrap(item["name"])
                 dy = box.centery - (len(lines) * 14) // 2 + 7
                 for ln in lines:
@@ -1154,6 +1318,8 @@ class Game:
                                  box.inflate(6, 6), 2, border_radius=9)
             color = COL_TEXT if (taken or i == self.sel_en or hov) else COL_DIM
             self._click_zones.append((box, "enemy", i))
+            if hov:   # окошко-подсказка над эффектом на врага
+                self._tooltip = self._tt_enemy(key, taken)
             lines = _wrap(item["name"])
             dy = box.centery - (len(lines) * 14) // 2 + 7
             for ln in lines:
@@ -1216,6 +1382,8 @@ class Game:
                                                   else (60, 70, 110)),
                              box, 3 if sel else (2 if hov else 1),
                              border_radius=7)
+            if kind and hov:   # окошко-подсказка над карточкой сборки
+                self._tooltip = self._tt_for(kind, key)
             dlines = _wrap(item["desc"])
             name_y = box.y + (11 if len(dlines) > 1 else 14)
             img = name_f.render(item["name"],
@@ -1389,9 +1557,11 @@ class Game:
         if t.laser_charges > 0 and t.triple <= 0:
             sfx.append("ЛАЗЕР x%d" % t.laser_charges)
         if t.frozen_t > 0:
-            sfx.append("ЭМИ!")
+            sfx.append("ЗАМОРОЗКА!")
         if t.burn_t > 0:
             sfx.append("ПОЖАР!")
+        if t.poison_t > 0:
+            sfx.append("ЯД!")
         if t.mud_t > 0:
             sfx.append("УВЯЗ!")
         if t.shock_t > 0:
@@ -1424,6 +1594,9 @@ class Game:
             dt = min(self.clock.tick(FPS) / 1000.0, 0.05)
             for e in pygame.event.get():
                 if e.type == pygame.QUIT:
+                    # таблица счёта и статистика уже на диске после каждого
+                    # матча, но на всякий случай сохраняемся и при выходе
+                    self._save_stats()
                     pygame.quit()
                     return
                 if e.type == pygame.MOUSEMOTION:

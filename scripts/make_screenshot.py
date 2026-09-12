@@ -44,4 +44,13 @@ g._draw_select()
 out = "/home/z/my-project/tool-results/garage.png"
 pygame.image.save(g.screen, out)
 print("garage.png:", out)
+
+# тултип: курсор над карточкой «Лёгкое» — окошко с описанием крупным шрифтом
+g.draw()
+zone = next(r for r, kd, d in g._click_zones if kd == "ch" and d == 0)
+g._mouse = zone.center
+g.draw()
+out2 = "/home/z/my-project/tool-results/tooltip.png"
+pygame.image.save(g.screen, out2)
+print("tooltip.png:", out2)
 pygame.quit()
