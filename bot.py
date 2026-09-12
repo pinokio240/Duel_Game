@@ -3,7 +3,9 @@
 ИИ бота: держит дистанцию, обходит препятствия ПО ШИРИНЕ ТАНКА (узкие щели
 не считают проходимыми), уворачивается от пуль и мин, выбирается из
 застреваний, СОБИРАЕТ бонусы (ремонт, щит, лазер...), ставит мины под
-догоняющего и строит стены-барьеры между собой и игроком.
+догоняющего и строит стены-барьеры между собой и целью.
+v2.1: РЕЖИМЫ 1вс1вс1 — цель выбирается КАЖДЫЙ САМ ЗА СЕБЯ: ближайший
+чужой танк (в том числе другой бот), а пули/мины ЛЮБОГО чужака опасны.
 Сложность настраивается пресетом (1 лёгкий / 2 норм / 3 хардкор).
 """
 import math
@@ -35,7 +37,7 @@ class BotAI:
     def __init__(self, tank, difficulty=2):
         self.t = tank
         self.preset = DIFF_PRESETS.get(difficulty, DIFF_PRESETS[2])
-        self.orbit = 1          # направление орбиты вокруг игрока
+        self.orbit = 1          # направление орбиты вокруг цели
         self.orbit_t = 0.0      # до смены направления орбиты
         self.fire_delay = 0.3   # небольшая пауза между решениями стрелять
         self.aim_noise = random.uniform(-self.preset["aim"], self.preset["aim"])
@@ -47,15 +49,26 @@ class BotAI:
         # ручные бустеры
         self.drop_cd = 0.0      # пауза между минами
         self.wall_cd = 0.0      # пауза между стенами
+        # v2.1: цель (в 1на1 — игрок, в FFA — ближайший чужой танк)
+        self.target = None
 
     # ---------- помощники ----------
 
+    def _pick_target(self, game):
+        """Ближайший живой ЧУЖОЙ танк — в FFA это может быть другой бот."""
+        t = self.t
+        cands = [o for o in game.tanks if o is not t and o.alive]
+        if not cands:
+            return None
+        return min(cands, key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
+
     def _threat(self, game):
-        """Пуля игрока, которая РЕАЛЬНО опасна: близко и летит точно в нас."""
+        """Чужая пуля, которая РЕАЛЬНО опасна: близко и летит точно в нас.
+        В FFA опасны пули ЛЮБОГО чужака (бот тоже может подстрелить бота)."""
         t = self.t
         best, best_d = None, 1e9
         for b in game.bullets:
-            if b.owner is not game.player:
+            if b.owner is t:
                 continue
             bx, by = t.x - b.x, t.y - b.y
             d = math.hypot(bx, by)
@@ -123,17 +136,19 @@ class BotAI:
 
     def _pick_powerup(self, game):
         """Выбрать стоящий бонус: ценим ремонт на низком HP, не дарим
-        бонус игроку (если тот заметно ближе) и едем только если есть
+        бонус чужакам (если кто-то заметно ближе) и едем только если есть
         проходимая дорога по ширине танка."""
         t = self.t
+        others = [o for o in game.tanks if o is not t and o.alive]
         best, best_score = None, 0.0
         for pu in game.powerups:
             d = math.hypot(pu.x - t.x, pu.y - t.y)
             if d > 560:
                 continue
-            dp = math.hypot(pu.x - game.player.x, pu.y - game.player.y)
-            if dp * 1.5 < d:
-                continue    # игрок ближе — не подносить же ему
+            if others:
+                dn = min(math.hypot(pu.x - o.x, pu.y - o.y) for o in others)
+                if dn * 1.5 < d:
+                    continue    # чужак ближе — не подносить же ему
             val = PU_VALUE.get(pu.kind, 1.0)
             if pu.kind == "repair" and t.hp < t.max_hp * 0.5:
                 val += 2.5
@@ -148,8 +163,13 @@ class BotAI:
 
     def update(self, dt, game):
         t = self.t
-        p = game.player
-        if not t.alive or not p.alive:
+        if not t.alive:
+            return
+        # v2.1: цель — ближайший чужой живой танк (умерла — перевыбираем)
+        if self.target is None or not self.target.alive:
+            self.target = self._pick_target(game)
+        p = self.target
+        if p is None or not p.alive:
             return
         if t.frozen_t > 0:
             return  # обездвижен ЭМИ — сидим и страдаем
@@ -199,22 +219,24 @@ class BotAI:
                 self.unstick_turn = random.choice((-1, 1))
                 t._stuck = 0.0
 
-        t.control(dt, game.arena, forward, turn, (p,))
+        t.control(dt, game.arena, forward, turn, tuple(game.tanks))
         self._try_fire(dt, game, p, ang_to)
 
     # ---------- куда едем ----------
 
     def _use_items(self, game, dist):
-        """Ручные бустеры: мины под догоняющего, стены между собой и игроком."""
+        """Ручные бустеры: мины под догоняющего, стены между собой и целью."""
         t = self.t
-        p = game.player
-        # мина: игрок давит сзади на средней дистанции — кидаем под нос
+        p = self.target
+        if p is None:
+            return
+        # мина: цель давит сзади на средней дистанции — кидаем под нос
         if (t.mine_carried > 0 and self.drop_cd <= 0 and 115 < dist < 460):
             rad = math.radians(t.angle)
             dx, dy = p.x - t.x, p.y - t.y
             d = math.hypot(dx, dy) + 1e-6
             dot = (dx * math.cos(rad) + dy * math.sin(rad)) / d
-            if dot < -0.25:          # игрок именно сзади
+            if dot < -0.25:          # цель именно сзади
                 if game._place_mine(t):
                     self.drop_cd = 2.0
         # стена: игрок близко — строим поперёк линии огня
@@ -225,7 +247,7 @@ class BotAI:
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""
         t = self.t
-        p = game.player
+        p = self.target   # v2.1: в FFA цель — ближайший чужой танк
         # 1) подбит и видит ремонт ПО ПРОХОДИМОЙ дороге — едем за ним
         if t.hp < t.max_hp * 0.45:
             repair = self._nearest_repair(game)
@@ -241,10 +263,10 @@ class BotAI:
         if self.pu_target is not None:
             return math.degrees(math.atan2(self.pu_target.y - t.y,
                                            self.pu_target.x - t.x))
-        # 3) игрок скрыт препятствием, стеной или дымом — заходим с фланга
+        # 3) цель скрыта препятствием, стеной или дымом — заходим с фланга
         if not self._visible(game, p.x, p.y):
             return self._flank_angle(ang_to, dist)
-        # 4) игрок виден: сближение / отход / орбита
+        # 4) цель видна: сближение / отход / орбита
         return self._combat_angle(ang_to, dist)
 
     def _flank_angle(self, ang_to, dist):

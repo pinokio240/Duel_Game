@@ -10,7 +10,8 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       COL_P1, COL_P2, COL_GOLD, ROUNDS_TO_WIN, ROUND_BANNER_T,
                       ROUND_PAUSE_T, CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS,
                       CURSES, BLESSINGS, MAX_CURSES, ENEMY_EFFECTS,
-                      MAX_ENEMY_EFFECTS,
+                      MAX_ENEMY_EFFECTS, TANK_RADIUS,
+                      BOT_COLORS, BOT_NAMES, MODE_NAMES,
                       BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
                       PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
@@ -23,8 +24,9 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       ICE_TIME, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
                       SCORE_PICKUP,
+                      FFA_ZONE_T, SUDDEN_DEATH_DPS,
                       DIFF_PRESETS, BOT_DIFFICULTY)
-from arena import Arena, LAYOUTS
+from arena import Arena, LAYOUTS, WALL_T
 from tank import Tank
 from bot import BotAI, random_build
 from powerup import PowerUp, Mine, PU_INFO
@@ -179,10 +181,12 @@ class Game:
         # состояние
         self.state = "menu"       # menu/select/table/intro/fight/round_end/match_end/pause
         self.timer = 0.0
+        # режим боя (v2.1): сколько танков на арене — 2..5, каждый сам за себя
+        self.mode = 2
         # сборка игрока: шасси, корпус, дуло, перк, стихия,
         # проклятья, облегчения, эффекты НА ВРАГА
         self.build = ("medium", "medium", "standard", "none", "none", (), (), ())
-        self.bot_build = ("medium", "medium", "standard", "none", "none")
+        self.bot_builds = []                # сборка каждого бота на матч
         self.sel_ch, self.sel_hu = 1, 1     # курсоры в ангаре
         self.sel_wpn, self.sel_pk, self.sel_el = 0, 0, 0
         self.sel_jt = 0                     # курсор жребия (0..15)
@@ -190,7 +194,7 @@ class Game:
         self.sel_blessings = []             # взятые облегчения (ключи)
         self.sel_en = 0                     # курсор эффектов на врага
         self.sel_enemy_keys = []            # взятые эффекты НА ВРАГА (ключи)
-        self.score = [0, 0]
+        self.score = [0, 0]                 # победы: score[0] — игрок, дальше боты
         self.round = 1
         self.winner = 0
         self.difficulty = BOT_DIFFICULTY
@@ -205,13 +209,18 @@ class Game:
 
         # объекты боя
         self.player = None
-        self.bot_tank = None
-        self.ai = None
+        self.bot_tank = None      # первый бот (в 1на1 — единственный)
+        self.ai = None            # его ИИ
+        self.tanks = []           # ВСЕ танки раунда: игрок + боты (v2.1)
+        self.bots = []
+        self.ais = []
         self.bullets = []
         self.powerups = []
         self.mines = []
         self.smokes = []
         self.barriers = []
+        self.round_t = 0.0        # время раунда (для огненной зоны FFA)
+        self.zone_tick = 0.0
         self.powerup_t = POWERUP_INTERVAL * 0.6
 
         self._fake_keys = None  # только для автотестов
@@ -252,12 +261,49 @@ class Game:
             pass
 
     # ================= создание боя =================
-    def _reset_round(self):
+    def _spawn_points(self, n):
+        """Точки появления для n танков: 1вс1 — классика по краям,
+        FFA — кольцо вокруг центра. Точки без стен и подальше друг от друга."""
         cx, cy = SCREEN_W / 2, SCREEN_H / 2
-        self.player = Tank(cx - 400, cy, 0, self.build[0], self.build[1], COL_P1,
-                           self.build[2], self.build[3], self.build[4],
-                           self.build[5], self.build[6])
-        # эффекты НА ВРАГА: словарь модов для бота (баффы и дебаффы)
+        if n == 2:
+            ring = [(cx - 400, cy), (cx + 400, cy)]
+        else:
+            ring = []
+            for i in range(n):
+                a = math.radians(90 + i * 360.0 / n)   # игрок — снизу
+                ring.append((cx + math.cos(a) * 330, cy + math.sin(a) * 330))
+        out = []
+        for x, y in ring:
+            out.append(self._free_spawn(x, y, out))
+        return out
+
+    def _free_spawn(self, x, y, taken):
+        """Точка появления без стен и не ближе 230 px к уже занятым."""
+        ok = (not self.arena.circle_collides(x, y, TANK_RADIUS + 6)
+              and all(math.hypot(x - tx, y - ty) > 230 for tx, ty in taken))
+        if ok:
+            return (x, y)
+        for _ in range(140):
+            nx = random.uniform(WALL_T + 70, SCREEN_W - WALL_T - 70)
+            ny = random.uniform(WALL_T + 60, SCREEN_H - WALL_T - 60)
+            if self.arena.circle_collides(nx, ny, TANK_RADIUS + 10):
+                continue
+            if all(math.hypot(nx - tx, ny - ty) > 230 for tx, ty in taken):
+                return (nx, ny)
+        return (x, y)          # совсем некуда — пусть вылезает как есть
+
+    def _reset_round(self):
+        # арена переразыгрывается КАЖДЫЙ РАУНД и перемешивается (v2.1)
+        self.arena = Arena(random.randrange(len(LAYOUTS)), shuffle=True)
+        cx, cy = SCREEN_W / 2, SCREEN_H / 2
+        pts = self._spawn_points(self.mode)
+        self.player = Tank(
+            pts[0][0], pts[0][1],
+            math.degrees(math.atan2(cy - pts[0][1], cx - pts[0][0])),
+            self.build[0], self.build[1], COL_P1,
+            self.build[2], self.build[3], self.build[4],
+            self.build[5], self.build[6])
+        # эффекты НА ВРАГА: словарь модов для КАЖДОГО бота (баффы и дебаффы)
         emods = {}
         for key in self.build[7]:
             for f, v in ENEMY_EFFECTS[key]["mods"].items():
@@ -265,10 +311,22 @@ class Game:
                     emods[f] = emods.get(f, 0.0) + v
                 else:
                     emods[f] = emods.get(f, 1.0) * v
-        self.bot_tank = Tank(cx + 400, cy, 180, self.bot_build[0], self.bot_build[1],
-                             COL_P2, self.bot_build[2], self.bot_build[3],
-                             self.bot_build[4], extra_mods=emods or None)
-        self.ai = BotAI(self.bot_tank, self.difficulty)
+        self.tanks = [self.player]
+        self.bots = []
+        self.ais = []
+        for i in range(self.mode - 1):
+            b = self.bot_builds[i % len(self.bot_builds)] if self.bot_builds \
+                else ("medium", "medium", "standard", "none", "none")
+            px, py = pts[i + 1]
+            t = Tank(px, py,
+                     math.degrees(math.atan2(cy - py, cx - px)),
+                     b[0], b[1], BOT_COLORS[i % len(BOT_COLORS)],
+                     b[2], b[3], b[4], extra_mods=emods or None)
+            self.bots.append(t)
+            self.ais.append(BotAI(t, self.difficulty))
+            self.tanks.append(t)
+        self.bot_tank = self.bots[0] if self.bots else None
+        self.ai = self.ais[0] if self.ais else None
         self.bullets = []
         self.powerups = []
         self.mines = []
@@ -280,9 +338,9 @@ class Game:
         self.effects.texts.clear()
 
     def start_match(self):
-        self.arena = Arena(random.randrange(len(LAYOUTS)))  # случайная арена на матч
-        self.bot_build = random_build()
-        self.score = [0, 0]
+        # у каждого бота своя сборка на матч
+        self.bot_builds = [random_build() for _ in range(self.mode - 1)]
+        self.score = [0] * self.mode
         self.round = 1
         self.points = 0.0
         self.score_mult = self._score_mult()   # жребий уже учтён в сборке
@@ -358,6 +416,18 @@ class Game:
                 self.sounds.play("ric")
             elif k in (pygame.K_3, pygame.K_KP3):
                 self.difficulty = 3
+                self.sounds.play("ric")
+            elif k == pygame.K_F2:
+                self.mode = 2
+                self.sounds.play("ric")
+            elif k == pygame.K_F3:
+                self.mode = 3
+                self.sounds.play("ric")
+            elif k == pygame.K_F4:
+                self.mode = 4
+                self.sounds.play("ric")
+            elif k == pygame.K_F5:
+                self.mode = 5
                 self.sounds.play("ric")
         elif self.state == "select":
             if k in (pygame.K_a, pygame.K_LEFT):
@@ -435,7 +505,7 @@ class Game:
                 self.state = "fight"
             elif k == pygame.K_a:
                 # выход в ангар: матч сбрасывается — сборка-то меняется
-                self.score = [0, 0]
+                self.score = [0] * self.mode
                 self.round = 1
                 self.state = "select"
             elif k == pygame.K_m:
@@ -444,7 +514,7 @@ class Game:
             if k == pygame.K_RETURN:
                 self.start_match()
             elif k == pygame.K_a:
-                self.score = [0, 0]
+                self.score = [0] * self.mode
                 self.round = 1
                 self.state = "select"   # в ангар за новой сборкой
             elif k == pygame.K_t:
@@ -498,6 +568,9 @@ class Game:
         elif kind == "menu_diff":
             self.difficulty = data
             self.sounds.play("ric")
+        elif kind == "menu_mode":              # режим боя: 2..5 танков
+            self.mode = data
+            self.sounds.play("ric")
         elif kind == "menu_start":
             self.state = "select"
             self.sounds.play("ric")
@@ -520,7 +593,7 @@ class Game:
         elif kind == "p_resume":
             self.state = "fight"
         elif kind == "to_garage":                 # из паузы и из конца матча
-            self.score = [0, 0]
+            self.score = [0] * self.mode
             self.round = 1
             self.state = "select"
             self.sounds.play("ric")
@@ -548,21 +621,18 @@ class Game:
             if self.timer <= 0:
                 if max(self.score) >= ROUNDS_TO_WIN:
                     self.state = "match_end"
-                    if self.score[0] > self.score[1]:
+                    if self.score[0] >= ROUNDS_TO_WIN:
                         self.stats["wins"] += 1
                         self.points += SCORE_MATCH_WIN
                         res = "win"
-                    elif self.score[1] > self.score[0]:
+                    else:
                         self.stats["losses"] += 1
                         res = "loss"
-                    else:
-                        self.stats["draws"] += 1
-                        res = "draw"
                     self.final_score = int(self.points * self.score_mult)
                     # --- ТАБЛИЦА СЧЕТА: забег попадает в топ-10 ---
                     entry = {
                         "score": self.final_score, "res": res,
-                        "rounds": "%d:%d" % tuple(self.score),
+                        "rounds": self._score_str(),
                         "c": len(self.build[5]), "b": len(self.build[6]),
                         "e": len(self.build[7]),
                         "mult": round(self.score_mult, 2),
@@ -580,13 +650,20 @@ class Game:
                     if self.final_score > self.stats.get("best_score", 0):
                         self.stats["best_score"] = self.final_score
                     self._save_stats()
-                    self.sounds.play("win" if self.score[0] > self.score[1] else "lose")
+                    self.sounds.play(
+                        "win" if self.score[0] >= ROUNDS_TO_WIN else "lose")
                 else:
                     self.round += 1
                     self._reset_round()
                     self.state = "intro"
                     self.timer = ROUND_BANNER_T
                     self.sounds.play("round")
+
+    def _score_str(self):
+        """Счёт матча строкой: 1на1 — «5:3», FFA — ваши : лучшие из ботов."""
+        if not self.bots:
+            return "0:0"
+        return "%d:%d" % (self.score[0], max(self.score[1:]))
 
     def _read_keys(self):
         if self._fake_keys is not None:
@@ -600,28 +677,30 @@ class Game:
         tn = ((keys[pygame.K_d] or keys[pygame.K_RIGHT]) -
               (keys[pygame.K_a] or keys[pygame.K_LEFT]))
 
-        # барьеры участвуют в коллизиях танков и в обзоре бота
+        # барьеры участвуют в коллизиях танков и в обзоре ботов
         self.arena.set_dynamic(self.barriers)
 
-        self.player.update(dt)
-        self.bot_tank.update(dt)
-        self.player._burn_step(dt, self.effects, self.sounds)
-        self.bot_tank._burn_step(dt, self.effects, self.sounds)
-        self.player._poison_step(dt, self.effects, self.sounds)
-        self.bot_tank._poison_step(dt, self.effects, self.sounds)
-        self.player.control(dt, self.arena, fwd, tn, (self.bot_tank,))
-        self.ai.update(dt, self)
+        # v2.1: тикают ВСЕ танки (пожар/яд/таймеры)
+        for t in self.tanks:
+            t.update(dt)
+            t._burn_step(dt, self.effects, self.sounds)
+            t._poison_step(dt, self.effects, self.sounds)
+
+        self.player.control(dt, self.arena, fwd, tn, tuple(self.tanks))
+        for ai in self.ais:
+            ai.update(dt, self)
         if keys[pygame.K_SPACE]:
             self.fire_weapon(self.player)
 
-        hp0 = self.bot_tank.hp   # для очков: сколько HP отнимем за этот кадр
+        # снимок HP ботов: сколько HP снесём в этом кадре (очками станет)
+        hp_snap = sum(t.hp for t in self.bots)
 
-        # снаряды бьют стены-барьеры (а стены блокируют и обзор бота)
+        # снаряды бьют стены-барьеры (а стены блокируют и обзор ботов)
         walls = self.arena.walls_only()
         for b in self.bullets:
             self._bullet_vs_barriers(b)
             if not b.dead:
-                b.update(dt, walls, (self.player, self.bot_tank),
+                b.update(dt, walls, tuple(self.tanks),
                          self.effects, self.sounds)
             self._bullet_vs_barriers(b)
         self.bullets = [b for b in self.bullets if not b.dead]
@@ -636,16 +715,18 @@ class Game:
         self._smokes_step(dt)
         self._powerups_step(dt)
 
-        if not self.player.alive or not self.bot_tank.alive:
+        pre_zone = sum(t.hp for t in self.bots)   # зона не должна давать очки
+        self._zone_step(dt)
+        dmg = hp_snap - pre_zone
+        alive = [t for t in self.tanks if t.alive]
+        if len(alive) <= 1:
             # очки за урон в этом кадре (включая добивание)
-            if self.bot_tank.hp < hp0:
-                self.points += hp0 - self.bot_tank.hp
-            if self.player.alive:
-                self.winner = 0   # выжил игрок
-            elif self.bot_tank.alive:
-                self.winner = 1   # выжил бот
+            if dmg > 0:
+                self.points += dmg
+            if alive:
+                self.winner = self.tanks.index(alive[0])   # ПОСЛЕДНИЙ выживший
             else:
-                self.winner = -1  # оба подорвались — ничья, очко никому
+                self.winner = -1  # все подорвались — ничья, очко никому
             if self.winner >= 0:
                 self.score[self.winner] += 1
                 if self.winner == 0:
@@ -655,9 +736,35 @@ class Game:
             self.state = "round_end"
             self.timer = ROUND_PAUSE_T
             self.sounds.play("round")
-        elif self.bot_tank.hp < hp0:
-            # очки за урон врагу: снаряды, лазер, мины, пожар — 1:1 за HP
-            self.points += hp0 - self.bot_tank.hp
+        elif dmg > 0:
+            # очки за урон врагам: снаряды, лазер, мины, пожар — 1:1 за HP
+            # (в FFA чужие боты, подбившие друг друга, тоже приносят очки)
+            self.points += dmg
+
+    def _zone_step(self, dt):
+        """ОГНЕННАЯ ЗОНА (v2.1, только FFA): раунд тянется дольше 35 секунд —
+        всем живым тикает урон, броня не спасает. Никакого кемперства."""
+        if self.mode <= 2:
+            return
+        alive = [t for t in self.tanks if t.alive]
+        if len(alive) < 2:
+            return
+        self.round_t += dt
+        if self.round_t <= FFA_ZONE_T:
+            return
+        if self.zone_tick == 0.0:   # одно предупреждение при включении
+            self.effects.float_text(SCREEN_W / 2, SCREEN_H / 2 - 60,
+                                    "ОГНЕННАЯ ЗОНА!", (255, 110, 0))
+            self.effects.ring(SCREEN_W / 2, SCREEN_H / 2, (255, 110, 0),
+                              340, 0.8)
+        self.zone_tick -= dt
+        if self.zone_tick <= 0:
+            self.zone_tick = 0.5
+            for t in alive:
+                t.hp -= SUDDEN_DEATH_DPS * 0.5
+                self.effects.burst(t.x, t.y, (255, 110, 0), 3, 90, 0.3, 2)
+                if t.hp <= 0:
+                    t._die(self.effects, self.sounds)
 
     # ================= оружие (снаряды и лазер) =================
     def fire_weapon(self, t):
@@ -699,7 +806,7 @@ class Game:
             y += math.sin(rad) * 6
             if self.arena.point_blocked(x, y):
                 break
-            for t in (self.player, self.bot_tank):
+            for t in self.tanks:
                 if (t.alive and t is not shooter and
                         (t.x - x) ** 2 + (t.y - y) ** 2 < (t.radius + 4) ** 2):
                     hit = t
@@ -727,12 +834,13 @@ class Game:
         и НИКОГДА во врага — если враг ближе 110 px, ставка отменяется."""
         if t.mine_carried <= 0:
             return False
-        enemy = self.bot_tank if t is self.player else self.player
-        if (enemy.alive and
-                (t.x - enemy.x) ** 2 + (t.y - enemy.y) ** 2 < PU_MINE_ENEMY_DIST ** 2):
-            self.effects.float_text(t.x, t.y - 54, "ВРАГ РЯДОМ!", (255, 90, 90))
-            self.sounds.play("ric")
-            return False
+        others = [o for o in self.tanks if o is not t and o.alive]
+        if others:
+            enemy = min(others, key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
+            if (t.x - enemy.x) ** 2 + (t.y - enemy.y) ** 2 < PU_MINE_ENEMY_DIST ** 2:
+                self.effects.float_text(t.x, t.y - 54, "ВРАГ РЯДОМ!", (255, 90, 90))
+                self.sounds.play("ric")
+                return False
         t.mine_carried -= 1
         own = [m for m in self.mines if m.owner is t]
         if len(own) >= PU_MINE_MAX:
@@ -750,7 +858,6 @@ class Game:
             angle = t.angle
         rad = math.radians(angle)
         ux, uy = math.cos(rad), math.sin(rad)
-        enemy = self.bot_tank if t is self.player else self.player
         for dist in (BARRIER_DIST, 64, 44, 28):
             cx, cy = t.x + ux * dist, t.y + uy * dist
             br = Barrier(cx, cy, angle + 90, t)
@@ -758,9 +865,9 @@ class Game:
             if any(self.arena.circle_collides(px, py, BARRIER_THICK)
                    for px, py in (br.p1, (br.x, br.y), br.p2)):
                 continue
-            # в танки не втыкаем (и в себя, и во врага)
+            # в танки не втыкаем (и в себя, и в чужаков)
             if any(tk.alive and br.blocks_circle(tk.x, tk.y, tk.radius)
-                   for tk in (self.player, self.bot_tank)):
+                   for tk in self.tanks):
                 continue
             t.barrier_charges -= 1
             self.barriers.append(br)
@@ -797,7 +904,7 @@ class Game:
                 continue
             if not m.armed:
                 continue
-            for t in (self.player, self.bot_tank):
+            for t in self.tanks:
                 if (t.alive and t is not m.owner and
                         (t.x - m.x) ** 2 + (t.y - m.y) ** 2 < PU_MINE_RADIUS ** 2):
                     t.take_damage(PU_MINE_DAMAGE, self.effects, self.sounds)
@@ -819,12 +926,11 @@ class Game:
         self.powerup_t -= dt
         if self.powerup_t <= 0 and len(self.powerups) < POWERUP_MAX:
             x, y = self.arena.free_spot(
-                avoid=((self.player.x, self.player.y),
-                       (self.bot_tank.x, self.bot_tank.y)))
+                avoid=tuple((t.x, t.y) for t in self.tanks if t.alive))
             self.powerups.append(PowerUp(x, y, random.choice(list(PU_INFO))))
             self.powerup_t = POWERUP_INTERVAL
         for pu in self.powerups[:]:
-            for t in (self.player, self.bot_tank):
+            for t in self.tanks:
                 if t.alive and (t.x - pu.x) ** 2 + (t.y - pu.y) ** 2 < (t.radius + 18) ** 2:
                     self._apply_pickup(t, pu)
                     self.powerups.remove(pu)
@@ -836,8 +942,11 @@ class Game:
             self.smokes.append(Smoke(t.x, t.y))
             self.sounds.play("smoke")
         elif pu.kind == "freeze":
-            enemy = self.bot_tank if t is self.player else self.player
-            if enemy.alive:
+            # v2.1: замораживаем БЛИЖАЙШЕГО чужака (в FFA их много)
+            others = [o for o in self.tanks if o is not t and o.alive]
+            if others:
+                enemy = min(others,
+                            key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
                 enemy.frozen_t = PU_FREEZE_TIME
                 self.effects.float_text(enemy.x, enemy.y - 54, "ЭМИ!", info["color"])
             self.sounds.play("freeze")
@@ -866,10 +975,9 @@ class Game:
                 br.draw(self.world, ox, oy)
             for b in self.bullets:
                 b.draw(self.world, ox, oy)
-            if self.bot_tank.alive:
-                self.bot_tank.draw(self.world, ox, oy)
-            if self.player.alive:
-                self.player.draw(self.world, ox, oy)
+            for t in reversed(self.tanks):   # игрок рисуется поверх ботов
+                if t.alive:
+                    t.draw(self.world, ox, oy)
             self.effects.draw(self.world, ox, oy)
             for s in self.smokes:
                 s.draw(self.world, ox, oy)
@@ -890,8 +998,10 @@ class Game:
                 if self.winner == 0:
                     self._banner("РАУНД ЗА ИГРОКОМ", COL_P1,
                                  sub2="+%d ОЧКОВ" % SCORE_ROUND_WIN)
-                elif self.winner == 1:
-                    self._banner("РАУНД ЗА БОТОМ", COL_P2)
+                elif self.winner > 0:
+                    bt = self.tanks[self.winner]
+                    self._banner("РАУНД ЗА %s" % BOT_NAMES[self.winner - 1],
+                                 bt.color)
                 else:
                     self._banner("НИЧЬЯ", COL_TEXT,
                                  sub2="+%d ОЧКОВ" % SCORE_ROUND_DRAW)
@@ -936,11 +1046,9 @@ class Game:
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
             "Q — стена (120 прочности)   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
-            "Ангар — всё кликом мыши: 6750 сборок. Наведи курсор на карточку — вылезет подсказка!",
-            "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ (можно взять все 8).",
-            "Баффы врагу ДОБАВЛЯЮТ очки, дебаффы режут — 12 эффектов, лимит 8.",
-            "Свои стихии вас НЕ замедляют. 6 дул, 9 стихий, перк РИКОШЕТ.",
-            "10 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
+            "РЕЖИМЫ: 1 на 1, 1на1на1, 1на1на1на1 и 1на1на1на1на1 — кнопки ниже (F2–F5).",
+            "Ангар: 6750 сборок, жребий и баффы/дебаффы врагу — всё кликом, с подсказками.",
+            "Свои стихии вас НЕ замедляют. 6 дул, 9 стихий, перк РИКОШЕТ, 16 арен, 10 бонусов.",
         ]
         y = 310
         for s in lines:
@@ -963,6 +1071,22 @@ class Game:
                              2, border_radius=7)
             self.screen.blit(img, r)
             self._click_zones.append((r.inflate(14, 12), "menu_diff", dkey))
+        # РЕЖИМ БОЯ (v2.1): 1вс1 / 1вс1вс1 / 1вс1вс1вс1 / 1вс1вс1вс1вс1
+        y += 42
+        img = get_font(20, bold=False).render("Режим боя (клик или F2–F5):",
+                                              True, COL_DIM)
+        self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
+        mode_lbl = {2: "1×1", 3: "1×1×1", 4: "1×1×1×1", 5: "1×1×1×1×1"}
+        for i, m in enumerate((2, 3, 4, 5)):
+            color = COL_GOLD if self.mode == m else (70, 80, 120)
+            img = get_font(20).render(mode_lbl[m], True, color)
+            r = img.get_rect(midleft=(SCREEN_W / 2 - 100 + i * 135, y))
+            hov = r.inflate(14, 12).collidepoint(self._mouse)
+            pygame.draw.rect(self.screen, COL_P1 if hov else (40, 50, 90),
+                             r.inflate(14 if hov else 10, 12 if hov else 8),
+                             2, border_radius=7)
+            self.screen.blit(img, r)
+            self._click_zones.append((r.inflate(14, 12), "menu_mode", m))
         # статистика матчей и рекорд
         y += 42
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
@@ -979,7 +1103,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.0", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.1", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1119,7 +1243,12 @@ class Game:
         self.screen.fill((10, 12, 26))   # непрозрачный фон: старый бой не просвечивает
         self._tooltip = None             # тултип собирается заново каждый кадр
         t1 = get_font(30).render("АНГАР", True, COL_TEXT)
-        self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2, 30)))
+        self.screen.blit(t1, t1.get_rect(center=(SCREEN_W / 2 - 120, 30)))
+        # режим боя в шапке ангара — видно, на сколько танков идём (v2.1)
+        img = get_font(20).render("бой: %s  ·  до %d побед"
+                                  % (MODE_NAMES[self.mode], ROUNDS_TO_WIN),
+                                  True, COL_GOLD)
+        self.screen.blit(img, img.get_rect(midleft=(SCREEN_W / 2 + 60, 30)))
 
         ch = CHASSIS[CH_KEYS[self.sel_ch]]
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
@@ -1451,12 +1580,19 @@ class Game:
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 672)))
 
     def _draw_match_end(self):
-        win = self.score[0] > self.score[1]
+        win = self.score[0] >= ROUNDS_TO_WIN
         color = COL_P1 if win else COL_P2
         rec = "  НОВЫЙ РЕКОРД!" if self.new_record else ""
-        self._banner("ПОБЕДА!" if win else "ПОРАЖЕНИЕ", color,
-                     "Счёт %d : %d      Enter — реванш   A — ангар   "
-                     "T — таблица   M — меню" % tuple(self.score),
+        if win:
+            head = "ПОБЕДА!"
+        elif self.bots:
+            bi = max(range(len(self.bots)), key=lambda i: self.score[i + 1])
+            head = "%s ЗАБРАЛ МАТЧ" % BOT_NAMES[bi]
+        else:
+            head = "ПОРАЖЕНИЕ"
+        self._banner(head, color,
+                     "Счёт %s      Enter — реванш   A — ангар   "
+                     "T — таблица   M — меню" % self._score_str(),
                      sub2="ОЧКИ: %d  (множитель x%.2f)   МЕСТО В ТАБЛИЦЕ: #%d%s"
                           % (self.final_score, self.score_mult,
                              max(1, self.table_place), rec))
@@ -1486,52 +1622,8 @@ class Game:
             size -= 1
         return get_font(size).render(label, True, t.color)
 
-    def _draw_hud(self):
-        p, b = self.player, self.bot_tank
-        # --- игрок (слева) ---
-        self.screen.blit(self._build_label(p, "ИГРОК"), (70, 62))
-        self._hp_bar(70, 92, p)
-        self._mini_info(p, 70, 116,
-                        extra=("НА ВРАГА %d" % len(self.build[7]))
-                        if self.build[7] else "")
-        # --- бот (справа) ---
-        img = self._build_label(b, "БОТ")
-        self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, 62)))
-        self._hp_bar(SCREEN_W - 330, 92, b, right=True)
-        self._mini_info(b, SCREEN_W - 70, 116, right=True,
-                        extra=("ЭФФЕКТЫ ИГРОКА %d" % len(self.build[7]))
-                        if self.build[7] else "")
-        # --- счёт по центру ---
-        img = get_font(44).render("%d : %d" % tuple(self.score), True, COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 86)))
-        img = get_font(17, bold=False).render("до %d побед  ·  карта «%s»"
-                                              % (ROUNDS_TO_WIN, self.arena.name),
-                                              True, COL_DIM)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 120)))
-        pts = int(self.points * self.score_mult)
-        label = "ОЧКИ %d" % pts
-        if abs(self.score_mult - 1.0) > 1e-9:
-            label += "  ·  жребий x%.2f" % self.score_mult
-        img = get_font(15, bold=False).render(label, True, COL_GOLD)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 141)))
-
-    def _mini_info(self, t, x, y, right=False, extra=""):
-        # перезарядка
-        k = 1 - t.cooldown / t.reload_time
-        k = max(0.0, min(1.0, k))
-        bar = pygame.Rect(0, 0, 120, 6)
-        bar.x, bar.y = (x - 120, y) if right else (x, y)
-        pygame.draw.rect(self.screen, (30, 36, 60), bar, border_radius=3)
-        f = bar.copy()
-        f.w = max(2, int(120 * k))
-        if right:
-            f.x = x - f.w
-        pygame.draw.rect(self.screen, COL_GOLD if k >= 1 else (90, 100, 140), f, border_radius=3)
-        label = "ГОТОВ" if k >= 1 else "перезарядка"
-        img = get_font(16, bold=False).render(label, True, COL_DIM)
-        lx = x - 60 if right else x + 60
-        self.screen.blit(img, img.get_rect(midtop=(lx, y + 10)))
-        # эффекты и бонусы
+    def _status_tags(self, t):
+        """Статусы танка строкой (общие для HUD игрока и строк ботов)."""
         sfx = []
         if t.mag_size > 1:
             sfx.append("ОБОЙМА %d/%d" % (t.mag_ammo, t.mag_size))
@@ -1570,6 +1662,102 @@ class Game:
             sfx.append("ПРОКЛЯТЬЯ %d" % len(t.curses_keys))
         if t.blessings_keys:
             sfx.append("ОБЛЕГЧЕНИЯ %d" % len(t.blessings_keys))
+        return sfx
+
+    def _draw_hud(self):
+        p = self.player
+        # --- игрок (слева, всегда наверху слева) ---
+        self.screen.blit(self._build_label(p, "ИГРОК"), (70, 62))
+        self._hp_bar(70, 92, p)
+        self._mini_info(p, 70, 116,
+                        extra=("НА ВРАГА %d" % len(self.build[7]))
+                        if self.build[7] else "")
+        map_line = "до %d побед  ·  карта «%s»  ·  %s" % (
+            ROUNDS_TO_WIN, self.arena.name, MODE_NAMES[self.mode])
+        pts = int(self.points * self.score_mult)
+        pts_label = "ОЧКИ %d" % pts
+        if abs(self.score_mult - 1.0) > 1e-9:
+            pts_label += "  ·  жребий x%.2f" % self.score_mult
+        if self.mode == 2:
+            # --- классика: один бот справа, счёт по центру сверху ---
+            b = self.bots[0]
+            img = self._build_label(b, "БОТ")
+            self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, 62)))
+            self._hp_bar(SCREEN_W - 330, 92, b, right=True)
+            self._mini_info(b, SCREEN_W - 70, 116, right=True,
+                            extra=("ЭФФЕКТЫ ИГРОКА %d" % len(self.build[7]))
+                            if self.build[7] else "")
+            img = get_font(44).render("%d : %d" % tuple(self.score),
+                                      True, COL_TEXT)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 86)))
+            img = get_font(17, bold=False).render(map_line, True, COL_DIM)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 120)))
+            img = get_font(15, bold=False).render(pts_label, True, COL_GOLD)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 141)))
+        else:
+            # --- FFA: боты компактными строками справа, счёт внизу ---
+            for i, b in enumerate(self.bots):
+                self._bot_row(b, i, 62 + i * 52)
+            # победы всех танков цветными сегментами (низ по центру)
+            seg_f = get_font(26)
+            dot = seg_f.render(" · ", True, COL_DIM)
+            segs = []
+            for i, t in enumerate(self.tanks):
+                nm = "ВЫ" if i == 0 else BOT_NAMES[i - 1]
+                wins = self.score[i] if i < len(self.score) else 0
+                segs.append(seg_f.render("%s %d" % (nm, wins), True, t.color))
+            total = (sum(s.get_width() for s in segs)
+                     + dot.get_width() * (len(segs) - 1))
+            x = SCREEN_W / 2 - total / 2
+            y = SCREEN_H - 44
+            for s in segs:
+                self.screen.blit(s, (int(x), y - s.get_height() // 2))
+                x += s.get_width() + dot.get_width()
+                if s is not segs[-1]:
+                    self.screen.blit(dot, (int(x), y - dot.get_height() // 2))
+            img = get_font(14, bold=False).render(pts_label, True, COL_GOLD)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
+                                                       SCREEN_H - 66)))
+            img = get_font(14, bold=False).render(map_line, True, COL_DIM)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
+                                                       SCREEN_H - 22)))
+        if self.mode > 2 and self.round_t > FFA_ZONE_T:
+            img = get_font(15).render("ОГНЕННАЯ ЗОНА!", True, (255, 110, 0))
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
+                                                       SCREEN_H - 88)))
+
+    def _bot_row(self, t, idx, y):
+        """Компактная строка бота в HUD (v2.1): имя, HP, победы и статусы."""
+        img = self._build_label(t, BOT_NAMES[idx])
+        self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y)))
+        self._hp_bar(SCREEN_W - 330, y + 22, t, right=True)
+        tags = self._status_tags(t)
+        wins = self.score[idx + 1] if idx + 1 < len(self.score) else 0
+        tags.insert(0, "ПОБЕДЫ %d" % wins)
+        if self.build[7]:
+            tags.append("ЭФФЕКТЫ ИГРОКА %d" % len(self.build[7]))
+        img = get_font(12, bold=False).render("   ".join(tags), True,
+                                              (160, 200, 255))
+        self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y + 38)))
+
+    def _mini_info(self, t, x, y, right=False, extra=""):
+        # перезарядка
+        k = 1 - t.cooldown / t.reload_time
+        k = max(0.0, min(1.0, k))
+        bar = pygame.Rect(0, 0, 120, 6)
+        bar.x, bar.y = (x - 120, y) if right else (x, y)
+        pygame.draw.rect(self.screen, (30, 36, 60), bar, border_radius=3)
+        f = bar.copy()
+        f.w = max(2, int(120 * k))
+        if right:
+            f.x = x - f.w
+        pygame.draw.rect(self.screen, COL_GOLD if k >= 1 else (90, 100, 140), f, border_radius=3)
+        label = "ГОТОВ" if k >= 1 else "перезарядка"
+        img = get_font(16, bold=False).render(label, True, COL_DIM)
+        lx = x - 60 if right else x + 60
+        self.screen.blit(img, img.get_rect(midtop=(lx, y + 10)))
+        # эффекты и бонусы (общий список статусов)
+        sfx = self._status_tags(t)
         if extra:
             sfx.append(extra)
         row_y = y + 32

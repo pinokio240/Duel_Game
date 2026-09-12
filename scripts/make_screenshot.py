@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Обновляет screenshot.png боя и делает garage.png для проверки верстки."""
+"""Обновляет screenshot.png боя, ffa.png (режим на 5) и garage.png."""
 import os
 import sys
 
@@ -10,6 +10,7 @@ sys.path.insert(0, ROOT)
 
 import pygame
 from game import Game
+from arena import Arena
 
 g = Game()
 # сборка из 8 частей: шасси, корпус, дуло, перк, стихия, проклятья,
@@ -17,6 +18,7 @@ g = Game()
 g.build = ("medium", "medium", "standard", "none", "fire", (), (), ())   # стихия — в сборке
 g.state = "fight"
 g._reset_round()
+g.arena = Arena(0)   # фиксированная «Классика» для стабильного кадра
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 
 # прогрев боя, чтобы были снаряды/эффекты
@@ -33,7 +35,25 @@ g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 print("screenshot.png обновлён")
 
+# ----- кадр режима «все против всех» на 5 танков -----
+g.mode = 5
+g.score = [0] * g.mode
+g.bot_builds = [("light", "light", "shotgun", "sprinter", "electric"),
+                ("heavy", "armored", "howitzer", "turtle", "fire"),
+                ("medium", "medium", "rapidgun", "gunner", "poison"),
+                ("sport", "compact", "long", "none", "vamp")]
+g._reset_round()
+g.arena = Arena(5)          # «Соты» — красиво для толпы
+g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+for _ in range(300):        # полминуты боя: следы, снаряды, дым
+    g.update(1 / 60.0)
+g.draw()
+out = "/home/z/my-project/tool-results/ffa.png"
+pygame.image.save(g.screen, out)
+print("ffa.png:", out)
+
 # ангар: 5 панелей + жребий + эффекты на врага — снимок для проверки верстки
+g.mode = 2
 g.state = "select"
 g.sel_el = 1                    # «Огонь» выделен
 g.sel_curses = ["shaky", "rusty"]      # взято два проклятья
@@ -53,4 +73,12 @@ g.draw()
 out2 = "/home/z/my-project/tool-results/tooltip.png"
 pygame.image.save(g.screen, out2)
 print("tooltip.png:", out2)
+
+# меню: режимы боя (кнопки 1×1 … 1×1×1×1×1)
+g.state = "menu"
+g.mode = 3
+g.draw()
+out3 = "/home/z/my-project/tool-results/menu.png"
+pygame.image.save(g.screen, out3)
+print("menu.png:", out3)
 pygame.quit()

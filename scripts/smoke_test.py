@@ -210,6 +210,7 @@ def test_barrier():
     g = _G()
     g.state = "fight"
     g._reset_round()
+    g.arena = Arena(0)             # фиксированная «Классика» — тест геометрии
     p = g.player
     p.x, p.y, p.angle = 400, 360, 0        # смотрит вправо
     p.barrier_charges = 1
@@ -255,6 +256,7 @@ def test_mine_rules():
     g = _G()
     g.state = "fight"
     g._reset_round()
+    g.arena = Arena(0)             # фиксированная карта — тест геометрии
     p, bot = g.player, g.bot_tank
     p.apply_powerup("mine")
     check("мина теперь носятся в боекомплекте", p.mine_carried == 1)
@@ -295,6 +297,7 @@ def test_laser_fan():
     g.effects = _Fx()
     p, bot = g.player, g.bot_tank
     # чистая полоса карты «Классика» (центральная колонна выше/ниже)
+    g.arena = Arena(0)
     p.x, p.y, p.angle = 350, 250, 0
     bot.x, bot.y = 750, 250
     hp0 = bot.hp
@@ -475,6 +478,7 @@ def test_points():
     g._fake_keys = FakeKeys(())
     p, bot = g.player, g.bot_tank
     # чистая полоса, враг заморожен — пуля гарантированно долетает
+    g.arena = Arena(0)
     p.x, p.y, p.angle = 350, 250, 0
     bot.x, bot.y = 650, 250
     bot.frozen_t = 3.0
@@ -1049,6 +1053,150 @@ def test_stats_persist():
     g2._save_stats()
 
 
+# ---------- 3o. РЕЖИМЫ v2.1: 1вс1 / 1вс1вс1 / 1вс1вс1вс1 / 1вс1вс1вс1вс1 ----------
+def test_ffa():
+    import math
+    from game import Game
+    from arena import Arena
+    from bullet import Bullet
+    from settings import ROUNDS_TO_WIN
+
+    g = Game()
+    check("режим по умолчанию — 1 на 1", g.mode == 2)
+
+    # клик по кнопке режима в меню
+    g.state = "menu"
+    g.draw()
+    zone = next(r for r, kd, d in g._click_zones if kd == "menu_mode" and d == 4)
+    g.on_click(zone.center)
+    check("клик по «1×1×1×1» включает 4 танка", g.mode == 4)
+    g.mode = 5
+    g._reset_round()
+    check("5 танков на арене: игрок + 4 бота с ИИ",
+          len(g.tanks) == 5 and len(g.bots) == 4 and len(g.ais) == 4)
+    check("у всех ботов разные цвета",
+          len({tuple(t.color) for t in g.bots}) == len(g.bots))
+    check("спавны не в стенах/препятствиях",
+          all(not g.arena.circle_collides(t.x, t.y, t.radius)
+              for t in g.tanks))
+    check("спавны далеко друг от друга (более 200 px)",
+          all(math.hypot(a.x - b.x, a.y - b.y) > 200
+              for i, a in enumerate(g.tanks) for b in g.tanks[i + 1:]))
+    g.draw()   # HUD на 5 танков рисуется без ошибок
+
+    # раунд НЕ кончается, пока живых >= 2
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.player.alive = False
+    g.update(1 / 60.0)
+    check("в FFA смерть игрока не кончает раунд (живых ещё 4)",
+          g.state == "fight" and len([t for t in g.tanks if t.alive]) == 4)
+    # добиваем ботов: остался один — раунд за ним
+    for b in g.bots[1:]:
+        b.alive = False
+    g.update(1 / 60.0)
+    check("остался один танк — раунд завершён", g.state == "round_end")
+    check("победа засчитана выжившему боту (БОТ)",
+          g.winner == 1 and g.score[1] == 1)
+
+    # FFA: снаряд бота бьёт ДРУГОГО бота (каждый сам за себя)
+    g2 = Game()
+    g2.mode = 3
+    g2._reset_round()
+    g2.arena = Arena(6)          # «Мосты»: чистая полоса на y=360
+    b1, b2 = g2.bots[0], g2.bots[1]
+    b1.x, b1.y, b1.angle = 600, 360, 0
+    b2.x, b2.y = 720, 360
+    hp0 = b2.hp
+    bul = Bullet(b2.x - 10, 360, 0, b1, damage=30)
+    bul.age = 1.0
+    bul.update(1 / 60.0, g2.arena.walls_only(), tuple(g2.tanks),
+               g2.effects, g2.sounds)
+    check("снаряд бота ранит другого бота (FFA)",
+          b2.hp < hp0, "(hp %d -> %d)" % (hp0, b2.hp))
+
+    # ИИ в FFA воюет с ближайшим чужим (может — с другим ботом)
+    ai = g2.ais[0]
+    ai.target = None
+    ai.target = ai._pick_target(g2)
+    check("бот-1 взял цель: чужой танк, не сам себя",
+          ai.target is not None and ai.target is not ai.t)
+    ai2 = g2.ais[1]
+    ai2.target = None
+    ai2.update(1 / 60.0, g2)
+    check("бот-2 воюет с кем-то живым",
+          ai2.target is not None and ai2.target.alive)
+
+    # бот добирает 5 побед — матч проигран
+    g3 = Game()
+    g3.state = "round_end"
+    g3.timer = 0.01
+    g3.score = [2, ROUNDS_TO_WIN]
+    g3.update(1 / 60.0)
+    check("бот добрал 5 побед — матч завершён поражением",
+          g3.state == "match_end" and g3.stats["losses"] >= 1)
+
+    # ОГНЕННАЯ ЗОНА: FFA-раунд не тянется вечно — после 35 сек жжёт всех
+    from settings import FFA_ZONE_T
+    g5 = Game()
+    g5.mode = 3
+    g5._reset_round()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    for _ in range(70 * 60):            # 70 секунд симуляции — с запасом
+        g5.update(1 / 60.0)
+        if g5.state == "round_end":
+            break
+    check("огненная зона завершает затянувшийся FFA-раунд",
+          g5.state == "round_end" and g5.round_t > FFA_ZONE_T,
+          "(round_t %.1f)" % g5.round_t)
+
+    # спавны выживают на случайных картах во всех режимах
+    ok = True
+    for n in (2, 3, 4, 5):
+        for _ in range(4):
+            g4 = Game()
+            g4.mode = n
+            g4._reset_round()
+            if any(g4.arena.circle_collides(t.x, t.y, t.radius)
+                   for t in g4.tanks):
+                ok = False
+    check("спавны не в стенах на 16 случайных картах всех режимов", ok)
+
+
+# ---------- 3p. КАРТЫ v2.1: 16 штук, зеркало и случайные баррикады ----------
+def test_map_shuffle():
+    from arena import Arena, MAP_NAMES, LAYOUTS
+    from settings import PROP_MAX
+
+    check("карт стало 16", len(LAYOUTS) == 16 and len(MAP_NAMES) == 16)
+    a = Arena(2, shuffle=True)
+    check("перемешанная карта: внешние стены на месте",
+          a.point_blocked(10, 360) and a.point_blocked(640, 10))
+    check("баррикад не больше %d" % PROP_MAX,
+          all(len(Arena(i, shuffle=True).obstacles)
+              <= len(LAYOUTS[i]) + PROP_MAX for i in range(16)))
+    names = set()
+    for _ in range(40):
+        c = Arena(0, shuffle=True)
+        names.add(c.name)
+        sx, sy = c.free_spot()
+        if c.circle_collides(sx, sy, 30):
+            check("free_spot свободен на перемешанной карте", False)
+            return
+    check("free_spot свободен на 40 перемешанных картах", True)
+    check("рандомизация отмечается звёздочкой в названии",
+          any("★" in n for n in names),
+          "(вариантов имени %d)" % len(names))
+    # классические точки появления не перекрыты баррикадами
+    blocked = 0
+    for _ in range(40):
+        c = Arena(0, shuffle=True)
+        if c.circle_collides(240, 360, 30) or c.circle_collides(1040, 360, 30):
+            blocked += 1
+    check("классические спавны не перекрыты (40 карт)", blocked == 0)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -1065,6 +1213,8 @@ if __name__ == "__main__":
     test_new_elements()
     test_limits_tooltip()
     test_stats_persist()
+    test_ffa()
+    test_map_shuffle()
     test_points()
     test_score_table()
     test_magazine()

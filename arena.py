@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
-"""Арена: 10 вариантов расстановки препятствий, стены, коллизии, лучи."""
+"""Арена: 16 вариантов расстановки препятствий, стены, коллизии, лучи.
+v2.1: РАНДОМИЗАЦИЯ — перед боем карта может зеркально отразиться и получить
+несколько случайных баррикад, а сама арена переразыгрывается КАЖДЫЙ РАУНД."""
 import math
 import random
 import pygame
-from settings import SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG
+from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
+                      PROP_MAX)
 
 WALL_T = 60  # толщина внешних стен
 
@@ -60,16 +63,53 @@ LAYOUTS = [
      (420, 160, 60, 36), (800, 524, 60, 36),
      (420, 524, 60, 36), (800, 160, 60, 36),
      (600, 330, 80, 60)],
+    # ----- шесть новых арен v2.1 -----
+    # «Вилка»: стена по центру с проёмом, укрытия по сторонам
+    [(620, 60, 40, 170), (620, 490, 40, 170),
+     (380, 180, 90, 36), (810, 180, 90, 36),
+     (380, 504, 90, 36), (810, 504, 90, 36),
+     (140, 330, 36, 60), (1104, 330, 36, 60)],
+    # «Кольцо»: стены по кругу с диагональными проходами и столб в центре
+    [(600, 150, 80, 36), (600, 534, 80, 36),
+     (430, 340, 36, 80), (814, 340, 36, 80),
+     (470, 210, 36, 36), (774, 210, 36, 36),
+     (470, 474, 36, 36), (774, 474, 36, 36),
+     (612, 340, 56, 40)],
+    # «Зигзаг»: три горизонтальные стены со сдвигом и разрывом по центру
+    [(140, 170, 280, 36), (860, 170, 280, 36),
+     (420, 342, 130, 36), (730, 342, 130, 36),
+     (140, 514, 280, 36), (860, 514, 280, 36)],
+    # «Казармы»: две стены-перегородки с дверями по центру
+    [(300, 60, 36, 220), (300, 400, 36, 260),
+     (944, 60, 36, 220), (944, 400, 36, 260),
+     (560, 100, 160, 36), (560, 584, 160, 36),
+     (612, 330, 56, 60)],
+    # «Ступени»: две диагонали блоков — нырки по лестнице
+    [(180, 130, 100, 36), (300, 250, 100, 36),
+     (420, 370, 100, 36), (540, 490, 100, 36),
+     (1000, 130, 100, 36), (880, 250, 100, 36),
+     (760, 370, 100, 36), (640, 490, 100, 36),
+     (612, 330, 56, 56)],
+    # «Бухта»: боковые карманы и козырьки сверху/снизу
+    [(140, 240, 36, 240), (1104, 240, 36, 240),
+     (300, 100, 200, 36), (780, 100, 200, 36),
+     (300, 584, 200, 36), (780, 584, 200, 36),
+     (560, 250, 40, 40), (680, 430, 40, 40)],
 ]
 
 MAP_NAMES = ["Классика", "Крестовина", "Колонны", "Уголки",
-             "Полоса", "Соты", "Мосты", "Бункер", "Веер", "Шахты"]
+             "Полоса", "Соты", "Мосты", "Бункер", "Веер", "Шахты",
+             "Вилка", "Кольцо", "Зигзаг", "Казармы", "Ступени", "Бухта"]
+
+# классические точки появления танков (баррикады их не перекрывают)
+_SPAWN_COLS = ((240, 360), (1040, 360))
 
 
 class Arena:
-    def __init__(self, variant=0):
+    def __init__(self, variant=0, shuffle=False):
+        """shuffle=True — случайное зеркало и/или случайные баррикады:
+        одна и та же карта каждый раз играет по-новому."""
         self.variant = variant % len(LAYOUTS)
-        self.name = MAP_NAMES[self.variant]
         w, h = SCREEN_W, SCREEN_H
         self.walls = [
             pygame.Rect(0, 0, w, WALL_T),
@@ -77,10 +117,48 @@ class Arena:
             pygame.Rect(0, 0, WALL_T, h),
             pygame.Rect(w - WALL_T, 0, WALL_T, h),
         ]
-        self.obstacles = [pygame.Rect(r) for r in LAYOUTS[self.variant]]
+        obs = [pygame.Rect(r) for r in LAYOUTS[self.variant]]
+        tags = []
+        if shuffle:
+            mx, my = (random.random() < 0.5, random.random() < 0.5)
+            if mx:   # зеркалим по горизонтали
+                obs = [pygame.Rect(w - r.x - r.w, r.y, r.w, r.h) for r in obs]
+            if my:   # и по вертикали
+                obs = [pygame.Rect(r.x, h - r.y - r.h, r.w, r.h) for r in obs]
+            if mx or my:
+                tags.append("зеркало")
+            added = self._add_props(obs, w, h)
+            if added:
+                tags.append("+%d баррикад" % added)
+        self.obstacles = obs
         self.rects = self.walls + self.obstacles
+        self.name = MAP_NAMES[self.variant] + (" ★" if tags else "")
         self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
         self._bg = self._make_background()
+
+    @staticmethod
+    def _add_props(obs, w, h):
+        """Накидать 0..PROP_MAX случайных баррикад в свободные места —
+        подальше от стен, других препятствий и точек появления танков."""
+        added = 0
+        for _ in range(70):
+            if added >= PROP_MAX:
+                break
+            if added and random.random() < 0.4:
+                break            # бывает и пара баррикад, и ноль
+            pw, ph = random.choice(((36, 36), (56, 28), (28, 56), (48, 48)))
+            x = random.uniform(WALL_T + 70, w - WALL_T - 70 - pw)
+            y = random.uniform(WALL_T + 60, h - WALL_T - 60 - ph)
+            r = pygame.Rect(int(x), int(y), pw, ph)
+            if any(r.inflate(90, 90).colliderect(o) for o in obs):
+                continue
+            cx, cy = r.center
+            if any((cx - sx) ** 2 + (cy - sy) ** 2 < 150 ** 2
+                   for sx, sy in _SPAWN_COLS):
+                continue
+            obs.append(r)
+            added += 1
+        return added
 
     def set_dynamic(self, blockers):
         self.dynamic = blockers
