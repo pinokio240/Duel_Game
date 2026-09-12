@@ -1527,11 +1527,11 @@ def test_team_highlight():
           and all(g3._team_ring_color(t) == TEAM_FOE_COLOR for t in f3))
 
 
-# ---------- 3s3. ЭМИ v2.6.1: вырубает ВСЕХ, кроме подобравшего ----------
+# ---------- 3s3. ЭМИ v2.6.2: валит всех ЧУЖИХ, свои не страдают ----------
 def test_emp_blast():
-    """Багфикс v2.6.1: ЭМИ раньше морозил только БЛИЖАЙШЕГО чужака —
-    в режимах на 3+ танков доставалось одному. Теперь замерзают ВСЕ
-    живые танки, КРОМЕ того, кто подобрал бонус (в FFA и в командах)."""
+    """v2.6.2: ЭМИ щадит СОЮЗНИКОВ подобравшего (v2.6.1 валил вообще
+    всех, кроме взявшего). В FFA у каждого танка своя команда — там
+    по-прежнему замерзают все, кроме взявшего бонус."""
     from game import Game
     from powerup import PowerUp
     from settings import PU_FREEZE_TIME
@@ -1550,7 +1550,7 @@ def test_emp_blast():
           and g.bots[1].frozen_t == PU_FREEZE_TIME,
           "(игрок %.1f, БОТ-2 %.1f)" % (g.player.frozen_t, g.bots[1].frozen_t))
 
-    # 1x1x1x1: игрок поднял ЭМИ — все ТРИ бота встали разом
+    # 1x1x1x1: игрок поднял ЭМИ — все ТРИ бота встали разом (своих нет)
     g4 = Game()
     g4.mode = 4
     g4._reset_round()
@@ -1561,23 +1561,70 @@ def test_emp_blast():
           g4.player.frozen_t == 0.0
           and all(b.frozen_t == PU_FREEZE_TIME for b in g4.bots))
 
-    # команда (2на2): чужак поднял ЭМИ — встаёт ВЕСЬ мир, кроме него,
-    # включая его собственного союзника (как просил игрок)
+    # команда (2на2): ЧУЖАК поднял ЭМИ — встаёт вся сторона игрока
+    # (игрок + его союзник), а напарник взявшего остаётся на ходу
     g6 = Game()
     g6.mode = 6
     g6._reset_round()
     g6.state = "fight"
     g6._fake_keys = FakeKeys(())
     foe = g6.foes[0]
+    mate = g6.foes[1]                       # напарник взявшего
     g6._apply_pickup(foe, PowerUp(foe.x, foe.y, "freeze"))
-    others6 = [t for t in g6.tanks if t is not foe]
-    check("ЭМИ в 2на2: замерзли все 3 остальные, включая союзника взявшего",
-          foe.frozen_t == 0.0
-          and all(t.frozen_t == PU_FREEZE_TIME for t in others6))
+    check("ЭМИ в 2на2: взявший чужак и его напарник на ходу",
+          foe.frozen_t == 0.0 and mate.frozen_t == 0.0,
+          "(чужак %.1f, напарник %.1f)" % (foe.frozen_t, mate.frozen_t))
+    check("ЭМИ в 2на2: замерзли игрок и СОЮЗНИК игрока",
+          g6.player.frozen_t == PU_FREEZE_TIME
+          and g6.bots[0].frozen_t == PU_FREEZE_TIME,
+          "(игрок %.1f, союзник %.1f)"
+          % (g6.player.frozen_t, g6.bots[0].frozen_t))
     # замерзшие реально НЕ едут и не стреляют
     g6.update(1 / 60.0)
     check("замерзший от ЭМИ игрок стоит на месте",
           g6.player.speed == 0.0)
+
+    # тот же 2на2: ЭМИ поднял ИГРОК — чужая сторона встала, свой цел
+    g6b = Game()
+    g6b.mode = 6
+    g6b._reset_round()
+    g6b.state = "fight"
+    g6b._fake_keys = FakeKeys(())
+    g6b._apply_pickup(g6b.player,
+                      PowerUp(g6b.player.x, g6b.player.y, "freeze"))
+    check("ЭМИ у игрока в 2на2: оба врага встали, игрок ездит",
+          g6b.player.frozen_t == 0.0
+          and all(f.frozen_t == PU_FREEZE_TIME for f in g6b.foes))
+    check("ЭМИ у игрока в 2на2: свой союзник НЕ замёрз",
+          g6b.bots[0].frozen_t == 0.0)
+
+    # 5на5: чужак поднял ЭМИ — ВСЯ его пятёрка (он + 4 напарника) ездит,
+    # вся пятёрка игрока стоит
+    g10 = Game()
+    g10.mode = 10
+    g10._reset_round()
+    g10.state = "fight"
+    g10._fake_keys = FakeKeys(())
+    f10 = g10.foes[0]
+    g10._apply_pickup(f10, PowerUp(f10.x, f10.y, "freeze"))
+    check("ЭМИ в 5на5: чужая пятёрка ЦЕЛА (подобравший + 4 его напарника)",
+          all(f.frozen_t == 0.0 for f in g10.foes))
+    check("ЭМИ в 5на5: замерзли игрок и все 4 его союзника",
+          g10.player.frozen_t == PU_FREEZE_TIME
+          and all(a.frozen_t == PU_FREEZE_TIME for a in g10.bots[:4]))
+
+    # БОСС: босс поднял ЭМИ — игрок и союзник встали, босс ездит
+    g7 = Game()
+    g7.mode = 7
+    g7._reset_round()
+    g7.state = "fight"
+    g7._fake_keys = FakeKeys(())
+    boss7 = next(t for t in g7.tanks if t.display_name == "БОСС")
+    g7._apply_pickup(boss7, PowerUp(boss7.x, boss7.y, "freeze"))
+    check("ЭМИ у БОССА: игрок и союзник замерзли, БОСС на ходу",
+          boss7.frozen_t == 0.0
+          and g7.player.frozen_t == PU_FREEZE_TIME
+          and g7.bots[0].frozen_t == PU_FREEZE_TIME)
 
 
 # ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
