@@ -154,6 +154,15 @@ def test_elements():
           v.shield_t == 0 and v.boost_t == 0 and v.laser_charges == 0
           and v.mud_t > 0)
 
+    # ВОДА ТУШИТ ОГОНЬ (v2.2): горящий после огня гаснет от воды
+    fw = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
+    fw.apply_element("fire", 1, 0, arena, fx, snd)
+    check("огонь поджигает (горит)", fw.burn_t > 0)
+    fw.apply_powerup("shield")
+    fw.apply_element("water", 1, 0, arena, fx, snd)
+    check("ВОДА ТУШИТ горящего (пожар снят) и смывает щит",
+          fw.burn_t == 0 and fw.shield_t == 0 and fw.mud_t > 0)
+
     # земля: скорость падает в 2.2 раза
     z = Tank(0, 0, 0, "medium", "medium", COL, "standard", "none")
     base = z.speed
@@ -212,7 +221,7 @@ def test_barrier():
     g._reset_round()
     g.arena = Arena(0)             # фиксированная «Классика» — тест геометрии
     p = g.player
-    p.x, p.y, p.angle = 400, 360, 0        # смотрит вправо
+    p.x, p.y, p.angle = 400, 540, 0        # смотрит вправо (мир теперь 1920x1080)
     p.barrier_charges = 1
     ok = g._place_barrier(p)
     check("стена ставится по Q", ok and len(g.barriers) == 1 and
@@ -220,9 +229,9 @@ def test_barrier():
     br = g.barriers[0]
     # стена поперёк курса: вертикальная, перед танком
     check("стена встаёт перед танком", abs(br.x - (400 + 88)) < 2 and
-          abs(br.y - 360) < 2)
+          abs(br.y - 540) < 2)
     # танк не может проехать сквозь неё
-    p.x, p.y = 430, 360
+    p.x, p.y = 430, 540
     p.angle = 0
     for _ in range(60):
         p.control(1 / 60.0, g.arena, 1, 0, (g.bot_tank,))
@@ -295,11 +304,13 @@ def test_laser_fan():
     g.state = "fight"
     g._reset_round()
     g.effects = _Fx()
+    g.grace_t = 0.0                 # без грейса — иначе бот неуязвим для луча
+    g.bot_tank.immune = False
     p, bot = g.player, g.bot_tank
-    # чистая полоса карты «Классика» (центральная колонна выше/ниже)
+    # чистая полоса карты «Классика» (мир 1920x1080: блоки выше/ниже)
     g.arena = Arena(0)
-    p.x, p.y, p.angle = 350, 250, 0
-    bot.x, bot.y = 750, 250
+    p.x, p.y, p.angle = 350, 380, 0
+    bot.x, bot.y = 750, 380
     hp0 = bot.hp
 
     # лазер + веер: ОДНО нажатие — три луча, тратятся и лазер, и веер
@@ -478,11 +489,13 @@ def test_points():
     g._fake_keys = FakeKeys(())
     p, bot = g.player, g.bot_tank
     # чистая полоса, враг заморожен — пуля гарантированно долетает
+    g.grace_t = 0.0                  # снимаем грейс, иначе бот неуязвим
+    g.bot_tank.immune = False
     g.arena = Arena(0)
-    p.x, p.y, p.angle = 350, 250, 0
-    bot.x, bot.y = 650, 250
+    p.x, p.y, p.angle = 350, 380, 0
+    bot.x, bot.y = 650, 380
     bot.frozen_t = 3.0
-    g.bullets.append(Bullet(380, 250, 0, p))
+    g.bullets.append(Bullet(380, 380, 0, p))
     for _ in range(30):
         g.update(1 / 60.0)
     check("очки капают за урон врагу", g.points > 0, "(%.0f)" % g.points)
@@ -517,15 +530,17 @@ def test_points():
 # ---------- 3h. ЭФФЕКТЫ НА ВРАГА: дебаффы режут счёт, баффы ДОБАВЛЯЮТ ----------
 def test_enemy_effects():
     from game import Game
-    from settings import ENEMY_EFFECTS, MAX_ENEMY_EFFECTS, SCORE_CURSE_BONUS
+    from settings import ENEMY_EFFECTS, SCORE_CURSE_BONUS
 
     g = Game()
     g._toggle_enemy(0)
     check("дебафф врага берётся", g.sel_enemy_keys == ["e_weaken"])
+    g2 = Game()
     for i in range(len(ENEMY_EFFECTS)):
-        g._toggle_enemy(i)
-    check("больше %d эффектов на врага не взять" % MAX_ENEMY_EFFECTS,
-          len(g.sel_enemy_keys) == MAX_ENEMY_EFFECTS)
+        g2._toggle_enemy(i)
+    check("ЛИМИТА НЕТ: все %d эффектов на врага берутся разом (v2.2)"
+          % len(ENEMY_EFFECTS),
+          len(g2.sel_enemy_keys) == len(ENEMY_EFFECTS))
 
     # множитель: дебафф -10%, бафф врага +10%, проклятье +15% (всё в одном котле)
     g.build = ("medium", "medium", "standard", "none", "none",
@@ -962,8 +977,8 @@ def test_new_elements():
           "(потеря %.1f)" % (hp0 - t2.hp))
 
     # вампиризм: стрелявшему возвращается 40% урона снаряда
-    shooter = Tank(640, 360, 0, "medium", "medium", COL)
-    victim = Tank(700, 360, 0, "medium", "medium", (255, 46, 122))
+    shooter = Tank(300, 540, 0, "medium", "medium", COL)
+    victim = Tank(360, 540, 0, "medium", "medium", (255, 46, 122))
     shooter.hp = 40
     bv = Bullet(victim.x, victim.y, 0, shooter, damage=30, element="vamp")
     bv.age = 1.0
@@ -973,7 +988,7 @@ def test_new_elements():
           "(hp %d)" % shooter.hp)
 
     # ПРАВИЛО СВОЕЙ СТИХИИ: свой рикошет бьёт по HP, но НЕ замедляет
-    me = Tank(640, 360, 0, "medium", "medium", COL)
+    me = Tank(300, 540, 0, "medium", "medium", COL)
     foe = Tank(200, 200, 0, "medium", "medium", (255, 46, 122))
     b = Bullet(me.x, me.y, 0, me, damage=30, element="earth")
     b.age = 1.0
@@ -988,14 +1003,14 @@ def test_new_elements():
     check("чужая земля вяжет как раньше", me.mud_t > 0)
 
 
-# ---------- 3m. ЛИМИТЫ v2.0 и ТУЛТИПЫ ПОД КУРСОРОМ ----------
+# ---------- 3m. ЛИМИТЫ v2.2 (СНЯТЫ) И ТУЛТИПЫ ПОД КУРСОРОМ ----------
 def test_limits_tooltip():
-    from game import Game
-    from settings import CHASSIS, MAX_CURSES, MAX_ENEMY_EFFECTS
+    from game import Game, CR_KEYS
+    from settings import CHASSIS, MAX_CURSES
 
     g = Game()
-    check("лимит проклятий поднят до 8", MAX_CURSES == 8)
-    check("лимит эффектов на врага поднят до 8", MAX_ENEMY_EFFECTS == 8)
+    check("проклятий в колоде 8, лимита нет (MAX_CURSES = числу карт)",
+          len(CR_KEYS) == 8 and MAX_CURSES == len(CR_KEYS))
 
     # тултип: наводим мышь на карточку «Лёгкое» шасси (пример игрока)
     g.state = "select"
@@ -1103,12 +1118,15 @@ def test_ffa():
     g2 = Game()
     g2.mode = 3
     g2._reset_round()
-    g2.arena = Arena(6)          # «Мосты»: чистая полоса на y=360
+    g2.grace_t = 0.0
+    for b in g2.bots:
+        b.immune = False
+    g2.arena = Arena(6)          # «Мосты»: чистая полоса на y=540
     b1, b2 = g2.bots[0], g2.bots[1]
-    b1.x, b1.y, b1.angle = 600, 360, 0
-    b2.x, b2.y = 720, 360
+    b1.x, b1.y, b1.angle = 600, 540, 0
+    b2.x, b2.y = 720, 540
     hp0 = b2.hp
-    bul = Bullet(b2.x - 10, 360, 0, b1, damage=30)
+    bul = Bullet(b2.x - 10, 540, 0, b1, damage=30)
     bul.age = 1.0
     bul.update(1 / 60.0, g2.arena.walls_only(), tuple(g2.tanks),
                g2.effects, g2.sounds)
@@ -1189,12 +1207,297 @@ def test_map_shuffle():
           any("★" in n for n in names),
           "(вариантов имени %d)" % len(names))
     # классические точки появления не перекрыты баррикадами
+    # (мир 1920x1080: спавны 1вс1 теперь в (360,540) и (1560,540))
     blocked = 0
     for _ in range(40):
         c = Arena(0, shuffle=True)
-        if c.circle_collides(240, 360, 30) or c.circle_collides(1040, 360, 30):
+        if c.circle_collides(360, 540, 30) or c.circle_collides(1560, 540, 30):
             blocked += 1
     check("классические спавны не перекрыты (40 карт)", blocked == 0)
+
+
+# ---------- 3q. ГРЕЙС v2.2: ботов нельзя убить 45 сек + кнопка ----------
+def test_grace():
+    from game import Game
+    from settings import BOT_GRACE_T
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+    g = Game()
+    g.state = "fight"
+    g._reset_round()
+    check("в начале раунда грейс = %g с" % BOT_GRACE_T,
+          g.grace_t == BOT_GRACE_T)
+    check("боты неуязвимы, игрок — нет",
+          all(b.immune for b in g.bots) and not g.player.immune)
+    bot = g.bot_tank
+    hp0 = bot.hp
+    bot.take_damage(30, fx, snd)
+    check("урон в грейс НЕ проходит", bot.hp == hp0)
+    bot.apply_element("fire", 1, 0, g.arena, fx, snd)
+    for _ in range(30):
+        bot._burn_step(1 / 60.0, fx, snd)
+    check("поджог неуязвимого не тикает", bot.hp == hp0)
+    # кнопка «УБИТЬ СРАЗУ» рисуется и работает даже в грейс
+    g.draw()
+    zone = [r for r, kd, d in g._click_zones if kd == "kill_all"]
+    check("кнопка «УБИТЬ СРАЗУ» видна во время грейса", bool(zone))
+    g._kill_all_foes()
+    check("«УБИТЬ СРАЗУ» убивает неуязвимых ботов",
+          not any(b.alive for b in g.bots) and g.grace_t == 0)
+    g.update(1 / 60.0)
+    check("после «УБИТЬ СРАЗУ» раунд завершён в пользу игрока",
+          g.state == "round_end" and g.winner == 0 and g.score[0] == 1)
+
+    # грейс истёк — урон снова проходит
+    g2 = Game()
+    g2.state = "fight"
+    g2._reset_round()
+    g2._fake_keys = FakeKeys(())
+    g2.grace_t = 0.016
+    g2.update(1 / 60.0)      # тик грейса: теперь боты уязвимы
+    check("после грейса боты уязвимы", not any(b.immune for b in g2.foes))
+    hp1 = g2.bot_tank.hp
+    g2.bot_tank.take_damage(30, fx, snd)
+    check("после грейса урон проходит", g2.bot_tank.hp < hp1)
+
+
+# ---------- 3r. КОНСОЛЬ РАЗРАБОТЧИКА (Ё): выдача всего, подсказки ----------
+def test_console():
+    import math
+    from game import Game
+
+    g = Game()
+    g.state = "fight"
+    g._reset_round()
+    g._fake_keys = FakeKeys(())
+    p, bot = g.player, g.bot_tank
+
+    # подсказки: пишешь «Ту» — консоль подсказывает «Турбо»
+    g.con_input = "Ту"
+    check("подсказка «Ту» -> «Турбо»", "турбо" in g._con_hints())
+    g.con_input = "Во"
+    check("подсказка «Во» показывает воду и воздух",
+          "вода" in g._con_hints() and "воздух" in g._con_hints())
+    g.con_input = "Ту"
+    g._con_complete()
+    check("Tab дополняет до первого совпадения", g.con_input == "турбо ")
+
+    # выдача стихий: «Вода 1 Игрок» — вода танку №1 (игроку)
+    g._con_execute("Вода 1 Игрок")
+    check("«Вода 1 Игрок» выдаёт воду игроку", "water" in p.element_keys)
+    # стихии СКЛАДЫВАЮТСЯ: теперь у игрока и огонь, и вода
+    g._con_execute("Огонь Игрок")
+    check("«Огонь Игрок» добавляет вторую стихию",
+          p.element_keys == ["water", "fire"])
+    seen = set()
+    for _ in range(40):
+        p.cooldown = 0
+        p.mag_ammo = p.mag_size
+        bs = []
+        p.try_shoot(bs, g.effects, g.sounds)
+        seen.update(b.element for b in bs)
+    check("с двумя стихиями снаряды летят и огненные, и водяные",
+          {"fire", "water"} <= seen, "(стихии %s)" % seen)
+
+    # дула, перки, эффекты — тоже выдаются
+    g._con_execute("Гаубица Бот")
+    check("«Гаубица Бот» меняет дуло бота", bot.wpn_key == "howitzer")
+    g._con_execute("Рикошет Бот")
+    check("«Рикошет Бот» выдаёт перк (+2 отскока)", bot.bullet_bounces == 3)
+    g._con_execute("Закалить врага Бот")
+    check("«Закалить врага Бот» баффает прочность",
+          abs(bot.mods["hp_mult"] - 1.25) < 1e-9)
+
+    # бонусы и утилиты
+    g._con_execute("Веер Игрок")
+    check("«Веер Игрок» даёт 3 выстрела веером", p.triple == 3)
+    g._con_execute("хп 50 Игрок")
+    check("«хп 50 Игрок» выставляет прочность", p.hp == 50)
+    g._con_execute("счёт 500")
+    check("«счёт 500» накидывает очков", g.points == 500)
+    g._con_execute("грейс 10")
+    check("«грейс 10» ставит таймер", g.grace_t == 10)
+    g._con_execute("грейс 0")
+    check("«грейс 0» снимает неуязвимость", not any(b.immune for b in g.foes))
+
+    # бонус БЕЗ цели — режим установки кликом (веер на карту)
+    g._con_open = True
+    g._con_execute("Веер")
+    check("«Веер» без цели включает установку кликом",
+          g.con_place == "triple" and not g.con_open)
+    # клик по карте в мировых координатах камеры — бонус появляется
+    wx, wy = p.x + 220, p.y
+    g._con_do_place((wx - g.cam[0], wy - g.cam[1]))
+    check("клик ставит бонус на карту (потом можно подъехать и забрать)",
+          len(g.powerups) == 1 and g.powerups[0].kind == "triple"
+          and abs(g.powerups[0].x - wx) < 1 and abs(g.powerups[0].y - wy) < 1)
+
+    # «убить всех» — все боты мертвы
+    g2 = Game()
+    g2.state = "fight"
+    g2._reset_round()
+    g2._con_execute("убить всех")
+    check("«убить всех» убивает всех ботов",
+          not any(b.alive for b in g2.bots))
+    # регулятор консоли: неизвестное слово не роняет игру
+    g2._con_execute("абракадабра 123")
+    check("неизвестная команда не роняет игру", True)
+
+
+# ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
+def test_team_modes():
+    import math
+    from game import Game
+    from bullet import Bullet
+    from settings import BOSS_SCALE
+
+    # ----- 2 НА 2 -----
+    g = Game()
+    g.mode = 6
+    g._reset_round()
+    check("режим «2 на 2»: 4 танка", len(g.tanks) == 4)
+    check("команды: игрок+союзник (0) против двух ботов (1)",
+          [g.tank_team[t] for t in g.tanks] == [0, 0, 1, 1])
+    check("союзник — «СОЮЗНИК» с бирюзовым цветом",
+          g.bots[0].display_name == "СОЮЗНИК")
+    check("союзник НЕ прячется за грейсом (неуязвимы только враги)",
+          not g.bots[0].immune and all(b.immune for b in g.foes))
+    check("врагов двое, счёт командный [0, 0]",
+          len(g.foes) == 2 and g.score == [0, 0])
+    g.draw()   # HUD командного режима рисуется без ошибок
+
+    # союзная пуля пролетает сквозь союзника, не раня его
+    p, ally = g.player, g.bots[0]
+    p.x, p.y = 400, 540
+    ally.x, ally.y = 700, 540
+    ally.hp = ally.max_hp
+    g.arena = __import__("arena").Arena(0)
+    hp0 = ally.hp
+    bl = Bullet(430, 540, 0, p, damage=30)
+    bl.age = 1.0
+    for _ in range(30):
+        bl.update(1 / 60.0, g.arena.walls_only(), tuple(g.tanks),
+                  g.effects, g.sounds)
+        if bl.dead:
+            break
+    check("снаряд союзника НЕ ранит союзника (пролетает)",
+          ally.hp == hp0, "(hp %d -> %d)" % (hp0, ally.hp))
+
+    # ИИ союзника воюет только с вражеской командой
+    ai = g.ais[0]
+    ai.target = None
+    ai.target = ai._pick_target(g)
+    check("ИИ союзника берёт целью только чужую команду",
+          ai.target is not None and g.tank_team[ai.target] == 1)
+
+    # вырезали вражескую команду — раунд за НАШЕЙ командой
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    for b in g.foes:
+        b.alive = False
+    g.update(1 / 60.0)
+    check("враги мертвы -> раунд за вашей командой",
+          g.state == "round_end" and g.winner == 0 and g.score[0] == 1)
+
+    # ----- 2 ПРОТИВ БОССА -----
+    g3 = Game()
+    g3.mode = 7
+    g3._reset_round()
+    boss = [b for b in g3.bots if b.display_name == "БОСС"][0]
+    check("режим «2 против БОССА»: игрок + союзник + босс", len(g3.tanks) == 3)
+    check("БОСС вдвое крупнее обычного танка",
+          abs(boss.radius - 24 * BOSS_SCALE) < 0.01 and boss.scale == BOSS_SCALE)
+    check("БОСС вчетверо крепче (~800 HP)", boss.max_hp >= 780,
+          "(hp %d)" % boss.max_hp)
+    check("БОСС неуязвим в грейс, союзник — нет",
+          boss.immune and not g3.bots[0].immune)
+    g3.draw()
+    # убили босса — раунд за командой игрока
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.foes[0].alive = False
+    g3.update(1 / 60.0)
+    check("босс мёртв -> раунд за командой игрока",
+          g3.state == "round_end" and g3.winner == 0 and g3.score[0] == 1)
+    # команда игрока мертва — раунд за боссом
+    g4 = Game()
+    g4.mode = 7
+    g4._reset_round()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.player.alive = False
+    g4.bots[0].alive = False
+    g4.update(1 / 60.0)
+    check("игрок и союзник мертвы -> раунд за боссом",
+          g4.state == "round_end" and g4.winner == 1 and g4.score[1] == 1)
+    # матч: босс добрал 5 побед — поражение
+    g5 = Game()
+    g5.mode = 7
+    g5.state = "round_end"
+    g5.timer = 0.01
+    g5.score = [2, 5]
+    g5.update(1 / 60.0)
+    check("босс добрал 5 побед — матч завершён поражением",
+          g5.state == "match_end" and g5.stats["losses"] >= 1)
+
+
+# ---------- 3t. БОЛЬШИЕ КАРТЫ v2.2: мир 1920x1080, камера, миникарта ----------
+def test_bigmap():
+    import math
+    from game import Game
+    from settings import ARENA_W, ARENA_H, SCREEN_W, SCREEN_H
+
+    check("мир больше окна: 1920x1080 против 1280x720",
+          ARENA_W == 1920 and ARENA_H == 1080
+          and ARENA_W > SCREEN_W and ARENA_H > SCREEN_H)
+    a = __import__("arena").Arena(0)
+    check("внешние стены большого мира блокируют",
+          a.point_blocked(10, 540) and a.point_blocked(960, 10))
+    check("свободная точка на большом мире ищется",
+          not a.circle_collides(*a.free_spot(), 26))
+
+    g = Game()
+    g.state = "fight"
+    g._reset_round()
+    g._fake_keys = FakeKeys(())
+    # камера следит за игроком и не выходит за края мира
+    g.player.x, g.player.y = 100, 100
+    g._update_cam(1 / 60.0)
+    g._cam_snap()
+    check("камера прижата к левому верхнему углу",
+          g.cam[0] == 0 and g.cam[1] == 0)
+    g.player.x, g.player.y = 1900, 1070
+    g._cam_snap()
+    check("камера прижата к правому нижнему углу",
+          g.cam[0] == ARENA_W - SCREEN_W and g.cam[1] == ARENA_H - SCREEN_H)
+    g._reset_round()
+    g.draw()
+    check("бой на большой карте рисуется (камера + миникарта)", True)
+    # спавны всех режимов свободны и далеко друг от друга
+    ok = True
+    for m in (2, 3, 4, 5, 6, 7):
+        for _ in range(3):
+            gm = Game()
+            gm.mode = m
+            gm._reset_round()
+            if any(gm.arena.circle_collides(t.x, t.y, t.radius)
+                   for t in gm.tanks):
+                ok = False
+            dist = min(math.hypot(a2.x - b2.x, a2.y - b2.y)
+                       for i, a2 in enumerate(gm.tanks)
+                       for b2 in gm.tanks[i + 1:])
+            if dist < 240:
+                ok = False
+    check("спавны всех 6 режимов свободны и не ближе 240 px", ok)
 
 
 if __name__ == "__main__":
@@ -1215,6 +1518,10 @@ if __name__ == "__main__":
     test_stats_persist()
     test_ffa()
     test_map_shuffle()
+    test_grace()
+    test_console()
+    test_team_modes()
+    test_bigmap()
     test_points()
     test_score_table()
     test_magazine()

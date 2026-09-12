@@ -1,14 +1,26 @@
 # -*- coding: utf-8 -*-
 """Арена: 16 вариантов расстановки препятствий, стены, коллизии, лучи.
 v2.1: РАНДОМИЗАЦИЯ — перед боем карта может зеркально отразиться и получить
-несколько случайных баррикад, а сама арена переразыгрывается КАЖДЫЙ РАУНД."""
+несколько случайных баррикад, а сама арена переразыгрывается КАЖДЫЙ РАУНД.
+v2.2: КАРТЫ ПОБОЛЬШЕ — мир 1920x1080 вместо окна 1280x720: раскладки
+масштабируются в 1.5 раза, камера следует за игроком (в game.py)."""
 import math
 import random
 import pygame
 from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
-                      PROP_MAX)
+                      PROP_MAX, ARENA_W, ARENA_H)
 
-WALL_T = 60  # толщина внешних стен
+WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется ниже)
+
+# Масштаб мира: 1920/1280 = 1.5 — все раскладки растягиваются до большого мира
+_S = ARENA_W / float(SCREEN_W)
+WALL_TS = int(WALL_T * _S)          # стены тоже толще (90 px)
+
+
+def _scaled_layout(rects):
+    """Раскладка из исходных координат 1280x720 — в мир 1920x1080."""
+    return [(int(x * _S), int(y * _S), max(1, int(w * _S)), max(1, int(h * _S)))
+            for (x, y, w, h) in rects]
 
 # Восемь симметричных раскладок арены (все зеркалятся по центру)
 LAYOUTS = [
@@ -101,8 +113,9 @@ MAP_NAMES = ["Классика", "Крестовина", "Колонны", "Уг
              "Полоса", "Соты", "Мосты", "Бункер", "Веер", "Шахты",
              "Вилка", "Кольцо", "Зигзаг", "Казармы", "Ступени", "Бухта"]
 
-# классические точки появления танков (баррикады их не перекрывают)
-_SPAWN_COLS = ((240, 360), (1040, 360))
+# классические точки появления танков в ИСХОДНЫХ координатах (масштабируются)
+_SPAWN_SRC = ((240, 360), (1040, 360))
+_SPAWN_COLS = [(int(x * _S), int(y * _S)) for x, y in _SPAWN_SRC]
 
 
 class Arena:
@@ -110,14 +123,16 @@ class Arena:
         """shuffle=True — случайное зеркало и/или случайные баррикады:
         одна и та же карта каждый раз играет по-новому."""
         self.variant = variant % len(LAYOUTS)
-        w, h = SCREEN_W, SCREEN_H
+        w, h = ARENA_W, ARENA_H
+        self.w = w
+        self.h = h
         self.walls = [
-            pygame.Rect(0, 0, w, WALL_T),
-            pygame.Rect(0, h - WALL_T, w, WALL_T),
-            pygame.Rect(0, 0, WALL_T, h),
-            pygame.Rect(w - WALL_T, 0, WALL_T, h),
+            pygame.Rect(0, 0, w, WALL_TS),
+            pygame.Rect(0, h - WALL_TS, w, WALL_TS),
+            pygame.Rect(0, 0, WALL_TS, h),
+            pygame.Rect(w - WALL_TS, 0, WALL_TS, h),
         ]
-        obs = [pygame.Rect(r) for r in LAYOUTS[self.variant]]
+        obs = [pygame.Rect(r) for r in _scaled_layout(LAYOUTS[self.variant])]
         tags = []
         if shuffle:
             mx, my = (random.random() < 0.5, random.random() < 0.5)
@@ -139,21 +154,22 @@ class Arena:
     @staticmethod
     def _add_props(obs, w, h):
         """Накидать 0..PROP_MAX случайных баррикад в свободные места —
-        подальше от стен, других препятствий и точек появления танков."""
+        подальше от стен, других препятствий и точек появления танков.
+        Баррикады крупнее в большом мире (v2.2)."""
         added = 0
         for _ in range(70):
             if added >= PROP_MAX:
                 break
             if added and random.random() < 0.4:
                 break            # бывает и пара баррикад, и ноль
-            pw, ph = random.choice(((36, 36), (56, 28), (28, 56), (48, 48)))
-            x = random.uniform(WALL_T + 70, w - WALL_T - 70 - pw)
-            y = random.uniform(WALL_T + 60, h - WALL_T - 60 - ph)
+            pw, ph = random.choice(((54, 54), (84, 42), (42, 84), (72, 72)))
+            x = random.uniform(WALL_TS + 100, w - WALL_TS - 100 - pw)
+            y = random.uniform(WALL_TS + 90, h - WALL_TS - 90 - ph)
             r = pygame.Rect(int(x), int(y), pw, ph)
-            if any(r.inflate(90, 90).colliderect(o) for o in obs):
+            if any(r.inflate(110, 110).colliderect(o) for o in obs):
                 continue
             cx, cy = r.center
-            if any((cx - sx) ** 2 + (cy - sy) ** 2 < 150 ** 2
+            if any((cx - sx) ** 2 + (cy - sy) ** 2 < 210 ** 2
                    for sx, sy in _SPAWN_COLS):
                 continue
             obs.append(r)
@@ -167,14 +183,14 @@ class Arena:
         """Вид арены без барьеров — для снарядов (те бьют барьеры отдельно)."""
         return _WallsView(self)
 
-    # ----- фон: неоновая сетка -----
+    # ----- фон: неоновая сетка на весь большой мир -----
     def _make_background(self):
-        bg = pygame.Surface((SCREEN_W, SCREEN_H))
+        bg = pygame.Surface((self.w, self.h))
         bg.fill(COL_BG)
-        for gx in range(0, SCREEN_W, 48):
-            pygame.draw.line(bg, COL_GRID, (gx, 0), (gx, SCREEN_H))
-        for gy in range(0, SCREEN_H, 48):
-            pygame.draw.line(bg, COL_GRID, (0, gy), (SCREEN_W, gy))
+        for gx in range(0, self.w, 48):
+            pygame.draw.line(bg, COL_GRID, (gx, 0), (gx, self.h))
+        for gy in range(0, self.h, 48):
+            pygame.draw.line(bg, COL_GRID, (0, gy), (self.w, gy))
         return bg
 
     def draw(self, surf, ox=0, oy=0):
@@ -229,13 +245,13 @@ class Arena:
     def free_spot(self, avoid=(), avoid_dist=150):
         """Случайная свободная точка (для появления бонусов)."""
         for _ in range(200):
-            x = random.uniform(WALL_T + 70, SCREEN_W - WALL_T - 70)
-            y = random.uniform(WALL_T + 70, SCREEN_H - WALL_T - 70)
+            x = random.uniform(WALL_TS + 70, self.w - WALL_TS - 70)
+            y = random.uniform(WALL_TS + 70, self.h - WALL_TS - 70)
             if self.circle_collides(x, y, 30):
                 continue
             if all((x - ax) ** 2 + (y - ay) ** 2 > avoid_dist ** 2 for ax, ay in avoid):
                 return x, y
-        return SCREEN_W / 2, SCREEN_H / 2
+        return self.w / 2, self.h / 2
 
 
 class _WallsView:

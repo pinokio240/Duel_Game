@@ -79,6 +79,11 @@ class Bullet:
                     continue
                 if t is self.owner and self.age < 0.25:
                     continue  # даём вылететь из своего ствола
+                # КОМАНДНЫЕ РЕЖИМЫ (v2.2): своих не бьём — снаряд пролетает
+                # сквозь союзника (в FFA у каждого танка своя команда)
+                if (t is not self.owner
+                        and getattr(t, "team", None) == getattr(self.owner, "team", None)):
+                    continue
                 if (t.x - self.x) ** 2 + (t.y - self.y) ** 2 < (t.radius + 4) ** 2:
                     t.take_damage(self.damage, effects, sounds)
                     # ПРАВИЛО СВОЕЙ СТИХИИ: земля/ток/вода/лёд/яд не действуют

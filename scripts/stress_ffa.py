@@ -10,6 +10,12 @@ sys.path.insert(0, ROOT)
 
 import pygame  # noqa: E402
 from game import Game  # noqa: E402
+import game as game_mod  # noqa: E402
+
+# Мир стал большим (v2.2, 1920x1080) и раунды идут дольше — полный матч до
+# 5 побед в симуляции занимает 10+ минут. Для стресса (проверить, что ничто
+# не падает: раунды, спавны, зона, реванш) сокращаем матч до 2 побед.
+game_mod.ROUNDS_TO_WIN = 2
 
 
 class FakeKeys:
@@ -26,6 +32,10 @@ def play_match(mode, max_sec=240):
     g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN))
     assert g.state == "intro", g.state
     g._fake_keys = FakeKeys()
+    # КОНСОЛЬ РАЗРАБОТЧИКА (v2.2): снимаем 45-секундную неуязвимость ботов,
+    # чтобы стресс-матч шёл в темпе, и заодно проверяем её в реальном бою
+    g._con_execute("грейс 0")
+    assert g.grace_t == 0
     frames = 0
     limit = int(max_sec * 60)
     while g.state != "match_end" and frames < limit:
@@ -51,6 +61,10 @@ def play_match(mode, max_sec=240):
 
 if __name__ == "__main__":
     pygame.init()
+    # мир стал больше (1920x1080) — раунды длиннее, даём с запасом
     for m in (3, 4, 5):
-        play_match(m)
+        play_match(m, max_sec=420)
+    # командные режимы v2.2: 2 на 2 и 2 против БОССА (боссу нужно время)
+    play_match(6, max_sec=480)
+    play_match(7, max_sec=540)
     print("СТРЕСС-ТЕСТ ПРОЙДЕН")

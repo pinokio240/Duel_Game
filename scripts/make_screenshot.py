@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
-"""Обновляет screenshot.png боя, ffa.png (режим на 5) и garage.png."""
+"""Обновляет screenshot.png боя, ffa.png (режим на 5), boss.png (БОСС),
+console.png (консоль разработчика) и garage.png."""
 import os
 import sys
 
@@ -20,6 +21,7 @@ g.state = "fight"
 g._reset_round()
 g.arena = Arena(0)   # фиксированная «Классика» для стабильного кадра
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+g.grace_t = 0.0      # чтобы бой в кадре шёл честно
 
 # прогрев боя, чтобы были снаряды/эффекты
 for _ in range(240):
@@ -28,7 +30,8 @@ for _ in range(240):
 # немного постановки: стена у игрока, бонус на арене
 g.player.apply_powerup("barrier")
 g._place_barrier(g.player)
-g.player.x, g.player.y = 340, 420
+g.player.x, g.player.y = 480, 630
+g._cam_snap()
 g.arena.set_dynamic(g.barriers)
 g.update(1 / 60.0)
 g.draw()
@@ -47,10 +50,42 @@ g.arena = Arena(5)          # «Соты» — красиво для толпы
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 for _ in range(300):        # полминуты боя: следы, снаряды, дым
     g.update(1 / 60.0)
+g._cam_snap()
 g.draw()
 out = "/home/z/my-project/tool-results/ffa.png"
 pygame.image.save(g.screen, out)
 print("ffa.png:", out)
+
+# ----- кадр командного режима «2 против БОССА» -----
+g.mode = 7
+g.score = [0, 0]
+g.bot_builds = [("light", "light", "shotgun", "sprinter", "electric"),
+                ("heavy", "heavy", "shotgun", "turtle", "fire")]
+g._reset_round()
+g.arena = Arena(0)
+g.grace_t = 8.0             # пусть в кадре висит кнопка «УБИТЬ СРАЗУ»
+g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+for _ in range(200):
+    g.update(1 / 60.0)
+g._cam_snap()
+g.draw()
+out = "/home/z/my-project/tool-results/boss.png"
+pygame.image.save(g.screen, out)
+print("boss.png:", out)
+
+# ----- кадр КОНСОЛИ РАЗРАБОТЧИКА: пишем «Ту», внизу подсказка «Турбо» -----
+g.state = "fight"
+g.con_open = True
+g.con_input = "Ту"
+g.con_lines = ["> Огонь Игрок", "Выдано «Огонь»: Игрок",
+               "> Гаубица Бот", "Выдано «Гаубица»: Бот",
+               "> Веер", "Кликни по карте, чтобы поставить «ВЕЕР»."]
+g._cam_snap()
+g.draw()
+out = "/home/z/my-project/tool-results/console.png"
+pygame.image.save(g.screen, out)
+print("console.png:", out)
+g.con_open = False
 
 # ангар: 5 панелей + жребий + эффекты на врага — снимок для проверки верстки
 g.mode = 2
@@ -74,7 +109,7 @@ out2 = "/home/z/my-project/tool-results/tooltip.png"
 pygame.image.save(g.screen, out2)
 print("tooltip.png:", out2)
 
-# меню: режимы боя (кнопки 1×1 … 1×1×1×1×1)
+# меню: режимы боя (кнопки 1×1 … 2×БОСС)
 g.state = "menu"
 g.mode = 3
 g.draw()

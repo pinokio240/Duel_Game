@@ -5,6 +5,7 @@
 * множитель дула * множитель перка. Хотели имбу? Их нет.
 """
 import math
+import itertools
 import random
 import pygame
 from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS,
@@ -19,17 +20,25 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       PU_MINE_CARRY, BARRIER_MAX)
 from bullet import Bullet, ELEMENT_COLORS
 
+# уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
+# в командных режимах игра перезаписывает team на общий номер стороны
+_TEAM_SEQ = itertools.count(1)
+
 
 class Tank:
     def __init__(self, x, y, angle, chassis_key, hull_key, color,
                  weapon_key="standard", perk_key="none", element_key="none",
-                 curses=(), blessings=(), extra_mods=None):
+                 curses=(), blessings=(), extra_mods=None,
+                 scale=1.0, display_name=None):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
         self.ch_key, self.hull_key = chassis_key, hull_key
         self.wpn_key, self.perk_key = weapon_key, perk_key
-        self.element_key = element_key      # шестая часть сборки — стихия
+        self.element_key = element_key      # основная стихия (часть сборки)
+        # v2.2: НЕСКОЛЬКО стихий на одном танке (консоль выдаёт «Огонь» и
+        # «Воду» одному танку); каждый снаряд получает случайную из них
+        self.element_keys = [element_key] if element_key != "none" else []
         self.chassis = CHASSIS[chassis_key]
         self.hull = HULL[hull_key]
         self.weapon = WEAPONS[weapon_key]
@@ -58,7 +67,14 @@ class Tank:
                     self.mods[_f] *= _v
         self.color = color
         self.light = tuple(min(c + 100, 255) for c in color)
-        self.radius = TANK_RADIUS
+        # v2.2: команда (уникальна по умолчанию), неуязвимость (грейс ботов),
+        # масштаб (БОСС вдвое крупнее) и имя в HUD («СОЮЗНИК», «БОСС»)
+        self.team = next(_TEAM_SEQ)
+        self.immune = False           # боты неуязвимы первые 45 сек раунда
+        self._immune_cd = 0.0         # чтобы «НЕУЯЗВИМ» не спамило каждый кадр
+        self.scale = float(scale)
+        self.radius = TANK_RADIUS * self.scale
+        self.display_name = display_name
         self.max_hp = max(20, int(round(self.hull["hp"] * self.perk["hp_mult"]
                                         * self.mods["hp_mult"])))
         self.hp = self.max_hp
@@ -90,6 +106,9 @@ class Tank:
         self.mine_carried = 0
         self.barrier_charges = 0
         self._sprite = self._make_sprite()
+        if self.scale != 1.0:
+            self._sprite = pygame.transform.smoothscale(
+                self._sprite, (int(64 * self.scale), int(50 * self.scale)))
 
     # ----- характеристики с учётом бонусов, дула и перка -----
     @property
@@ -174,10 +193,14 @@ class Tank:
             pygame.draw.rect(s, self.light, (44, 22, 19, 7), border_radius=2)
             pygame.draw.rect(s, self.color, (41, 19, 7, 13), border_radius=2)
         # стихия: цветной ореол на срезе ствола — видно, чем стреляем
-        if self.element_key != "none":
-            col = ELEMENT_COLORS[self.element_key]
-            pygame.draw.circle(s, col, (62, 25), 3)
-            pygame.draw.circle(s, col, (62, 25), 6, 1)
+        # (несколько стихий от консоли — рисуем ореолы в ряд)
+        for i, ek in enumerate(self.element_keys[:3]):
+            col = ELEMENT_COLORS.get(ek)
+            if col is None:
+                continue
+            cx0 = 62 - i * 7
+            pygame.draw.circle(s, col, (cx0, 25), 3)
+            pygame.draw.circle(s, col, (cx0, 25), 6, 1)
         return s
 
     # ----- движение -----
@@ -244,7 +267,8 @@ class Tank:
                * self.elem["damage_mult"] * self.mods["damage_mult"])
         spd = (self.weapon["speed_mult"] * self.elem["speed_mult"]
                * self.mods["bullet_speed_mult"])
-        elem = self.element_key if self.element_key != "none" else None
+        # несколько стихий (консоль): каждый снаряд получает случайную из них
+        elem = random.choice(self.element_keys) if self.element_keys else None
         # «Разбитый прицел» разбрасывает снаряды, «Твёрдые руки» лечат прицел
         sp = max(0.0, self.mods["spread_deg"])
         for a in angles:
@@ -275,6 +299,12 @@ class Tank:
 
     def take_damage(self, dmg, effects, sounds):
         if not self.alive:
+            return
+        if self.immune:
+            # грейс ботов (45 сек раунда): никакой урон не проходит
+            if self._immune_cd <= 0:
+                self._immune_cd = 0.7
+                effects.float_text(self.x, self.y - 50, "НЕУЯЗВИМ", (190, 205, 255))
             return
         if self.shield_t > 0:
             dmg *= 0.4
@@ -315,6 +345,9 @@ class Tank:
             if self.rapid_t > 0: washed.append("скорострел")
             if self.triple > 0: washed.append("веер")
             if self.laser_charges > 0: washed.append("лазер")
+            if self.burn_t > 0:
+                washed.append("пожар")
+                self.burn_t = 0.0      # ВОДА ТУШИТ ОГОНЬ (v2.2)
             self.shield_t = self.boost_t = self.rapid_t = 0.0
             self.triple = 0
             self.laser_charges = 0
@@ -335,8 +368,8 @@ class Tank:
             effects.float_text(self.x, self.y - 50, "ПОРЫВ!", (190, 235, 255))
 
     def _burn_step(self, dt, effects, sounds):
-        """Поджог: тикает уроном, броня не спасает."""
-        if self.burn_t <= 0 or not self.alive:
+        """Поджог: тикает уроном, броня не спасает. Неуязвимых не жжёт."""
+        if self.burn_t <= 0 or not self.alive or self.immune:
             return
         self.burn_t -= dt
         self._burn_tick -= dt
@@ -349,7 +382,7 @@ class Tank:
 
     def _poison_step(self, dt, effects, sounds):
         """Яд: тикает уроном как пожар, но зелёным; броня не спасает."""
-        if self.poison_t <= 0 or not self.alive:
+        if self.poison_t <= 0 or not self.alive or self.immune:
             return
         self.poison_t -= dt
         self._poison_tick -= dt
@@ -392,6 +425,7 @@ class Tank:
     def update(self, dt):
         self.cooldown = max(0.0, self.cooldown - dt)
         self.flash = max(0.0, self.flash - dt)
+        self._immune_cd = max(0.0, self._immune_cd - dt)
         self.shield_t = max(0.0, self.shield_t - dt)
         self.boost_t = max(0.0, self.boost_t - dt)
         self.rapid_t = max(0.0, self.rapid_t - dt)

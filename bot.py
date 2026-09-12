@@ -55,9 +55,12 @@ class BotAI:
     # ---------- помощники ----------
 
     def _pick_target(self, game):
-        """Ближайший живой ЧУЖОЙ танк — в FFA это может быть другой бот."""
+        """Ближайший живой ЧУЖОЙ танк — в FFA это может быть другой бот,
+        в командных режимах (2на2, босс) — только танк чужой команды (v2.2)."""
         t = self.t
-        cands = [o for o in game.tanks if o is not t and o.alive]
+        cands = [o for o in game.tanks
+                 if o is not t and o.alive
+                 and getattr(o, "team", None) != getattr(t, "team", None)]
         if not cands:
             return None
         return min(cands, key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
