@@ -179,7 +179,8 @@ def test_elements():
           abs(el.turn_speed - bturn * SHOCK_MULT) < 0.01)
 
     # воздух: отшвыривает на ~90 px и не сквозь стены
-    a = Tank(200, 620, 0, "medium", "medium", COL, "standard", "none")
+    # (y=450 — чистая полоса «Классики» при масштабе 1.75: блоки выше/ниже)
+    a = Tank(200, 450, 0, "medium", "medium", COL, "standard", "none")
     a.apply_element("air", 100, 0, arena, fx, snd)   # толкает вправо
     pushed = a.x - 200
     check("воздух отшвыривает (~90 px)", 60 < pushed <= 92, "(%.0f px)" % pushed)
@@ -221,7 +222,7 @@ def test_barrier():
     g._reset_round()
     g.arena = Arena(0)             # фиксированная «Классика» — тест геометрии
     p = g.player
-    p.x, p.y, p.angle = 400, 540, 0        # смотрит вправо (мир теперь 1920x1080)
+    p.x, p.y, p.angle = 400, 540, 0        # смотрит вправо (мир 2240x1260 с v2.4)
     p.barrier_charges = 1
     ok = g._place_barrier(p)
     check("стена ставится по Q", ok and len(g.barriers) == 1 and
@@ -307,7 +308,7 @@ def test_laser_fan():
     g.grace_t = 0.0                 # без грейса — иначе бот неуязвим для луча
     g.bot_tank.immune = False
     p, bot = g.player, g.bot_tank
-    # чистая полоса карты «Классика» (мир 1920x1080: блоки выше/ниже)
+    # чистая полоса карты «Классика» (мир 2240x1260: блоки выше/ниже)
     g.arena = Arena(0)
     p.x, p.y, p.angle = 350, 380, 0
     bot.x, bot.y = 750, 380
@@ -1207,11 +1208,13 @@ def test_map_shuffle():
           any("★" in n for n in names),
           "(вариантов имени %d)" % len(names))
     # классические точки появления не перекрыты баррикадами
-    # (мир 1920x1080: спавны 1вс1 теперь в (360,540) и (1560,540))
+    # (мир 2240x1260, масштаб 1.75: классические спавны в (420,630) и (1820,630))
+    from arena import _S as _sc
+    _sp = [(int(x * _sc), int(y * _sc)) for x, y in ((240, 360), (1040, 360))]
     blocked = 0
     for _ in range(40):
         c = Arena(0, shuffle=True)
-        if c.circle_collides(360, 540, 30) or c.circle_collides(1560, 540, 30):
+        if any(c.circle_collides(sx, sy, 30) for sx, sy in _sp):
             blocked += 1
     check("классические спавны не перекрыты (40 карт)", blocked == 0)
 
@@ -1457,14 +1460,14 @@ def test_team_modes():
           g5.state == "match_end" and g5.stats["losses"] >= 1)
 
 
-# ---------- 3t. БОЛЬШИЕ КАРТЫ v2.2: мир 1920x1080, камера, миникарта ----------
+# ---------- 3t. БОЛЬШАЯ КАРТА v2.4: мир 2240x1260 (x3 старой), камера, миникарта ----------
 def test_bigmap():
     import math
     from game import Game
     from settings import ARENA_W, ARENA_H, SCREEN_W, SCREEN_H
 
-    check("мир больше окна: 1920x1080 против 1280x720",
-          ARENA_W == 1920 and ARENA_H == 1080
+    check("мир x3 старой площади: 2240x1260 при окне 1280x720",
+          ARENA_W == 2240 and ARENA_H == 1260
           and ARENA_W > SCREEN_W and ARENA_H > SCREEN_H)
     a = __import__("arena").Arena(0)
     check("внешние стены большого мира блокируют",

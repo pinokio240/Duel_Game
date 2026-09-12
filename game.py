@@ -309,11 +309,15 @@ class Game:
             else:
                 our = n // 2            # 2на2 → 2, 3на3 → 3, 4на4 → 4
                 foes_n = our
-            our_pts = [(cx, cy + 380)]
+            # v2.4: отступ шеренг = треть высоты мира (420 при 1260) —
+            # сам тянется вслед за размером карты; снаружи стен (105)
+            # и блоков «Классики» остаётся запас даже под БОССА (r 48+14)
+            row = ARENA_H / 3.0
+            our_pts = [(cx, cy + row)]
             for j in range(our - 1):    # союзники веером вокруг игрока
                 off = (j // 2 + 1) * 300 * (1 if j % 2 == 0 else -1)
-                our_pts.append((cx + off, cy + 380))
-            foe_pts = [(cx + (j - (foes_n - 1) / 2.0) * 300, cy - 380)
+                our_pts.append((cx + off, cy + row))
+            foe_pts = [(cx + (j - (foes_n - 1) / 2.0) * 300, cy - row)
                        for j in range(foes_n)]
             ring = our_pts + foe_pts
         else:
@@ -739,7 +743,7 @@ class Game:
     # ================= камера большого мира (v2.2) =================
     def _update_cam(self, dt):
         """Камера едет за игроком (если он погиб — за живым танком):
-        мир 1920x1080 больше окна 1280x720."""
+        мир 2240x1260 (v2.4, x3 площади старой карты) больше окна 1280x720."""
         t = self.player if self.player.alive else \
             next((tk for tk in self.tanks if tk.alive), None)
         if t is None:
@@ -1331,7 +1335,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.3", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.4", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -2041,7 +2045,7 @@ class Game:
 
     # ----- миникарта большого мира (v2.2) -----
     def _draw_minimap(self):
-        """Миникарта в правом нижнем углу: мир 1920x1080 больше окна,
+        """Миникарта в правом нижнем углу: мир 2240x1260 больше окна,
         без ориентира легко заблудиться. Показывает препятствия, танки
         и рамку видимой области."""
         mw, mh = 192, 108
