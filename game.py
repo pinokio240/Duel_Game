@@ -1163,13 +1163,14 @@ class Game:
             self.smokes.append(Smoke(t.x, t.y))
             self.sounds.play("smoke")
         elif pu.kind == "freeze":
-            # v2.1: замораживаем БЛИЖАЙШЕГО чужака (в FFA их много)
-            others = [o for o in self.tanks if o is not t and o.alive]
-            if others:
-                enemy = min(others,
-                            key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
-                enemy.frozen_t = PU_FREEZE_TIME
-                self.effects.float_text(enemy.x, enemy.y - 54, "ЭМИ!", info["color"])
+            # v2.6.1: ЭМИ вырубает ВСЕХ ЖИВЫХ, КРОМЕ подобравшего —
+            # раньше доставалось только ближайшему чужаку; теперь в FFA
+            # и в командах встаёт ВЕСЬ мир, кроме взявшего бонус
+            for o in self.tanks:
+                if o is not t and o.alive:
+                    o.frozen_t = PU_FREEZE_TIME
+                    self.effects.float_text(o.x, o.y - 54, "ЭМИ!",
+                                            info["color"])
             self.sounds.play("freeze")
         else:
             # мина и стена носятся в боекомплекте (E / Q) — всё в apply_powerup
@@ -1360,7 +1361,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.6", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.6.1", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================

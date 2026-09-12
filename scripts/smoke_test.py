@@ -1527,6 +1527,59 @@ def test_team_highlight():
           and all(g3._team_ring_color(t) == TEAM_FOE_COLOR for t in f3))
 
 
+# ---------- 3s3. ЭМИ v2.6.1: вырубает ВСЕХ, кроме подобравшего ----------
+def test_emp_blast():
+    """Багфикс v2.6.1: ЭМИ раньше морозил только БЛИЖАЙШЕГО чужака —
+    в режимах на 3+ танков доставалось одному. Теперь замерзают ВСЕ
+    живые танки, КРОМЕ того, кто подобрал бонус (в FFA и в командах)."""
+    from game import Game
+    from powerup import PowerUp
+    from settings import PU_FREEZE_TIME
+
+    # FFA на 3: бонус поднимает БОТ — игрок и БОТ-2 замерзают, он нет
+    g = Game()
+    g.mode = 3
+    g._reset_round()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    b = g.bots[0]
+    g._apply_pickup(b, PowerUp(b.x, b.y, "freeze"))
+    check("ЭМИ в FFA: подобравший бот НЕ замёрз", b.frozen_t == 0.0)
+    check("ЭМИ в FFA: замерзли ВСЕ остальные (игрок и БОТ-2)",
+          g.player.frozen_t == PU_FREEZE_TIME
+          and g.bots[1].frozen_t == PU_FREEZE_TIME,
+          "(игрок %.1f, БОТ-2 %.1f)" % (g.player.frozen_t, g.bots[1].frozen_t))
+
+    # 1x1x1x1: игрок поднял ЭМИ — все ТРИ бота встали разом
+    g4 = Game()
+    g4.mode = 4
+    g4._reset_round()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4._apply_pickup(g4.player, PowerUp(g4.player.x, g4.player.y, "freeze"))
+    check("ЭМИ у игрока в 1x1x1x1: все 3 бота встали, игрок ездит",
+          g4.player.frozen_t == 0.0
+          and all(b.frozen_t == PU_FREEZE_TIME for b in g4.bots))
+
+    # команда (2на2): чужак поднял ЭМИ — встаёт ВЕСЬ мир, кроме него,
+    # включая его собственного союзника (как просил игрок)
+    g6 = Game()
+    g6.mode = 6
+    g6._reset_round()
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    foe = g6.foes[0]
+    g6._apply_pickup(foe, PowerUp(foe.x, foe.y, "freeze"))
+    others6 = [t for t in g6.tanks if t is not foe]
+    check("ЭМИ в 2на2: замерзли все 3 остальные, включая союзника взявшего",
+          foe.frozen_t == 0.0
+          and all(t.frozen_t == PU_FREEZE_TIME for t in others6))
+    # замерзшие реально НЕ едут и не стреляют
+    g6.update(1 / 60.0)
+    check("замерзший от ЭМИ игрок стоит на месте",
+          g6.player.speed == 0.0)
+
+
 # ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
 def test_team_modes():
     import math
@@ -1924,6 +1977,7 @@ if __name__ == "__main__":
     test_console()
     test_team_modes()
     test_team_highlight()
+    test_emp_blast()
     test_ice_immunity()
     test_big_teams()
     test_bigmap()
