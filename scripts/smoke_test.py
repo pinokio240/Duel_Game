@@ -510,7 +510,7 @@ def test_points():
           g.stats["best_score"] >= g.final_score)
 
 
-# ---------- 3h. ЭФФЕКТЫ НА ВРАГА: баффы/дебаффы боту, любой режет счёт ----------
+# ---------- 3h. ЭФФЕКТЫ НА ВРАГА: дебаффы режут счёт, баффы ДОБАВЛЯЮТ ----------
 def test_enemy_effects():
     from game import Game
     from settings import ENEMY_EFFECTS, MAX_ENEMY_EFFECTS, SCORE_CURSE_BONUS
@@ -523,13 +523,13 @@ def test_enemy_effects():
     check("больше %d эффектов на врага не взять" % MAX_ENEMY_EFFECTS,
           len(g.sel_enemy_keys) == MAX_ENEMY_EFFECTS)
 
-    # множитель: дебафф -10%, бафф -5%, проклятье +15% (всё в одном котле)
+    # множитель: дебафф -10%, бафф врага +10%, проклятье +15% (всё в одном котле)
     g.build = ("medium", "medium", "standard", "none", "none",
                ("fragile",), (), ("e_weaken", "e_harden"))
     expected = (1 + SCORE_CURSE_BONUS
                 - ENEMY_EFFECTS["e_weaken"]["score_cut"]
-                - ENEMY_EFFECTS["e_harden"]["score_cut"])
-    check("проклятье +15%%, дебафф врага -10%%, бафф -5%% (x%.2f)" % expected,
+                + ENEMY_EFFECTS["e_harden"]["score_bonus"])
+    check("проклятье +15%%, дебафф врага -10%%, бафф врага +10%% (x%.2f)" % expected,
           abs(g._score_mult() - expected) < 1e-9, "(x%.2f)" % g._score_mult())
 
     # дебаффы реально доезжают до бота, игрока не трогают
@@ -554,6 +554,34 @@ def test_enemy_effects():
     check("закалка: бот прочнее на 25%",
           g.bot_tank.max_hp == int(round(110 * 1.25)),
           "(hp %d)" % g.bot_tank.max_hp)
+
+    # свежие эффекты (v1.9) тоже доезжают до бота
+    g.build = ("medium", "medium", "standard", "none", "none",
+               (), (), ("e_rust", "e_blind", "e_powder", "e_heavy"))
+    g._reset_round()
+    b = g.bot_tank
+    check("ржавые гусеницы: бот ворочается еле-еле",
+          abs(b.mods["turn_mult"] - 0.85) < 1e-9)
+    check("мутный прицел: у бота разброс +6°",
+          abs(b.mods["spread_deg"] - 6.0) < 1e-9)
+    check("сырой порох: снаряды бота ползут",
+          abs(b.mods["bullet_speed_mult"] - 0.85) < 1e-9)
+    check("толстые снаряды: бот бьёт больнее",
+          abs(b.mods["damage_mult"] - 1.15) < 1e-9)
+    # берсерк: сразу два мода и самая жирная цена
+    g.build = ("medium", "medium", "standard", "none", "none",
+               (), (), ("e_frenzy",))
+    g._reset_round()
+    b = g.bot_tank
+    check("берсерк: бот крепкий и злой",
+          abs(b.mods["hp_mult"] - 1.15) < 1e-9
+          and abs(b.mods["damage_mult"] - 1.10) < 1e-9)
+    check("берсерк даёт +15%% очков",
+          abs(g._fate_mult((), (), ("e_frenzy",)) - 1.15) < 1e-9)
+    check("в колоде врага 6 дебаффов и 6 баффов",
+          sum(1 for e in ENEMY_EFFECTS.values() if "score_cut" in e) == 6
+          and sum(1 for e in ENEMY_EFFECTS.values()
+                  if "score_bonus" in e) == 6)
 
 
 # ---------- 3i. ТАБЛИЦА СЧЕТА: топ-10 забегов, место, рекорд ----------

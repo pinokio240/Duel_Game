@@ -300,11 +300,14 @@ class Game:
 
     def _fate_mult(self, curses, blessings, enemy):
         """Множитель очков: проклятья ДОБАВЛЯЮТ 15% каждое (риск платит),
-        облегчения режут 10%, эффекты на врага — по своей цене."""
+        облегчения режут 10%, баффы врагу ДОБАВЛЯЮТ свои %,
+        дебаффы врага — режут."""
         m = (1.0 + SCORE_CURSE_BONUS * len(curses)
              - SCORE_BLESS_PENALTY * len(blessings))
         for key in enemy:
-            m -= ENEMY_EFFECTS[key]["score_cut"]
+            e = ENEMY_EFFECTS[key]
+            m += e.get("score_bonus", 0.0)   # усилить врага — очки капают
+            m -= e.get("score_cut", 0.0)     # ослабить врага — режет счёт
         return max(SCORE_MULT_FLOOR, m)
 
     def _score_mult(self):
@@ -911,7 +914,7 @@ class Game:
             "Ангар — всё выбирается КЛИКОМ мыши: 1800 сборок.",
             "ЖРЕБИЙ: проклятья ослабляют ТОЛЬКО ВАС, но каждое +15% ОЧКОВ.",
             "Облегчения помогают, но режут счёт; без проклятий — максимум одно.",
-            "На врага можно навесить баффы или дебаффы — это тоже режет счёт.",
+            "Баффы врагу ДОБАВЛЯЮТ очки, дебаффы режут — 12 эффектов на выбор.",
             "10 арен, 10 бонусов. Бот собирает бонусы и строит стены!",
         ]
         y = 310
@@ -951,7 +954,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v1.8", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v1.9", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     def _draw_select(self):
@@ -1099,10 +1102,15 @@ class Game:
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 46)))
 
     def _enemy_panel(self, y):
-        """Эффекты НА ВРАГА: баффы и дебаффы боту — любой режет счёт."""
+        """Эффекты НА ВРАГА: дебаффы режут счёт, баффы наоборот ДОБАВЛЯЮТ —
+        усиленный враг платит."""
+        buffs = [EE["score_bonus"] for EE in ENEMY_EFFECTS.values()
+                 if "score_bonus" in EE]
         t = get_font(17).render(
             "НА ВРАГА — клик: взять/снять   (B / N курсор, M — взять)"
-            "   любой эффект режет счёт", True, (255, 170, 80))
+            "   баффы врага +%d%%..+%d%% очков, дебаффы режут"
+            % (round(min(buffs) * 100), round(max(buffs) * 100)),
+            True, (255, 170, 80))
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 28)))
         step = min(180, (SCREEN_W - 140) // len(EE_KEYS))
         box_w, box_h = step - 16, 36
@@ -1123,17 +1131,22 @@ class Game:
         for i, key in enumerate(EE_KEYS):
             item = ENEMY_EFFECTS[key]
             taken = key in self.sel_enemy_keys
+            buff = "score_bonus" in item   # баффы — зелёные, дебаффы — рыжие
+            edge = (120, 230, 150) if buff else (255, 170, 80)
             x = SCREEN_W / 2 + (i - (len(EE_KEYS) - 1) / 2) * step
             box = pygame.Rect(0, 0, box_w, box_h)
             box.center = (int(x), y)
             bg = pygame.Rect(box.x - 3, box.y - 3, box.w + 6, box.h + 6)
-            pygame.draw.rect(self.screen, (62, 44, 26), bg, border_radius=7)
+            pygame.draw.rect(self.screen,
+                             (22, 46, 34) if buff else (62, 44, 26),
+                             bg, border_radius=7)
             if taken:
-                pygame.draw.rect(self.screen, (92, 62, 34), box, border_radius=7)
+                pygame.draw.rect(self.screen,
+                                 (30, 66, 48) if buff else (92, 62, 34),
+                                 box, border_radius=7)
             hov = box.collidepoint(self._mouse)
             pygame.draw.rect(self.screen,
-                             (255, 170, 80) if (taken or hov)
-                             else (60, 70, 110),
+                             edge if (taken or hov) else (60, 70, 110),
                              box, 3 if taken else (2 if hov else 1),
                              border_radius=7)
             if i == self.sel_en:
@@ -1150,15 +1163,19 @@ class Game:
 
         item = ENEMY_EFFECTS[EE_KEYS[self.sel_en]]
         taken = EE_KEYS[self.sel_en] in self.sel_enemy_keys
-        img = get_font(14).render("%s — %s   [счёт -%d%%]   [%s]"
-                                  % (item["name"], item["desc"],
-                                     round(item["score_cut"] * 100),
+        if "score_bonus" in item:
+            price = "[счёт +%d%%]" % round(item["score_bonus"] * 100)
+        else:
+            price = "[счёт -%d%%]" % round(item["score_cut"] * 100)
+        img = get_font(14).render("%s — %s   %s   [%s]"
+                                  % (item["name"], item["desc"], price,
                                      "ВЗЯТО" if taken else "свободно"),
                                   True, (255, 190, 110))
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 28)))
         img2 = get_font(12, bold=False).render(
-            "Максимум %d эффекта; дебафф -10%% очков, бафф -5%% — и это НЕ "
-            "открывает облегчения" % MAX_ENEMY_EFFECTS, True, COL_DIM)
+            "Максимум %d эффектов; баффы врагу ДОБАВЛЯЮТ очки (усиленный враг"
+            " платит), дебаффы режут — облегчений они НЕ открывают"
+            % MAX_ENEMY_EFFECTS, True, COL_DIM)
         self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 44)))
 
     def _choice_panel(self, title, keys, idx, table, y, kind=None):
