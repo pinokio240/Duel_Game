@@ -6,6 +6,7 @@ Headless-тесты DUEL (запуск: python scripts/smoke_test.py).
 """
 import os
 import sys
+import random
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -718,7 +719,7 @@ def test_battle():
     # гараж: 5 панелей + жребий + эффекты на врага рисуются
     g.state = "select"
     g._draw_select()
-    check("ангар: 5 панелей + жребий + враг рисуется", True)
+    check("ангар: 6 панелей (с СНАРЯДОМ) + жребий + враг рисуется", True)
     # V в ангаре берёт проклятье (курсор на первой красной карте)
     g.sel_jt = 0
     g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_v))
@@ -875,6 +876,7 @@ def test_new_weapons():
     sh = Tank(0, 0, 0, "medium", "medium", COL, "shotgun", "none")
     bs = []
     sh.cooldown = 0
+    random.seed(21)   # фиксированный разброс — тест больше не флакает
     sh.try_shoot(bs, fx, snd)
     check("дробовик: залп из 5 дробин",
           len(bs) == 5 and WEAPONS["shotgun"]["pellets"] == 5)
@@ -1728,8 +1730,9 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: семь штук, все с описанием и цветом -----
-    check("в игре СЕМЬ билдов", len(BUILDS) == 7 and len(BUILD_KEYS) == 7)
+    # ----- каталог билдов: восемь штук, все с описанием и цветом (v3.0: +СТРОЙКА ВЕКА) -----
+    check("в игре ВОСЕМЬ билдов (+СТРОЙКА ВЕКА в v3.0)",
+          len(BUILDS) == 8 and len(BUILD_KEYS) == 8)
     check("первый билд — СТРОИТЕЛЬ (5 стен и 2 мины)",
           BUILD_KEYS[0] == "builder"
           and BUILDS["builder"]["items"] == {"barrier": 5, "mine": 2})
@@ -1742,9 +1745,11 @@ def test_builds_v29():
               for b in BUILDS.values()))
 
     # ----- лимиты носимого подняты; бонусы сыплются чаще -----
-    check("ЛИМИТ СТЕН в инвентаре: %d (было 2)" % BARRIER_MAX,
-          BARRIER_MAX == 6)
-    check("мин можно нести %d (было 2)" % PU_MINE_CARRY, PU_MINE_CARRY == 6)
+    check("ЛИМИТ СТЕН в инвентаре: %d (v2.9 было 2 -> 6, v3.0 -> 12)"
+          % BARRIER_MAX,
+          BARRIER_MAX == 12)
+    check("мин можно нести %d (v2.9 было 2 -> 6, v3.0 -> 8)" % PU_MINE_CARRY,
+          PU_MINE_CARRY == 8)
     check("бонусы появляются каждые %.1f с и их до %d" % (POWERUP_INTERVAL,
                                                           POWERUP_MAX),
           POWERUP_INTERVAL == 4.0 and POWERUP_MAX == 9)
@@ -1770,13 +1775,17 @@ def test_builds_v29():
         got = getter(g.player)
         check("билд «%s» выдаёт %r" % (BUILDS[key]["name"], want),
               got == want, "(got %r)" % (got,))
-    # боты ездят БЕЗ билдов
+    # боты ездят СО БИЛДАМИ (v3.0: случайный набор каждому в начатом матче)
     g.sel_build = 0
-    g._reset_round()
-    check("боты не получают билд (у всех пустой боекомплект)",
-          all(b.mine_carried == 0 and b.barrier_charges == 0
-              and b.turret_charges == 0 and b.he_shots == 0
-              for b in g.bots))
+    g.mode = 20
+    g.start_match()
+    names = set(BUILDS[k]["name"] for k in BUILD_KEYS)
+    check("v3.0: КАЖДЫЙ бот получает случайный билд",
+          all(b.build_name in names for b in g.bots))
+    check("v3.0: предметы билда реально в боекомплекте ботов",
+          any(b.mine_carried > 0 or b.barrier_charges > 0
+              or b.turret_charges > 0 or b.he_shots > 0
+              or b.emp_charges > 0 for b in g.bots))
     # билд выдаётся В КАЖДОМ раунде заново
     g.player.barrier_charges = 0
     g._reset_round()
@@ -1789,7 +1798,7 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 8 кнопок билдов («НЕТ» + 7)", len(zones) == 8)
+    check("в ангаре 9 кнопок билдов («НЕТ» + 8, v3.0)", len(zones) == 9)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -1885,6 +1894,10 @@ def test_builds_v29():
     g6._fake_keys = FakeKeys(())
     g6._reset_round()
     g6.arena = Arena(0)
+    # v3.0: у ботов теперь случайные билды — случайный щит «Штурмовика»
+    # исказил бы математику урона, снимаем его у всех
+    for bt in g6.bots:
+        bt.shield_t = 0.0
     p6, b1, b2 = g6.player, g6.bot_tank, g6.bots[1]
     p6.x, p6.y, p6.angle = 300, 540, 0
     b1.x, b1.y = 700, 540
@@ -2093,6 +2106,260 @@ def test_team_modes():
     g5.update(1 / 60.0)
     check("босс добрал 5 побед — матч завершён поражением",
           g5.state == "match_end" and g5.stats["losses"] >= 1)
+
+
+# ---------- 3u. v3.0 «ЗАВАРУШКА»: типы снарядов, билды ботам,
+# постоянные мины/стены, СТРОЙКА ВЕКА, спектатор ----------
+def test_v30_zavarushka():
+    import math
+    from game import Game, FireZone, Barrier
+    from settings import (SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
+                          FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
+                          SHELL_AP_RELOAD_MULT, BUILD_MEGA_SLOW,
+                          BUILDS, BUILD_KEYS, BULLET_DAMAGE, BULLET_SPEED,
+                          BULLET_BOUNCES, SHELL_AP_DAMAGE_MULT,
+                          SHELL_AP_SPEED_MULT, SHELL_HE_DAMAGE_MULT,
+                          SHELL_FIRE_DAMAGE_MULT)
+    from bullet import Bullet
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # ----- каталог типов снарядов -----
+    check("в игре 4 ТИПА СНАРЯДОВ (std/he/ap/fire)",
+          len(SHELL_TYPES) == 4 and SHELL_KEYS == ["std", "he", "ap", "fire"])
+    check("все типы с именем, цветом и описанием",
+          all(s.get("name") and s.get("color") and s.get("desc")
+              for s in SHELL_TYPES.values()))
+
+    # ----- параметры выстрелов каждого типа -----
+    std = Tank(0, 0, 0, "medium", "medium", COL)
+    check("танк по умолчанию стреляет СТАНДАРТНЫМ", std.shell_type == "std")
+    b_std = []
+    std.cooldown = 0
+    std.try_shoot(b_std, fx, snd)
+
+    ap = Tank(0, 0, 0, "medium", "medium", COL, shell_type="ap")
+    b_ap = []
+    ap.cooldown = 0
+    ap.try_shoot(b_ap, fx, snd)
+    check("БРОНЕБОЙНЫЙ: урон x%.2f" % SHELL_AP_DAMAGE_MULT,
+          abs(b_ap[0].damage - b_std[0].damage * SHELL_AP_DAMAGE_MULT) < 0.11,
+          "(%.1f против %.1f)" % (b_ap[0].damage, b_std[0].damage))
+    check("БРОНЕБОЙНЫЙ: снаряд летит быстрее x%.2f" % SHELL_AP_SPEED_MULT,
+          abs(math.hypot(b_ap[0].vx, b_ap[0].vy)
+              - math.hypot(b_std[0].vx, b_std[0].vy) * SHELL_AP_SPEED_MULT) < 1.5)
+    check("БРОНЕБОЙНЫЙ: рикошетов НЕТ", b_ap[0].bounces == 0
+          and b_std[0].bounces == BULLET_BOUNCES)
+    check("БРОНЕБОЙНЫЙ: перезарядка дольше x%.2f" % SHELL_AP_RELOAD_MULT,
+          abs(ap.reload_time - std.reload_time * SHELL_AP_RELOAD_MULT) < 0.004)
+
+    het = Tank(0, 0, 0, "medium", "medium", COL, shell_type="he")
+    b_he = []
+    het.cooldown = 0
+    het.try_shoot(b_he, fx, snd)
+    check("РАЗРЫВНОЙ: каждый выстрел с осколками, урон x%.2f"
+          % SHELL_HE_DAMAGE_MULT,
+          b_he[0].he and abs(b_he[0].damage - b_std[0].damage
+                             * SHELL_HE_DAMAGE_MULT) < 0.11)
+
+    firt = Tank(0, 0, 0, "medium", "medium", COL, shell_type="fire")
+    b_fi = []
+    firt.cooldown = 0
+    firt.try_shoot(b_fi, fx, snd)
+    check("ЗАЖИГАТЕЛЬНЫЙ: снаряд огненный, урон x%.2f" % SHELL_FIRE_DAMAGE_MULT,
+          b_fi[0].element == "fire"
+          and abs(b_fi[0].damage - b_std[0].damage
+                  * SHELL_FIRE_DAMAGE_MULT) < 0.11)
+
+    # ----- бронебойный ПРОБИВАЕТ броню -----
+    m6 = Tank(0, 0, 0, "medium", "medium", COL)   # броня 6
+    hp0 = m6.hp
+    m6.take_damage(30, fx, snd)
+    check("обычный снаряд: броня съедает 6 урона", m6.hp == hp0 - 24)
+    hp1 = m6.hp
+    m6.take_damage(30, fx, snd, pierce=True)
+    check("БРОНЕБОЙНЫЙ: броня НЕ спасает (весь урон проходит)",
+          m6.hp == hp1 - 30)
+
+    # ----- зажигательный: огненная лужа при гибели снаряда -----
+    g = Game()
+    g.mode = 2
+    g._reset_round()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    check("в новом раунде огненных луж нет", len(g.fire_zones) == 0)
+    bz = Bullet(60, 360, 180, g.player, shell="fire")
+    for _ in range(40):
+        bz.update(1 / 60.0, g.arena.walls_only(), tuple(g.tanks), fx, snd)
+        if bz.dead:
+            break
+    check("зажигательный снаряд при гибели оставляет ЛУЖУ",
+          bz.dead and bz.zone is not None)
+    g.fire_zones.append(FireZone(bz.zone[0], bz.zone[1], g.player))
+    bot = g.bot_tank
+    # чужак в луже горит
+    bot.x, bot.y = bz.zone[0], bz.zone[1]
+    hp_bot = bot.hp
+    g.fire_zones[0].step(0.5, g)
+    check("лужа жжёт ЧУЖАКА (броня не спасает)",
+          abs(bot.hp - (hp_bot - FIRE_ZONE_DPS * 0.5)) < 0.01)
+    # владелец в луже цел
+    g.fire_zones[0].x, g.fire_zones[0].y = g.player.x, g.player.y
+    hp_p = g.player.hp
+    g.fire_zones[0].step(0.5, g)
+    check("владелец лужи не горит", g.player.hp == hp_p)
+    # лужа гаснет по таймеру
+    g.fire_zones[0].life = 0.0
+    check("лужа гаснет по таймеру (%g с)" % FIRE_ZONE_LIFE,
+          g.fire_zones[0].expired())
+
+    # ----- мины и стены теперь ПОСТОЯННЫЕ -----
+    g4 = Game()
+    g4.mode = 2
+    g4._reset_round()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.player.mine_carried = 1    # игрок без билда — даём мину руками
+    g4.bot_tank.x += 1200          # уводим бота — «враг рядом» не помешает
+    check("мина ставится", g4._place_mine(g4.player) and len(g4.mines) == 1)
+    for _ in range(int(45 * 60)):
+        g4._mines_step(1 / 60.0)
+    check("МИНА ПОСТОЯННАЯ: через 45 с всё на месте и взведена",
+          len(g4.mines) == 1 and g4.mines[0].armed)
+    br = Barrier(700, 500, 0, g4.player)
+    g4.barriers.append(br)
+    for _ in range(int(35 * 60)):
+        br.update(1 / 60.0)
+    check("СТЕНА ПОСТОЯННАЯ: expired() всегда False и стена цела после 35 с",
+          not br.expired() and br.t > 34.0 and br in g4.barriers)
+
+    # ----- билд «СТРОЙКА ВЕКА»: 10 стен, 3 мины, 2 турели, скорость вдвое -----
+    g5 = Game()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5.sel_build = BUILD_KEYS.index("megabuild")
+    g5._reset_round()
+    p = g5.player
+    check("СТРОЙКА ВЕКА: 10 стен, 3 мины и 2 турели",
+          (p.barrier_charges, p.mine_carried, p.turret_charges) == (10, 3, 2))
+    base = Tank(0, 0, 0, p.ch_key, p.hull_key, COL, p.wpn_key, p.perk_key)
+    check("СТРОЙКА ВЕКА: вы вдвое МЕДЛЕННЕЕ (x%.2f)" % BUILD_MEGA_SLOW,
+          abs(p.speed - base.speed * BUILD_MEGA_SLOW) < 0.6,
+          "(%.1f против %.1f)" % (p.speed, base.speed))
+    check("СТРОЙКА ВЕКА: стены влезают в лимит (12)",
+          p.barrier_charges <= 12)
+    g5b = Game()
+    g5b.state = "select"
+    g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_8))
+    check("клавиша 8 выбирает СТРОЙКУ ВЕКА",
+          g5b.sel_build == BUILD_KEYS.index("megabuild"))
+
+    # ----- боты с билдами и типами снарядов (заварушка в 10на10) -----
+    g6 = Game()
+    g6.mode = 20
+    g6.start_match()
+    check("10на10: 19 ботов", len(g6.bots) == 19)
+    check("ЗАВАРУШКА: у каждого бота свой билд и свой тип снаряда",
+          all(b.build_name in set(BUILDS[k]["name"] for k in BUILD_KEYS)
+              and b.shell_type in SHELL_TYPES for b in g6.bots))
+    check("типы снарядов ботов разнообразны (минимум 3 из 4 на 19 ботов)",
+          len(set(b.shell_type for b in g6.bots)) >= 3)
+    check("веса ботов дают ВСЕ 4 типа снарядов",
+          {Game._random_bot_shell() for _ in range(400)} == set(SHELL_KEYS))
+    g6b = Game()
+    g6b.mode = 7
+    g6b.start_match()
+    check("БОСС по-прежнему без билда (союзник с билдом)",
+          g6b.bots[1].build_name is None and g6b.bots[0].build_name)
+
+    # ----- боты используют ЭМИ-заряды -----
+    g7 = Game()
+    g7.mode = 6
+    g7._reset_round()
+    g7.state = "fight"
+    g7._fake_keys = FakeKeys(())
+    foe = g7.bots[1]                  # вражеский бот
+    foe_ai = g7.ais[1]
+    foe_ai.target = g7.player        # без цели _use_items выходит рано
+    foe.emp_charges = 2
+    foe_ai.emp_cd = 0.0
+    # двое наших рядом с ним: игрок и союзник
+    g7.player.x, g7.player.y = foe.x + 200, foe.y
+    g7.bots[0].x, g7.bots[0].y = foe.x, foe.y + 200
+    foe_ai._use_items(g7, 300)
+    check("бот тратит ЭМИ-заряд, когда рядом двое чужаков",
+          foe.emp_charges == 1 and g7.player.frozen_t > 0
+          and g7.bots[0].frozen_t > 0)
+    g7.player.frozen_t = 0.0
+    foe_ai._use_items(g7, 300)
+    check("повторный разряд не раньше кулдауна",
+          foe.emp_charges == 1 and g7.player.frozen_t == 0.0)
+
+    # ----- СПЕКТАТОР: смотрите за кем хотите -----
+    g8 = Game()
+    g8.mode = 3
+    g8.start_match()
+    g8.state = "fight"
+    g8._fake_keys = FakeKeys(())
+    g8.player._die(fx, snd)
+    g8.update(1 / 60.0)
+    check("после смерти игрока включается спектатор (цель живая)",
+          g8.spec_target is not None and g8.spec_target.alive)
+    first = g8.spec_target
+    g8.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHT))
+    check("→ переключает камеру на следующего бота",
+          g8.spec_target is not None and g8.spec_target is not first
+          and g8.spec_target.alive)
+    g8.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_LEFT))
+    check("← возвращает камеру обратно", g8.spec_target is first)
+    cam0 = (g8.cam[0], g8.cam[1])
+    for _ in range(240):
+        g8._update_cam(1 / 60.0)
+    dist = math.hypot(g8.cam[0] - (first.x - 640), g8.cam[1] - (first.y - 360))
+    check("камера едет ЗА СПЕКТАТОРСКОЙ целью", dist < 60,
+          "(cam %s -> %s, остаток %.0f px)" % (
+              (int(cam0[0]), int(cam0[1])),
+              (int(g8.cam[0]), int(g8.cam[1])), dist))
+    # камера не падает, когда живых не осталось
+    for tk in g8.tanks:
+        if tk is not g8.player:
+            tk.alive = False
+    g8._update_cam(1 / 60.0)
+    check("камера переживает бой без живых", True)
+
+    # ----- панель СНАРЯД в ангаре: кнопки, клавиша X, тултип -----
+    g9 = Game()
+    g9.state = "select"
+    g9.draw()
+    zones = [(r, d) for r, kd, d in g9._click_zones if kd == "shell"]
+    check("в ангаре 4 кнопки ТИПА СНАРЯДА", len(zones) == 4)
+    z_ap = next(r for r, d in zones if d == SHELL_KEYS.index("ap"))
+    g9.on_click(z_ap.center)
+    check("клик выбирает БРОНЕБОЙНЫЙ", g9.sel_shell == 2)
+    g9.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_x))
+    check("клавиша X листает типы по кругу", g9.sel_shell == 3)
+    g9._mouse = z_ap.center
+    g9.draw()
+    check("тултип карточки снаряда показывает название",
+          g9._tooltip is not None
+          and g9._tooltip[0] == SHELL_TYPES["ap"]["name"])
+
+    # ----- HUD показывает билд и тип снаряда -----
+    p.shell_type = "ap"
+    tags = g5._status_tags(p)
+    check("в статусах танка виден БИЛД",
+          "БИЛД: СТРОЙКА ВЕКА" in tags)
+    check("в статусах танка виден ТИП СНАРЯДА",
+          "СНАРЯД: БРОНЕБОЙНЫЙ" in tags)
 
 
 # ---------- 3t. КАРТЫ v2.5: обычные 2752x1548, командные 3888x2187 ----------
@@ -2548,6 +2815,7 @@ if __name__ == "__main__":
     test_big_teams()
     test_army_teams()
     test_builds_v29()
+    test_v30_zavarushka()
     test_bigmap()
     test_points()
     test_score_table()

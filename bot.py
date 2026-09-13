@@ -51,6 +51,7 @@ class BotAI:
         self.drop_cd = 0.0      # пауза между минами
         self.wall_cd = 0.0      # пауза между стенами
         self.turret_cd = 0.0    # v2.9: пауза между турелями
+        self.emp_cd = 0.0       # v3.0: пауза между ЭМИ-зарядами
         # v2.1: цель (в 1на1 — игрок, в FFA — ближайший чужой танк)
         self.target = None
 
@@ -182,6 +183,7 @@ class BotAI:
         self.drop_cd = max(0.0, self.drop_cd - dt)
         self.wall_cd = max(0.0, self.wall_cd - dt)
         self.turret_cd = max(0.0, self.turret_cd - dt)
+        self.emp_cd = max(0.0, self.emp_cd - dt)
         self.pu_t = max(0.0, self.pu_t - dt)
 
         dx, dy = p.x - t.x, p.y - t.y
@@ -254,6 +256,15 @@ class BotAI:
         if (t.turret_charges > 0 and self.turret_cd <= 0 and dist > 420):
             if game._place_turret(t):
                 self.turret_cd = 8.0
+        # v3.0: ЭМИ-заряд (билд «Связист») — если рядом ДВОЕ и больше
+        # чужаков, разряд встает их насмерть: всех заморозит на 2.5 с
+        if t.emp_charges > 0 and self.emp_cd <= 0:
+            near = [o for o in game.tanks
+                    if (o.alive and o is not t
+                        and getattr(o, "team", None) != getattr(t, "team", None)
+                        and (o.x - t.x) ** 2 + (o.y - t.y) ** 2 < 480 ** 2)]
+            if len(near) >= 2 and game._use_emp(t):
+                self.emp_cd = 12.0
 
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""

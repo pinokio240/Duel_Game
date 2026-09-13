@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """Снаряды с рикошетами от стен и препятствий + элементальные заряды.
 v2.9: РАЗРЫВНЫЕ СНАРЯДЫ (he=True) — при гибели снаряд взрывается осколками:
-взрыв задевает всех ЧУЖАКОВ в радиусе (владелец и его союзники целы)."""
+взрыв задевает всех ЧУЖАКОВ в радиусе (владелец и его союзники целы).
+v3.0: ТИПЫ СНАРЯДОВ (shell) — у каждого танка свой тип боеприпаса:
+  "std"  — обычный (как всегда);
+  "he"   — разрывной: тот же осколочный взрыв, что у зарядов «Р»;
+  "ap"   — бронебойный: пробивает броню (pierce), без рикошетов;
+  "fire" — зажигательный: на месте гибели снаряда остаётся ОГНЕННАЯ
+           ЛУЖА (game подхватывает координату из self.zone)."""
 import math
 import pygame
 from settings import (BULLET_SPEED, BULLET_DAMAGE, BULLET_BOUNCES,
@@ -21,7 +27,8 @@ ELEMENT_COLORS = {
 
 class Bullet:
     def __init__(self, x, y, angle, owner, damage=BULLET_DAMAGE, speed_mult=1.0,
-                 element=None, bounces=None, big=False, he=False):
+                 element=None, bounces=None, big=False, he=False,
+                 shell="std", pierce=False):
         rad = math.radians(angle)
         self.x = float(x)
         self.y = float(y)
@@ -37,9 +44,21 @@ class Bullet:
         self.element = element
         # v2.9: разрывной снаряд — взрывается осколками при гибели
         self.he = he
+        # v3.0: тип снаряда (std/he/ap/fire) и пробой брони (бронебойный)
+        self.shell = shell
+        self.pierce = bool(pierce) or shell == "ap"
+        if he or shell == "he":
+            self.he = True
+        # v3.0: зажигательный — куда упасть огненной луже при гибели
+        # (None — лужи не будет); game читает это поле после гибели снаряда
+        self.zone = None
         self.color = ELEMENT_COLORS.get(element, owner.color)
-        if he:
+        if self.he:
             self.color = (255, 120, 50)   # разрывные видны своей оранжевой вспышкой
+        if shell == "ap":
+            self.color = (110, 255, 235)  # бронебойный — ледяной циан
+        elif shell == "fire":
+            self.color = (255, 70, 40)    # зажигательный — алый пламень
         self.big = big or speed_mult > 1.1   # тяжёлые снаряды рисуются крупнее
         self.prev = (self.x, self.y)  # точка в начале кадра (для шлейфа и отскока)
 
@@ -94,6 +113,8 @@ class Bullet:
                         sounds.play("ric")
                     else:
                         effects.burst(self.x, self.y, self.color, 6, 150, 0.3, 3)
+                        if self.shell == "fire":
+                            self.zone = (self.x, self.y)   # лужа и у стены
                         self._he_blast(tanks, effects, sounds)   # разрыв у стены
                         self.dead = True
                     break
@@ -112,7 +133,8 @@ class Bullet:
                         and getattr(t, "team", None) == getattr(self.owner, "team", None)):
                     continue
                 if (t.x - self.x) ** 2 + (t.y - self.y) ** 2 < (t.radius + 4) ** 2:
-                    t.take_damage(self.damage, effects, sounds)
+                    t.take_damage(self.damage, effects, sounds,
+                                  pierce=self.pierce)
                     # РАЗРЫВНЫЕ (v2.9): осколки по чужакам рядом (цель исключена —
                     # прямое попадание уже отболело)
                     self._he_blast(tanks, effects, sounds, direct=t)
@@ -129,6 +151,8 @@ class Bullet:
                             max(1, int(round(self.damage * VAMP_HEAL_RATIO))),
                             effects)
                     effects.burst(self.x, self.y, self.color, 10, 220, 0.4, 3)
+                    if self.shell == "fire":
+                        self.zone = (self.x, self.y)   # огненная лужа на месте попадания
                     self.dead = True
                     return
 

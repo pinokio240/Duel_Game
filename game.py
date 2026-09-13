@@ -17,16 +17,19 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       BOT_COLORS, BOT_NAMES, MODE_NAMES,
                       BULLET_DAMAGE,
                       POWERUP_INTERVAL, POWERUP_MAX, PU_MINE_DAMAGE,
-                      PU_MINE_RADIUS, PU_MINE_MAX, PU_MINE_LIFE, PU_LASER_DAMAGE,
+                      PU_MINE_RADIUS, PU_MINE_MAX, PU_LASER_DAMAGE,
                       PU_LASER_FAN_DAMAGE, PU_LASER_FAN_SPREAD,
                       PU_SMOKE_TIME, PU_SMOKE_RADIUS, PU_FREEZE_TIME,
                       PU_MINE_ENEMY_DIST,
-                      BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
+                      BARRIER_HP, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
                       TURRET_DAMAGE, PU_TURRET_MAX, TURRET_CARRY,
                       TURRET_COOLDOWN,
                       HE_SPLASH_RADIUS,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
+                      SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
+                      FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
+                      SHELL_AP_RELOAD_MULT,
                       SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
                       ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
@@ -140,7 +143,9 @@ def _pt_seg_dist(px, py, p1, p2):
 
 class Barrier:
     """Стена-бустер: ставится танком по Q, имеет 120 прочности,
-    блокирует танки и взгляд, пробивается снарядами, рассыпается со временем."""
+    блокирует танки и взгляд, пробивается снарядами.
+    v3.0: ПОСТОЯННАЯ — таймера жизни больше нет (по просьбе игрока:
+    «почему стены временные? не дело»): лежит, пока её не разнесут."""
 
     def __init__(self, x, y, angle_deg, owner):
         self.x, self.y = float(x), float(y)
@@ -165,16 +170,13 @@ class Barrier:
         self.t += dt
 
     def expired(self):
-        return self.t >= BARRIER_LIFE
+        return False   # v3.0: стены постоянные — гибнут только от снарядов
 
     def draw(self, surf, ox=0, oy=0):
         ax, ay = self.p1[0] + ox, self.p1[1] + oy
         bx, by = self.p2[0] + ox, self.p2[1] + oy
-        blink = self.t > BARRIER_LIFE - 3 and int(self.t * 6) % 2 == 0
         k = self.hp / BARRIER_HP
-        if blink:
-            core = (90, 95, 115)
-        elif k > 0.5:
+        if k > 0.5:
             core = (205, 210, 225)
         else:
             core = (235, 150, 80)   # треснула — вот-вот развалится
@@ -183,6 +185,56 @@ class Barrier:
         pygame.draw.line(surf, core, (ax, ay), (bx, by), 4)
         for px, py in ((ax, ay), (bx, by)):
             pygame.draw.circle(surf, core, (int(px), int(py)), 4)
+
+
+class FireZone:
+    """ОГНЕННАЯ ЛУЖА (v3.0): остаётся на месте гибели зажигательного
+    снаряда. Жжёт всех ЧУЖИХ, кто в неё встал (владелец и его команда
+    целы), урон в секунду — броня не спасает, как у поджога."""
+
+    def __init__(self, x, y, owner):
+        self.x, self.y = float(x), float(y)
+        self.owner = owner
+        self.team = owner.team
+        self.t = 0.0
+        self.life = FIRE_ZONE_LIFE
+        self.radius = FIRE_ZONE_RADIUS
+        self._tick = 0.0
+
+    def expired(self):
+        return self.life <= 0
+
+    def step(self, dt, game):
+        """Тикает уроном по чужим танкам в луже (каждые полсекунды)."""
+        self.t += dt
+        self.life -= dt
+        self._tick -= dt
+        if self._tick > 0:
+            return
+        self._tick = 0.5
+        for t in game.tanks:
+            if (not t.alive or t is self.owner
+                    or getattr(t, "team", None) == self.team):
+                continue
+            if (t.x - self.x) ** 2 + (t.y - self.y) ** 2 < self.radius ** 2:
+                t.hp -= FIRE_ZONE_DPS * 0.5   # броня не спасает — как поджог
+                game.effects.burst(t.x, t.y, (255, 110, 0), 4, 110, 0.3, 3)
+                if t.hp <= 0:
+                    t._die(game.effects, game.sounds)
+
+    def draw(self, surf, ox=0, oy=0):
+        x, y = int(self.x + ox), int(self.y + oy)
+        fade = max(0.25, min(1.0, self.life / FIRE_ZONE_LIFE * 1.4))
+        # пляшущие языки пламени
+        for i in range(6):
+            a = i * 1.047 + self.t * (2.2 if i % 2 else -1.7)
+            rr = self.radius * (0.28 + 0.16 * ((i % 3) / 2.0))
+            fx = x + math.cos(a) * self.radius * 0.42
+            fy = y + math.sin(a) * self.radius * 0.42
+            col = (255, 120 + int(60 * fade), 20) if i % 2 else (255, 180, 40)
+            pygame.draw.circle(surf, col, (int(fx), int(fy)), int(rr))
+        pygame.draw.circle(surf, (255, 70 + int(80 * fade), 20), (x, y),
+                           int(self.radius * 0.5), 2)
 
 
 class Game:
@@ -238,10 +290,16 @@ class Game:
         self.smokes = []
         self.barriers = []
         self.turrets = []               # v2.9: размещаемые турели
+        self.fire_zones = []            # v3.0: огненные лужи зажигательных
         self.powerup_t = POWERUP_INTERVAL * 0.6
         # v2.9: стартовый билд (индекс в BUILD_KEYS или None — «без билда»),
         # выбирается в ангаре; максимум ОДИН билд на танк
         self.sel_build = None
+        # v3.0: тип снаряда (индекс в SHELL_KEYS) — четвертая часть сборки
+        self.sel_shell = 0
+        # v3.0: СПЕКТАТОР — после смерти игрока камера следует за живым
+        # танком; ←/→ (или A/D/Space) переключают, ЗА КЕМ смотреть
+        self.spec_target = None
 
         self._fake_keys = None  # только для автотестов
         # мышь: кликабельные зоны текущего кадра и позиция курсора
@@ -392,7 +450,8 @@ class Game:
             math.degrees(math.atan2(cy - pts[0][1], cx - pts[0][0])),
             self.build[0], self.build[1], COL_P1,
             self.build[2], self.build[3], self.build[4],
-            self.build[5], self.build[6])
+            self.build[5], self.build[6],
+            shell_type=SHELL_KEYS[self.sel_shell])
         self.player.team = 0
         self.tank_team[self.player] = 0
         # эффекты НА ВРАГА: словарь модов для вражеской команды
@@ -452,6 +511,15 @@ class Game:
             self.bots.append(t)
             self.ais.append(BotAI(t, self.difficulty))
             self.tanks.append(t)
+            # v3.0: БОТАМ ТОЖЕ ДАЮТ БИЛДЫ И ТИПЫ СНАРЯДОВ — случайный набор
+            # каждому (кроме БОССА: он и так ходячая крепость). В 10на10
+            # это и есть «заварушка»: у каждого бота свои стены, мины,
+            # турели и свой боеприпас. Выдача только в НАЧАТОМ матче
+            # (bot_builds наполнен в start_match): так раунды без матча
+            # (меню, тесты) остаются детерминированными.
+            if not boss and self.bot_builds:
+                self._apply_build(t, random.randrange(len(BUILD_KEYS)))
+                t.shell_type = self._random_bot_shell()
         self.bot_tank = self.bots[0] if self.bots else None
         self.ai = self.ais[0] if self.ais else None
         # враги — на них капают очки, они дохнут от кнопки и таймера v2.5
@@ -471,12 +539,14 @@ class Game:
         self.smokes = []
         self.barriers = []
         self.turrets = []
+        self.fire_zones = []          # v3.0: огненные лужи с нового раунда
         self.arena.set_dynamic([])
         self.powerup_t = POWERUP_INTERVAL * 0.6
         self.effects.particles.clear()
         self.effects.texts.clear()
         self.con_place = None
         self._apply_build(self.player)   # v2.9: стартовый билд (если выбран)
+        self.spec_target = None          # v3.0: спектатор-камера с начала
         self._cam_snap()          # камера сразу на игрока
 
     def start_match(self):
@@ -495,14 +565,29 @@ class Game:
         self.sounds.play("round")
 
     # ================= жребий: проклятья и облегчения =================
-    def _apply_build(self, t):
+    @staticmethod
+    def _random_bot_shell():
+        """v3.0: случайный тип снаряда для бота (стандарт чаще всех)."""
+        r = random.random()
+        acc = 0.0
+        for key, w in SHELL_BOT_WEIGHTS:
+            acc += w
+            if r < acc:
+                return key
+        return "std"
+
+    def _apply_build(self, t, idx=None):
         """v2.9: выдать танку стартовый билд (в начале КАЖДОГО раунда).
-        Максимум ОДИН билд на танк: sel_build — индекс в BUILD_KEYS или None.
-        Предметы кладутся в боекомплект напрямую (лимиты носимого
-        соблюдены в самих билдах), баффы включаются на старте."""
-        if self.sel_build is None or t is None:
+        Максимум ОДИН билд на танк. v3.0: idx можно передать явно — так
+        боты получают случайные билды (игроку берётся sel_build из ангара).
+        Предметы кладутся в боекомплект напрямую, баффы включаются на
+        старте, «mods» (v3.0, «Стройка века») множат характеристики."""
+        if idx is None:
+            idx = self.sel_build
+        if idx is None or t is None:
             return
-        bd = BUILDS[BUILD_KEYS[self.sel_build]]
+        bd = BUILDS[BUILD_KEYS[idx]]
+        t.build_name = bd["name"]
         for item, n in bd.get("items", {}).items():
             if item == "barrier":
                 t.barrier_charges = min(t.barrier_charges + n, BARRIER_MAX)
@@ -518,6 +603,8 @@ class Game:
                 t.emp_charges = min(t.emp_charges + n, 99)
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
+        for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
+            t.mods[mod] = t.mods.get(mod, 1.0) * val
         self.effects.float_text(t.x, t.y - 78, "БИЛД: %s" % bd["name"],
                                 bd["color"])
 
@@ -714,6 +801,13 @@ class Game:
             elif k in (pygame.K_7, pygame.K_KP7):
                 self.sel_build = 6
                 self.sounds.play("ric")
+            elif k in (pygame.K_8, pygame.K_KP8):
+                self.sel_build = 7                 # v3.0: СТРОЙКА ВЕКА
+                self.sounds.play("ric")
+            elif k == pygame.K_x:
+                # v3.0: ТИП СНАРЯДА — прокрутка по кругу (или клик по панели)
+                self.sel_shell = (self.sel_shell + 1) % len(SHELL_KEYS)
+                self.sounds.play("ric")
             elif k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
                               WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
@@ -732,6 +826,12 @@ class Game:
                     self.con_place = None   # отмена установки бонуса
                 else:
                     self.state = "pause"
+            elif (k in (pygame.K_LEFT, pygame.K_a, pygame.K_SPACE)
+                    and not self.player.alive):
+                self._spec_switch(-1)      # v3.0: спектатор — предыдущий танк
+            elif (k in (pygame.K_RIGHT, pygame.K_d)
+                    and not self.player.alive):
+                self._spec_switch(1)       # v3.0: спектатор — следующий танк
             elif k == pygame.K_q:
                 self._place_barrier(self.player)   # стена-бустер
             elif k == pygame.K_e:
@@ -816,6 +916,9 @@ class Game:
         elif kind == "build":                  # v2.9: выбор билда (макс. один)
             self.sel_build = None if data == self.sel_build else data
             self.sounds.play("ric")
+        elif kind == "shell":                  # v3.0: тип снаряда
+            self.sel_shell = data
+            self.sounds.play("ric")
         elif kind == "kill_all":               # кнопка «УБИТЬ СРАЗУ» (окно v2.5)
             self._kill_all_foes()
         elif kind == "menu_start":
@@ -851,13 +954,35 @@ class Game:
             self.start_match()
 
     # ================= камера большого мира (v2.2) =================
-    def _update_cam(self, dt):
-        """Камера едет за игроком (если он погиб — за живым танком):
-        мир (v2.5: 2752x1548 обычный / 3888x2187 командный) больше окна."""
-        t = self.player if self.player.alive else \
-            next((tk for tk in self.tanks if tk.alive), None)
-        if t is None:
+    def _spec_switch(self, step):
+        """v3.0: СПЕКТАТОР — переключить камеру на предыдущий/следующий
+        живой танк. Включается после смерти игрока: вместо того чтобы
+        пялиться на одного бота, смотрите за КЕМ ХОТИТЕ."""
+        if self.player.alive:
             return
+        alive = [tk for tk in self.tanks if tk.alive]
+        if not alive:
+            return
+        if self.spec_target in alive:
+            i = (alive.index(self.spec_target) + step) % len(alive)
+        else:
+            i = 0
+        self.spec_target = alive[i]
+        self.sounds.play("ric")
+
+    def _update_cam(self, dt):
+        """Камера едет за игроком; после его смерти — СПЕКТАТОРОМ: за живым
+        танком на выбор (v3.0: ←/→ сменить цель, по умолчанию первый живой;
+        раньше был прибит один бот — «почему я слежу за одним ботом?»)."""
+        if self.player.alive:
+            t = self.player
+        else:
+            alive = [tk for tk in self.tanks if tk.alive]
+            if self.spec_target not in alive:
+                self.spec_target = alive[0] if alive else None
+            t = self.spec_target
+            if t is None:
+                return
         tx = min(max(t.x - SCREEN_W / 2, 0.0), self.arena.w - SCREEN_W)
         ty = min(max(t.y - SCREEN_H / 2, 0.0), self.arena.h - SCREEN_H)
         k = min(1.0, dt * 5.0)
@@ -1069,6 +1194,10 @@ class Game:
                 b.update(dt, walls, tuple(self.tanks),
                          self.effects, self.sounds)
             self._bullet_vs_barriers(b)
+        # v3.0: на месте гибели ЗАЖИГАТЕЛЬНОГО снаряда остаётся огненная лужа
+        for b in self.bullets:
+            if b.dead and b.zone:
+                self.fire_zones.append(FireZone(b.zone[0], b.zone[1], b.owner))
         self.bullets = [b for b in self.bullets if not b.dead]
 
         for br in self.barriers[:]:
@@ -1081,6 +1210,10 @@ class Game:
         self._smokes_step(dt)
         self._powerups_step(dt)
         self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
+        # v3.0: огненные лужи жгут чужих и гаснут по таймеру
+        for fz in self.fire_zones:
+            fz.step(dt, self)
+        self.fire_zones = [fz for fz in self.fire_zones if not fz.expired()]
 
         # очки за урон врагам: снаряды, лазер, мины, пожар — 1:1 за HP
         # (в FFA чужие боты, подбившие друг друга, тоже приносят очки)
@@ -1347,11 +1480,10 @@ class Game:
                 return
 
     def _mines_step(self, dt):
+        """Мины (v3.0 — ПОСТОЯННЫЕ: таймера жизни больше нет, лежат,
+        пока не рванут под чужаком)."""
         for m in self.mines[:]:
             m.update(dt)
-            if m.t > PU_MINE_LIFE:
-                self.mines.remove(m)
-                continue
             if not m.armed:
                 continue
             for t in self.tanks:
@@ -1420,6 +1552,8 @@ class Game:
                 m.draw(self.world, ox, oy)
             for br in self.barriers:
                 br.draw(self.world, ox, oy)
+            for fz in self.fire_zones:   # v3.0: огненные лужи под танками
+                fz.draw(self.world, ox, oy)
             for tr in self.turrets:      # v2.9: турели рисуются под танками
                 tr.draw(self.world, ox, oy)
             for b in self.bullets:
@@ -1519,12 +1653,11 @@ class Game:
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
-            "Q — стена (до 6!)   E — мина   R — ТУРЕЛЬ   X — ЭМИ-заряд   БИЛДЫ — в ангаре (7 штук)",
-            "РЕЖИМЫ: 1вс1 · FFA ДО 10 · КОМАНДЫ 2×2…10×10 · 2 ПРОТИВ БОССА.",
-            "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
-            "Бонусы теперь сыпятся ЧАЩЕ (каждые 4 с) и видны на миникарте; есть ТУРЕЛЬ и",
-            "РАЗРЫВНЫЕ снаряды. Кнопка: в FFA — жребий, в командах — суд по живым.",
-            "Консоль читера — Ё (`), работает на любой раскладке.",
+            "Q — стена (до 12!)   E — мина   R — ТУРЕЛЬ   X — ЭМИ-заряд   БИЛДЫ — в ангаре (8 штук)",
+            "СНАРЯДЫ: стандартный · разрывной · бронебойный · зажигательный — у ботов СВОИ.",
+            "БИЛДЫ теперь и У БОТОВ — случайный каждому: заварушка в 10×10! СТРОЙКА ВЕКА:",
+            "10 стен + 3 мины + 2 турели, но вы вдвое медленнее. Мины и стены — ПОСТОЯННЫЕ.",
+            "После смерти — СПЕКТАТОР: ←/→ переключают, за кем смотреть. Консоль читера — Ё (`).",
         ]
         y = 304
         for s in lines:
@@ -1557,7 +1690,8 @@ class Game:
                     6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4", 10: "5×5",
                     11: "FFA×6", 12: "FFA×7", 13: "FFA×8",
                     14: "FFA×9", 15: "FFA×10",
-                    16: "6×6", 17: "7×7", 18: "8×8", 19: "9×9", 20: "10×10"}
+                    16: "6×6", 17: "7×7", 18: "8×8", 19: "9×9",
+                    20: "ЗАВАРУШКА 10×10"}
         gap = 18
         fmode = get_font(16)
 
@@ -1596,13 +1730,16 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.9", True, (60, 66, 95))
-        self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
+        img = get_font(16, bold=False).render("v3.0 · ЗАВАРУШКА", True, (60, 66, 95))
+        self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
+                                                        SCREEN_H - 12)))
 
     # ================= тултипы ангарa =================
     def _tt_for(self, kind, key):
         """Содержимое тултипа для карточки сборки: название, цвет,
         и ЧИТАЕМЫЙ список того, что эта деталь делает."""
+        if kind == "shell":
+            return self._tt_shell(key)
         if kind == "ch":
             c = CHASSIS[key]
             lines = ["Скорость: %d px/с   ·   Разворот: %d°/с" % (c["speed"], c["turn"]),
@@ -1688,6 +1825,9 @@ class Game:
                      "Цена: -%d%% очков за забег"
                      % round(SCORE_BLESS_PENALTY * 100)]
         lines.append("Клик или V — %s" % ("СНЯТЬ (взято)" if taken else "ВЗЯТЬ"))
+        if not is_curse:
+            lines.append("Без проклятий — одно облегчение,"
+                         " каждое проклятье открывает ещё")
         return item["name"], (255, 90, 110) if is_curse else (90, 230, 140), lines
 
     def _tt_enemy(self, key, taken):
@@ -1749,29 +1889,31 @@ class Game:
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
         el = ELEMENTS[EL_KEYS[self.sel_el]]
 
-        # --- пять компактных панелей сборки (v2.9: ужаты, чтобы
-        # вместить ещё и панель БИЛДОВ — «впихиваем невпихуемое»)
+        # --- пять компактных панелей сборки (шаг 60 — ужаты под СНАРЯД) ---
         self._choice_panel("ШАССИ — клик или A / D", CH_KEYS, self.sel_ch,
-                           CHASSIS, 94, "ch")
+                           CHASSIS, 90, "ch")
         self._choice_panel("КОРПУС — клик или W / S", HU_KEYS, self.sel_hu,
-                           HULL, 156, "hu")
+                           HULL, 150, "hu")
         self._choice_panel("ДУЛО — клик или Q / E", WP_KEYS, self.sel_wpn,
-                           WEAPONS, 218, "wpn")
+                           WEAPONS, 210, "wpn")
         self._choice_panel("ПЕРК — клик или Z / C", PK_KEYS, self.sel_pk,
-                           PERKS, 280, "pk")
+                           PERKS, 270, "pk")
         self._choice_panel("СТИХИЯ — клик или F / G", EL_KEYS, self.sel_el,
-                           ELEMENTS, 342, "el")
+                           ELEMENTS, 330, "el")
+
+        # --- v3.0: ТИП СНАРЯДА — чем стреляем (компактная полоса) ---
+        self._shell_panel(396)
 
         # --- БИЛДЫ (v2.9): стартовые наборы, максимум ОДИН на танк ---
-        self._build_panel(400)
+        self._build_panel(446)
 
         # --- жребий: проклятья (+очки) и облегчения (-очки) ---
         mult = self._fate_mult(self.sel_curses, self.sel_blessings,
                                self.sel_enemy_keys)
-        self._fate_panel(456, 492, mult)
+        self._fate_panel(508, 542, mult)
 
         # --- эффекты НА ВРАГА ---
-        self._enemy_panel(580)
+        self._enemy_panel(608)
 
         # итоговые характеристики — с учётом жребия
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
@@ -1782,20 +1924,22 @@ class Game:
                       "Урон: %d    Выстрел: %.2f с"
                       % (preview.speed, preview.max_hp, ch["armor"],
                          round(BULLET_DAMAGE * wp["damage_mult"]
-                               * el["damage_mult"] * preview.mods["damage_mult"]),
+                               * el["damage_mult"] * preview.mods["damage_mult"])
+                         * {"he": 0.80, "ap": 1.30, "fire": 0.85}
+                         .get(SHELL_KEYS[self.sel_shell], 1.0),
                          preview.reload_time))
         if preview.mods["spread_deg"] > 0:
             stats_line += "    Разброс: %d°" % round(preview.mods["spread_deg"])
         img = get_font(18).render(stats_line, True,
                                   (255, 150, 90) if preview.speed < 110 else COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 638)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 648)))
         img = get_font(21).render("Очки за забег: x%.2f      "
                                   "Enter — в бой, Esc — меню (или кнопки ниже)"
                                   % mult, True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 660)))
-        self._button(SCREEN_W / 2 - 95, 694, "В БОЙ ▶", "go_fight",
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 666)))
+        self._button(SCREEN_W / 2 - 95, 696, "В БОЙ ▶", "go_fight",
                      w=270, h=30, fs=18)
-        self._button(SCREEN_W / 2 + 150, 694, "МЕНЮ", "garage_menu",
+        self._button(SCREEN_W / 2 + 150, 696, "МЕНЮ", "garage_menu",
                      w=130, h=30, fs=17)
 
         # превью танка игрока (внизу справа, чтобы не мешать панелям)
@@ -1805,14 +1949,57 @@ class Game:
         # тултип рисуется САМЫМ ПОСЛЕДНИМ — поверх всех панелей и кнопок
         self._draw_tooltip()
 
+    def _shell_panel(self, y):
+        """v3.0: ТИП СНАРЯДА — полоса из 4 кнопок в стиле билдов:
+        чем стреляет главное орудие каждый выстрел. Описание — в
+        подсказке при наведении, прокрутка — клавишей X."""
+        t = get_font(14).render(
+            "СНАРЯД — тип боеприпаса каждого выстрела (клик или X):",
+            True, COL_GOLD)
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 24)))
+        f = get_font(13)
+        gap = 14
+        btns = []
+        for i, key in enumerate(SHELL_KEYS):
+            sc = SHELL_TYPES[key]
+            sel = self.sel_shell == i
+            btns.append((f.render(sc["name"], True,
+                                  COL_TEXT if sel else COL_DIM), i, sc))
+        total = sum(im.get_width() + 22 for im, _, _ in btns) \
+            + gap * (len(btns) - 1)
+        bx = SCREEN_W / 2 - total / 2
+        hov_key = None
+        for im, i, sc in btns:
+            r = pygame.Rect(bx, y - 13, im.get_width() + 22, 26)
+            sel = (i == self.sel_shell)
+            hov = r.collidepoint(self._mouse)
+            if hov:
+                hov_key = i
+            if sel:
+                pygame.draw.rect(self.screen, (40, 52, 96), r, border_radius=8)
+            elif hov:
+                pygame.draw.rect(self.screen, (30, 40, 75), r, border_radius=8)
+            else:
+                bg = pygame.Rect(r.x, r.y - 2, r.w, r.h + 4)
+                pygame.draw.rect(self.screen, (24, 30, 56), bg, border_radius=8)
+            edge = sc["color"] if (sel or hov) else (70, 80, 120)
+            pygame.draw.rect(self.screen, edge, r,
+                             3 if sel else (2 if hov else 1), border_radius=8)
+            self.screen.blit(im, im.get_rect(center=r.center))
+            self._click_zones.append((r, "shell", i))
+            bx += r.w + gap
+        if hov_key is not None:
+            self._tooltip = self._tt_shell(SHELL_KEYS[hov_key])
+
     def _build_panel(self, y):
-        """v2.9: БИЛДЫ — стартовые наборы в один ряд (8 кнопок: «НЕТ»
-        плюс семь билдов). МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому
-        билду заменяет выбор, повторный клик по выбранному снимает.
-        Клавиши 1…7 — билды, 0 — без билда. Билд выдаёт предметы и
-        баффы в начале КАЖДОГО раунда; боты ездят без билдов."""
+        """v2.9: БИЛДЫ — стартовые наборы в один ряд (9 кнопок: «НЕТ»
+        плюс восемь билдов — с v3.0 добавилась «СТРОЙКА ВЕКА»).
+        МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому билду заменяет выбор,
+        повторный клик по выбранному снимает. Клавиши 1…8 — билды,
+        0 — без билда. Билд выдаёт предметы и баффы в начале КАЖДОГО
+        раунда; с v3.0 билды получают и боты (случайный каждому)."""
         t = get_font(16).render(
-            "БИЛД — стартовый набор на каждый раунд (клик; 1…7 — билд, 0 — без):",
+            "БИЛД — стартовый набор на каждый раунд (клик; 1…8 — билд, 0 — без):",
             True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
         f = get_font(13)
@@ -1856,7 +2043,24 @@ class Game:
                 self._tooltip = ("БИЛД «%s»" % bd["name"], bd["color"],
                                  [bd["desc"],
                                   "выдаётся В НАЧАЛЕ каждого раунда",
-                                  "максимум ОДИН билд на танк; боты без билдов"])
+                                  "максимум ОДИН билд на танк",
+                                  "v3.0: боты тоже получают случайные билды"])
+
+    def _tt_shell(self, key):
+        """v3.0: тултип карточки типа снаряда."""
+        sc = SHELL_TYPES[key]
+        lines = [sc["desc"]]
+        if key == "ap":
+            lines.append("урон x%.2f, скорость снаряда x%.2f,"
+                         " перезарядка x%.2f" % (1.30, 1.30, SHELL_AP_RELOAD_MULT))
+        elif key == "he":
+            lines.append("осколки: %d урона всем чужакам в %d px"
+                         % (HE_SPLASH_DAMAGE, HE_SPLASH_RADIUS))
+        elif key == "fire":
+            lines.append("лужа: %g с по %g урона/с, броня не спасает"
+                         % (FIRE_ZONE_LIFE, FIRE_ZONE_DPS))
+        lines.append("тип заряжает каждый выстрел главного орудия")
+        return sc["name"], sc["color"], lines
 
     def _fate_panel(self, y_cur, y_bless, mult):
         """Жребий: 8 проклятий (красные) и 8 облегчений (зелёные).
@@ -1933,32 +2137,28 @@ class Game:
             item, is_curse = BLESSINGS[BL_KEYS[j]], False
             taken = BL_KEYS[j] in self.sel_blessings
         edge = (255, 90, 110) if is_curse else (90, 230, 140)
-        img = get_font(14).render("%s — %s   [%s]"
+        img = get_font(13).render("%s — %s   [%s]"
                                   % (item["name"], item["desc"],
                                      "ВЗЯТО" if taken else "свободно"),
                                   True, edge)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 30)))
-        rule = ("Проклятья ослабляют ТОЛЬКО ВАС, но +%d%% очков каждое (всего %d —"
-                " лимита нет). Облегчения -%d%% очков: без проклятий — одно,"
-                " каждое проклятье открывает ещё. Сейчас x%.2f"
-                % (round(SCORE_CURSE_BONUS * 100), len(CR_KEYS),
-                   round(SCORE_BLESS_PENALTY * 100), mult))
-        img = get_font(12, bold=False).render(rule, True, COL_DIM)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 46)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y_bless + 26)))
+        # v3.0: строка-boilerplate с правилами убрана — правила переехали
+        # в заголовок и в подсказки карт (_tt_fate), место — типу снаряда
 
     def _enemy_panel(self, y):
         """Эффекты НА ВРАГА: дебаффы режут счёт, баффы наоборот ДОБАВЛЯЮТ —
-        усиленный враг платит."""
+        усиленный враг платит. v3.0: ужата (32px карточки, одна подпись,
+        лимитов-строка убрана — «лимитов нет» переехало в заголовок)."""
         buffs = [EE["score_bonus"] for EE in ENEMY_EFFECTS.values()
                  if "score_bonus" in EE]
-        t = get_font(17).render(
+        t = get_font(15).render(
             "НА ВРАГА — клик: взять/снять   (B / N курсор, M — взять)"
-            "   баффы врага +%d%%..+%d%% очков, дебаффы режут"
+            "   ·   лимитов нет: баффы +%d%%..+%d%% очков, дебаффы режут"
             % (round(min(buffs) * 100), round(max(buffs) * 100)),
             True, (255, 170, 80))
-        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 24)))
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 22)))
         step = min(180, (SCREEN_W - 140) // len(EE_KEYS))
-        box_w, box_h = step - 16, 36
+        box_w, box_h = step - 16, 32
         name_f = get_font(12)
 
         def _wrap(name):
@@ -2018,12 +2218,8 @@ class Game:
                                   % (item["name"], item["desc"], price,
                                      "ВЗЯТО" if taken else "свободно"),
                                   True, (255, 190, 110))
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 24)))
-        img2 = get_font(12, bold=False).render(
-            "ЛИМИТА БОЛЬШЕ НЕТ (v2.2) — берите все 12 разом; баффы врагу"
-            " ДОБАВЛЯЮТ очки (усиленный враг платит), дебаффы режут",
-            True, COL_DIM)
-        self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 38)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 20)))
+        # v3.0: нижняя строка-правило убрана — «лимитов нет» теперь в заголовке
 
     def _choice_panel(self, title, keys, idx, table, y, kind=None):
         """Компактная панель выбора: заголовок сверху, карточки в ряд.
@@ -2194,6 +2390,10 @@ class Game:
     def _status_tags(self, t):
         """Статусы танка строкой (общие для HUD игрока и строк ботов)."""
         sfx = []
+        if t.build_name:                       # v3.0: имя стартового билда
+            sfx.append("БИЛД: %s" % t.build_name)
+        if t.shell_type != "std":              # v3.0: тип снаряда
+            sfx.append("СНАРЯД: %s" % SHELL_TYPES[t.shell_type]["name"])
         if t.mag_size > 1:
             sfx.append("ОБОЙМА %d/%d" % (t.mag_ammo, t.mag_size))
         if t.armor:
@@ -2331,6 +2531,14 @@ class Game:
                                                        SCREEN_H - 140)))
             self._button(SCREEN_W / 2, SCREEN_H - 112, "УБИТЬ СРАЗУ", "kill_all",
                          w=210, h=30, fs=15)
+        # v3.0: СПЕКТАТОР — вы мертвы, но смотрите за КЕМ ХОТИТЕ
+        if (not self.player.alive and self.state == "fight"
+                and self.spec_target is not None):
+            nm = self.spec_target.display_name or "БОТ"
+            img = get_font(15).render(
+                "СПЕКТАТОР: %s — ←/→ (A/D) сменить цель" % nm,
+                True, (190, 205, 255))
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 166)))
 
     def _bot_row(self, t, idx, y, compact=False):
         """Компактная строка танка в HUD (v2.1): имя, HP, победы и статусы.
@@ -2428,6 +2636,10 @@ class Game:
         for tr in self.turrets:
             tx, ty = int(x0 + tr.x * k), int(y0 + tr.y * k)
             pygame.draw.rect(self.screen, tr.color, (tx - 2, ty - 2, 4, 4))
+        # v3.0: огненные лужи — оранжевые пятна
+        for fz in self.fire_zones:
+            fx, fy = int(x0 + fz.x * k), int(y0 + fz.y * k)
+            pygame.draw.circle(self.screen, (255, 130, 30), (fx, fy), 2)
         for t in self.tanks:
             if not t.alive:
                 continue

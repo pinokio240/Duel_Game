@@ -18,7 +18,8 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       AIR_PUSH, WATER_CLEAR_DMG, WATER_SLOW_TIME,
                       ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS,
                       PU_MINE_CARRY, BARRIER_MAX,
-                      TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP)
+                      TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP,
+                      SHELL_TYPES, SHELL_AP_RELOAD_MULT)
 from bullet import Bullet, ELEMENT_COLORS
 
 # уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
@@ -30,7 +31,7 @@ class Tank:
     def __init__(self, x, y, angle, chassis_key, hull_key, color,
                  weapon_key="standard", perk_key="none", element_key="none",
                  curses=(), blessings=(), extra_mods=None,
-                 scale=1.0, display_name=None):
+                 scale=1.0, display_name=None, shell_type="std"):
         self.x = float(x)
         self.y = float(y)
         self.angle = float(angle)  # градусы, 0 = вправо, по часовой
@@ -111,6 +112,11 @@ class Tank:
         self.turret_charges = 0    # турели (R) — бонус «Т» или билд «Турельщик»
         self.emp_charges = 0       # носимые ЭМИ-заряды (X) — билд «Связист»
         self.he_shots = 0          # разрывные снаряды — бонус «Р» или билд
+        # v3.0: ТИП СНАРЯДА (std/he/ap/fire) — чем стреляет главное орудие;
+        # у игрока выбирается в ангаре, ботам выдаётся случайный
+        self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"
+        # v3.0: имя стартового билда (для HUD-статусов) — заполнит игра
+        self.build_name = None
         self._sprite = self._make_sprite()
         if self.scale != 1.0:
             self._sprite = pygame.transform.smoothscale(
@@ -149,6 +155,8 @@ class Tank:
     def reload_time(self):
         r = (self.hull["reload"] * self.weapon["reload_mult"]
              * self.perk["reload_mult"] * self.mods["reload_mult"])
+        if self.shell_type == "ap":
+            r *= SHELL_AP_RELOAD_MULT   # v3.0: бронебойный заряжается дольше
         if self.rapid_t > 0:
             r *= PU_RAPID_MULT
         return r
@@ -273,23 +281,38 @@ class Tank:
                * self.elem["damage_mult"] * self.mods["damage_mult"])
         spd = (self.weapon["speed_mult"] * self.elem["speed_mult"]
                * self.mods["bullet_speed_mult"])
+        # v3.0 ТИП СНАРЯДА: множители урона/скорости, свой элемент,
+        # у бронебойного нет рикошетов (он пробивает, а не отскакивает)
+        shell = self.shell_type
+        sc = SHELL_TYPES.get(shell)
+        if sc:
+            dmg *= {"he": 0.80, "ap": 1.30, "fire": 0.85}.get(shell, 1.0)
+            if shell == "ap":
+                spd *= 1.30
         # v2.9 РАЗРЫВНЫЕ: один заряд — один ВЫСТРЕЛ. Разрывным становится
         # ЦЕНТРАЛЬНЫЙ снаряд залпа (у дробовика — первая дробина, у веера —
-        # центральный): иначе дробовик с осколками превращается в артобстрел
-        he = self.he_shots > 0
-        if he:
+        # центральный): иначе дробовик с осколками превращается в артобстрел.
+        # С v3.0 тип «РАЗРЫВНОЙ» делает разрывным каждый выстрел без зарядов.
+        he = self.he_shots > 0 or shell == "he"
+        if self.he_shots > 0:
             self.he_shots -= 1
-        # несколько стихий (консоль): каждый снаряд получает случайную из них
-        elem = random.choice(self.element_keys) if self.element_keys else None
+        # несколько стихий (консоль): каждый снаряд получает случайную из них;
+        # зажигательный снаряд ВСЕГДА огненный (это его суть)
+        if shell == "fire":
+            elem = "fire"
+        else:
+            elem = random.choice(self.element_keys) if self.element_keys else None
         # «Разбитый прицел» разбрасывает снаряды, «Твёрдые руки» лечат прицел
         sp = max(0.0, self.mods["spread_deg"])
         for i, a in enumerate(angles):
             if sp > 0:
                 a = a + random.uniform(-sp, sp)
             bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
-                                  element=elem, bounces=self.bullet_bounces,
+                                  element=elem,
+                                  bounces=(0 if shell == "ap"
+                                           else self.bullet_bounces),
                                   big=self.weapon.get("bigshot", False),
-                                  he=(he and i == 0)))
+                                  he=(he and i == 0), shell=shell))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
         if self.mag_ammo > 1:
             self.mag_ammo -= 1
@@ -310,7 +333,8 @@ class Tank:
         effects.shake(9, 0.4)
         sounds.play("explode")
 
-    def take_damage(self, dmg, effects, sounds):
+    def take_damage(self, dmg, effects, sounds, pierce=False):
+        """pierce=True (v3.0, бронебойный снаряд): броня НЕ сглаживает урон."""
         if not self.alive:
             return
         if self.immune:
@@ -321,7 +345,7 @@ class Tank:
             return
         if self.shield_t > 0:
             dmg *= 0.4
-        dmg = max(5, round(dmg - self.armor))
+        dmg = max(5, round(dmg - (0 if pierce else self.armor)))
         self.hp -= dmg
         self.flash = 0.12
         effects.float_text(self.x, self.y - 36, "-%d" % dmg, (255, 130, 130))
