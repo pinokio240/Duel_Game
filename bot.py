@@ -265,6 +265,10 @@ class BotAI:
                         and (o.x - t.x) ** 2 + (o.y - t.y) ** 2 < 480 ** 2)]
             if len(near) >= 2 and game._use_emp(t):
                 self.emp_cd = 12.0
+        # v3.1: «КРУГОВОЙ АД» (билд) — цель вплотную? Одноразовый залп
+        # из 45 снарядов во все стороны: в упор почти не увернуться
+        if t.nova_charges > 0 and dist < 340 and p.alive:
+            game._fire_nova(t)
 
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""

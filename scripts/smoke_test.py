@@ -1715,7 +1715,7 @@ def test_builds_v29():
                           POWERUP_INTERVAL, POWERUP_MAX,
                           TURRET_LIFE, TURRET_DAMAGE, HE_SPLASH_DAMAGE,
                           BUILD_RAPID_TIME, BUILD_HE_SHOTS, PU_FREEZE_TIME,
-                          PU_TURRET_MAX)
+                          PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT)
     from powerup import PU_INFO
     from bullet import Bullet
     from arena import Arena
@@ -1730,9 +1730,14 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: восемь штук, все с описанием и цветом (v3.0: +СТРОЙКА ВЕКА) -----
-    check("в игре ВОСЕМЬ билдов (+СТРОЙКА ВЕКА в v3.0)",
-          len(BUILDS) == 8 and len(BUILD_KEYS) == 8)
+    # ----- каталог билдов: девять штук, все с описанием и цветом (v3.1: +КРУГОВОЙ АД) -----
+    check("в игре ДЕВЯТЬ билдов (+КРУГОВОЙ АД в v3.1)",
+          len(BUILDS) == 9 and len(BUILD_KEYS) == 9)
+    check("КРУГОВОЙ АД: 45 снарядов, урон x1.10, одноразовый и ТОЛЬКО билд",
+          BUILD_KEYS[-1] == "nova"
+          and BUILDS["nova"]["items"] == {"nova": 1}
+          and NOVA_SHELLS == 45 and abs(NOVA_DAMAGE_MULT - 1.10) < 1e-9
+          and "nova" not in PU_INFO)   # в бонусах на карте не появляется
     check("первый билд — СТРОИТЕЛЬ (5 стен и 2 мины)",
           BUILD_KEYS[0] == "builder"
           and BUILDS["builder"]["items"] == {"barrier": 5, "mine": 2})
@@ -1775,6 +1780,13 @@ def test_builds_v29():
         got = getter(g.player)
         check("билд «%s» выдаёт %r" % (BUILDS[key]["name"], want),
               got == want, "(got %r)" % (got,))
+    # v3.1: КРУГОВОЙ АД — ровно ОДИН заряд нова, второго не бывает
+    g.sel_build = BUILD_KEYS.index("nova")
+    g._reset_round()
+    check("билд «КРУГОВОЙ АД» выдаёт 1 заряд (одноразовый)",
+          g.player.nova_charges == 1 and g.player.build_name == "КРУГОВОЙ АД")
+    check("в описании билда заявлены 45 снарядов и урон x1.10",
+          "45" in BUILDS["nova"]["desc"] and "1.10" in BUILDS["nova"]["desc"])
     # боты ездят СО БИЛДАМИ (v3.0: случайный набор каждому в начатом матче)
     g.sel_build = 0
     g.mode = 20
@@ -1798,7 +1810,7 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 9 кнопок билдов («НЕТ» + 8, v3.0)", len(zones) == 9)
+    check("в ангаре 10 кнопок билдов («НЕТ» + 9, v3.1)", len(zones) == 10)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -2262,6 +2274,9 @@ def test_v30_zavarushka():
     g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_8))
     check("клавиша 8 выбирает СТРОЙКУ ВЕКА",
           g5b.sel_build == BUILD_KEYS.index("megabuild"))
+    g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_9))
+    check("клавиша 9 выбирает КРУГОВОЙ АД",
+          g5b.sel_build == BUILD_KEYS.index("nova"))
 
     # ----- боты с билдами и типами снарядов (заварушка в 10на10) -----
     g6 = Game()
@@ -2384,6 +2399,122 @@ def test_v30_zavarushka():
           "БИЛД: СТРОЙКА ВЕКА" in tags)
     check("в статусах танка виден ТИП СНАРЯДА",
           "СНАРЯД: БРОНЕБОЙНЫЙ" in tags)
+
+
+# ---------- 3u. v3.1: КРУГОВОЙ АД (nova) + HUD-перенос строк ----------
+def test_v31_nova():
+    import math
+    from game import Game, _wrap_tags
+    from effects import get_font
+    from settings import (NOVA_SHELLS, NOVA_DAMAGE_MULT, BULLET_DAMAGE,
+                          BOT_NAMES)
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # ----- сам залп -----
+    g = Game()
+    g.mode = 2
+    g._reset_round()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    p = g.player
+    check("без билда зарядов «Кругового ада» нет", p.nova_charges == 0)
+    check("V без заряда не стреляет", not g._fire_nova(p)
+          and len(g.bullets) == 0)
+    p.nova_charges = 1
+    p.x, p.y = 900, 600
+    check("залп «Кругового ада» прошёл", g._fire_nova(p))
+    check("залп выпустил %d снарядов" % NOVA_SHELLS,
+          len(g.bullets) == NOVA_SHELLS)
+    dmg = round(BULLET_DAMAGE * NOVA_DAMAGE_MULT)
+    check("урон каждого снаряда залпа x%.2f (%d против %d)"
+          % (NOVA_DAMAGE_MULT, dmg, BULLET_DAMAGE),
+          all(abs(b.damage - dmg) < 0.51 for b in g.bullets))
+    check("заряд одноразовый: потрачен, второй раз не стреляет",
+          p.nova_charges == 0 and not g._fire_nova(p)
+          and len(g.bullets) == NOVA_SHELLS)
+    angles = sorted(int(math.degrees(math.atan2(b.vy, b.vx)) % 360)
+                    for b in g.bullets)
+    check("снаряды летят в %d РАЗНЫХ сторон" % NOVA_SHELLS,
+          len(set(angles)) == NOVA_SHELLS)
+    check("владельца свои снаряды залпа не задевают",
+          p.alive and p.hp == p.max_hp)
+    # мёртвый танк не стреляет
+    p.nova_charges = 1
+    p._die(fx, snd)
+    check("мёртвый танк залп не выпускает",
+          not g._fire_nova(p) and p.nova_charges == 1)
+
+    # ----- бот тоже стреляет нова, когда цель вплотную -----
+    g2 = Game()
+    g2.mode = 2
+    g2._reset_round()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    bot, ai = g2.bot_tank, g2.ai
+    bot.nova_charges = 1
+    bot.x, bot.y = 900, 500
+    g2.player.x, g2.player.y = bot.x + 150, bot.y
+    ai.target = g2.player
+    ai._use_items(g2, 150)
+    check("БОТ выпускает «Круговой ад», когда игрок вплотную",
+          bot.nova_charges == 0 and len(g2.bullets) == NOVA_SHELLS)
+    bot.nova_charges = 1
+    g2.player.x, g2.player.y = bot.x + 800, bot.y
+    ai._use_items(g2, 800)
+    check("далеко бот залп бережёт (одноразовый)",
+          bot.nova_charges == 1 and len(g2.bullets) == NOVA_SHELLS)
+
+    # ----- HUD: перенос строк тегов (фикс налезания на полоску врага) -----
+    f = get_font(16, bold=False)
+    many = ["БИЛД: СТРОЙКА ВЕКА", "СНАРЯД: БРОНЕБОЙНЫЙ", "стихия: Огонь",
+            "СТЕНА x12 (Q)", "МИНА x8 (E)", "ТУРЕЛЬ x4 (R)",
+            "ЭМИ-ЗАРЯД x1 (X)", "РАЗРЫВНЫЕ x16", "КРУГОВОЙ АД x1 (V)",
+            "ЩИТ 5", "ЛАЗЕР x2", "ВЕЕР x6", "ТУРБО 3", "СКОРОСТРЕЛ 15"]
+    one_line = f.size("   ".join(many))[0]
+    rows = _wrap_tags(many, f, 540)
+    check("куча активируемых сил — это %d строки, а не %d px лентой"
+          % (len(rows), one_line),
+          len(rows) >= 3 and one_line > 540)
+    check("каждая строка тегов короче 540 px (не налезает на врага)",
+          all(f.size("   ".join(r))[0] <= 540 for r in rows))
+    rows_cap = _wrap_tags(many, f, 540, max_rows=1)
+    check("перенос умеет резаться до одной строки с «…»",
+          len(rows_cap) == 1 and rows_cap[0][-1] == "…")
+    # билд и снаряд — первые теги (золотая строка HUD)
+    tags = g._status_tags(p) if hasattr(p, "build_name") else []
+    p2 = g.player
+    p2.build_name, p2.shell_type = "СТРОЙКА ВЕКА", "ap"
+    tags = g._status_tags(p2)
+    check("БИЛД и СНАРЯД всегда первые в статусах",
+          tags[0].startswith("БИЛД:") and tags[1].startswith("СНАРЯД:"))
+    check("КРУГОВОЙ АД виден в статусах с клавишей V",
+          any("КРУГОВОЙ АД" in s and "(V)" in s for s in tags))
+    # отрисовка HUD с полным боекомплектом не падает
+    p2.barrier_charges, p2.mine_carried = 12, 8
+    p2.turret_charges, p2.he_shots = 4, 16
+    p2.laser_charges, p2.triple = 2, 6
+    g._draw_hud()
+    check("HUD с кучей активируемых сил рисуется без падений", True)
+    # компакт-строки армий с суффиксом билда тоже
+    g3 = Game()
+    g3.mode = 20
+    g3.start_match()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.draw()
+    check("компакт-строки армий рисуются (билд в суффиксе)", True)
+    check("в 10на10 у ботов заполнен build_name для HUD",
+          all(b.build_name for b in g3.bots))
 
 
 # ---------- 3t. КАРТЫ v2.5: обычные 2752x1548, командные 3888x2187 ----------
@@ -2840,6 +2971,7 @@ if __name__ == "__main__":
     test_army_teams()
     test_builds_v29()
     test_v30_zavarushka()
+    test_v31_nova()
     test_bigmap()
     test_points()
     test_score_table()

@@ -112,6 +112,8 @@ class Tank:
         self.turret_charges = 0    # турели (R) — бонус «Т» или билд «Турельщик»
         self.emp_charges = 0       # носимые ЭМИ-заряды (X) — билд «Связист»
         self.he_shots = 0          # разрывные снаряды — бонус «Р» или билд
+        self.nova_charges = 0      # v3.1: «Круговой ад» (V) — только билд,
+        # одноразовый залп из NOVA_SHELLS снарядов во все стороны
         # v3.0: ТИП СНАРЯДА (std/he/ap/fire) — чем стреляет главное орудие;
         # у игрока выбирается в ангаре, ботам выдаётся случайный
         self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"

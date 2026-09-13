@@ -27,6 +27,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       TURRET_COOLDOWN,
                       HE_SPLASH_DAMAGE, HE_SPLASH_RADIUS,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
+                      NOVA_SHELLS, NOVA_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
                       SHELL_AP_RELOAD_MULT,
@@ -235,6 +236,27 @@ class FireZone:
             pygame.draw.circle(surf, col, (int(fx), int(fy)), int(rr))
         pygame.draw.circle(surf, (255, 70 + int(80 * fade), 20), (x, y),
                            int(self.radius * 0.5), 2)
+
+
+def _wrap_tags(tags, font, maxw, max_rows=None):
+    """v3.1: группирует теги статусов в НЕСКОЛЬКО строк не длиннее maxw px
+    (раньше всё склеивалось в одну строку, которая улетала за экран и
+    налезала на блок врага). max_rows — потолок строк: лишнее прячется
+    под «…» (для сжатых строк ботов, где вертикали нет)."""
+    rows, cur = [], []
+    for tg in tags:
+        probe = "   ".join(cur + [tg])
+        if cur and font.size(probe)[0] > maxw:
+            rows.append(cur)
+            cur = [tg]
+        else:
+            cur.append(tg)
+    if cur:
+        rows.append(cur)
+    if max_rows is not None and len(rows) > max_rows:
+        rows = rows[:max_rows]
+        rows[-1] = rows[-1] + ["…"]
+    return rows
 
 
 class Game:
@@ -601,6 +623,8 @@ class Game:
                 t.he_shots = min(t.he_shots + n, 99)
             elif item == "emp":
                 t.emp_charges = min(t.emp_charges + n, 99)
+            elif item == "nova":                 # v3.1: «Круговой ад» — заряд один
+                t.nova_charges = min(t.nova_charges + n, 1)
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
@@ -804,6 +828,9 @@ class Game:
             elif k in (pygame.K_8, pygame.K_KP8):
                 self.sel_build = 7                 # v3.0: СТРОЙКА ВЕКА
                 self.sounds.play("ric")
+            elif k in (pygame.K_9, pygame.K_KP9):
+                self.sel_build = 8                 # v3.1: КРУГОВОЙ АД
+                self.sounds.play("ric")
             elif k == pygame.K_x:
                 # v3.0: ТИП СНАРЯДА — прокрутка по кругу (или клик по панели)
                 self.sel_shell = (self.sel_shell + 1) % len(SHELL_KEYS)
@@ -840,6 +867,8 @@ class Game:
                 self._place_turret(self.player)    # v2.9: турель
             elif k == pygame.K_x:
                 self._use_emp(self.player)         # v2.9: носимый ЭМИ-заряд
+            elif k == pygame.K_v:
+                self._fire_nova(self.player)       # v3.1: КРУГОВОЙ АД (билд)
         elif self.state == "pause":
             if k in (pygame.K_ESCAPE, pygame.K_RETURN):
                 self.state = "fight"
@@ -1443,6 +1472,31 @@ class Game:
         self._emp_blast(t)
         return True
 
+    def _fire_nova(self, t):
+        """v3.1: КРУГОВОЙ АД (V, ТОЛЬКО билд «Круговой ад»): одноразовый
+        залп — NOVA_SHELLS снарядов веером во ВСЕ стороны, урон каждого
+        BULLET_DAMAGE * NOVA_DAMAGE_MULT (x1.10). Заряд всего один и
+        тратится целиком: второй раз до следующего раунда не выстрелит.
+        Снаряды рождаются за габаритом танка — владельца не задевают,
+        союзников не бьют (командные проверки снарядов общие)."""
+        if t is None or not t.alive or t.nova_charges <= 0:
+            return False
+        t.nova_charges -= 1
+        dmg = round(BULLET_DAMAGE * NOVA_DAMAGE_MULT)
+        off = t.radius + 6.0
+        for i in range(NOVA_SHELLS):
+            ang = 360.0 * i / NOVA_SHELLS
+            rad = math.radians(ang)
+            self.bullets.append(Bullet(
+                t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
+                ang, t, damage=dmg))
+        self.effects.ring(t.x, t.y, (255, 60, 110), 130, 0.4)
+        self.effects.burst(t.x, t.y, (255, 60, 110), 26, 380, 0.5, 5)
+        self.effects.shake(4, 0.2)
+        self.sounds.play("explode")
+        self.effects.float_text(t.x, t.y - 60, "КРУГОВОЙ АД!", (255, 60, 110))
+        return True
+
     def _emp_blast(self, t):
         """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
         v2.6.2 — бьёт ТОЛЬКО ЧУЖИХ, союзники подобравшего целы (над
@@ -1730,7 +1784,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.0 · ЗАВАРУШКА", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.1 · КРУГОВОЙ АД", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -1992,14 +2046,14 @@ class Game:
             self._tooltip = self._tt_shell(SHELL_KEYS[hov_key])
 
     def _build_panel(self, y):
-        """v2.9: БИЛДЫ — стартовые наборы в один ряд (9 кнопок: «НЕТ»
-        плюс восемь билдов — с v3.0 добавилась «СТРОЙКА ВЕКА»).
+        """v2.9: БИЛДЫ — стартовые наборы в один ряд (10 кнопок: «НЕТ»
+        плюс девять билдов — с v3.1 добавился «КРУГОВОЙ АД»).
         МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому билду заменяет выбор,
-        повторный клик по выбранному снимает. Клавиши 1…8 — билды,
+        повторный клик по выбранному снимает. Клавиши 1…9 — билды,
         0 — без билда. Билд выдаёт предметы и баффы в начале КАЖДОГО
         раунда; с v3.0 билды получают и боты (случайный каждому)."""
         t = get_font(16).render(
-            "БИЛД — стартовый набор на каждый раунд (клик; 1…8 — билд, 0 — без):",
+            "БИЛД — стартовый набор на каждый раунд (клик; 1…9 — билд, 0 — без):",
             True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
         f = get_font(13)
@@ -2372,16 +2426,17 @@ class Game:
             pygame.draw.rect(self.screen, color, fill, border_radius=4)
         pygame.draw.rect(self.screen, (70, 80, 120), rect, 1, border_radius=4)
 
-    def _build_label(self, t, who=None, color=None, cap=22):
+    def _build_label(self, t, who=None, color=None, cap=22, suffix=""):
         """«ИГРОК — шасси + корпус + дуло + перк + стихия» с автоподбором
         размера шрифта: длинная сборка не должна налезать на центральный счёт.
         Имя можно не передавать — возьмём display_name (СОЮЗНИК, БОСС).
         color (v2.6) перекрашивает строку (командная подсветка HUD).
-        cap (v2.8) — потолок шрифта: в плотных строках армий он мельче."""
+        cap (v2.8) — потолок шрифта: в плотных строках армий он мельче.
+        suffix (v3.1) — хвост строки: в армиях так виден БИЛД бота."""
         who = who or t.display_name or "БОТ"
-        label = "%s — %s + %s + %s + %s + %s" % (
+        label = "%s — %s + %s + %s + %s + %s%s" % (
             who, t.chassis["name"], t.hull["name"], t.weapon["name"],
-            t.perk["name"], t.elem["name"])
+            t.perk["name"], t.elem["name"], suffix)
         size = cap
         while size > 13 and get_font(size).size(label)[0] > 500:
             size -= 1
@@ -2410,6 +2465,8 @@ class Game:
             sfx.append("ЭМИ-ЗАРЯД x%d (X)" % t.emp_charges)
         if t.he_shots > 0:
             sfx.append("РАЗРЫВНЫЕ x%d" % t.he_shots)
+        if t.nova_charges > 0:                 # v3.1: «Круговой ад»
+            sfx.append("КРУГОВОЙ АД x%d (V)" % t.nova_charges)
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
@@ -2548,9 +2605,13 @@ class Game:
         мельче, полоска HP уже, статусы не выводим (они видны на танке и
         в полосе побед внизу) — иначе 19 строк не влезают в экран."""
         # v2.6: в командах строка танка красится цветом стороны
+        # v3.1: в армиях (compact) билд бота теперь ВИДЕН — коротким
+        # суффиксом « · «МИНЁР»» в конце строки (раньше статусы там
+        # не выводились вовсе, и билд было не разглядеть)
+        sfx_suffix = (" · «%s»" % t.build_name) if (compact and t.build_name) else ""
         img = self._build_label(t, t.display_name or BOT_NAMES[idx],
                                 color=self._team_ring_color(t),
-                                cap=13 if compact else 22)
+                                cap=13 if compact else 22, suffix=sfx_suffix)
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y)))
         if compact:
             self._hp_bar(SCREEN_W - 330, y + 15, t, right=True, h=8)
@@ -2564,8 +2625,19 @@ class Game:
         tags.insert(0, "ПОБЕДЫ %d" % wins)
         if self.build[7] and t is not self.player and self.tank_team.get(t) != 0:
             tags.append("ЭФФЕКТЫ ИГРОКА %d" % len(self.build[7]))
-        img = get_font(12, bold=False).render("   ".join(tags), True,
-                                              (160, 200, 255))
+        # v3.1: одна строка со всем списком раньше улетала влево через весь
+        # экран — теперь ужимается шрифтом и при нужде режется с «…»
+        label_txt = "   ".join(tags)
+        fsize = 12
+        while (fsize > 9
+               and get_font(fsize, bold=False).size(label_txt)[0] > 560):
+            fsize -= 1
+        ftags = get_font(fsize, bold=False)
+        if ftags.size(label_txt)[0] > 560:
+            while label_txt and ftags.size(label_txt + "…")[0] > 560:
+                label_txt = label_txt[:-1].rstrip()
+            label_txt += "…"
+        img = ftags.render(label_txt, True, (160, 200, 255))
         self.screen.blit(img, img.get_rect(topright=(SCREEN_W - 70, y + 38)))
 
     def _mini_info(self, t, x, y, right=False, extra=""):
@@ -2584,13 +2656,26 @@ class Game:
         img = get_font(16, bold=False).render(label, True, COL_DIM)
         lx = x - 60 if right else x + 60
         self.screen.blit(img, img.get_rect(midtop=(lx, y + 10)))
-        # эффекты и бонусы (общий список статусов)
+        # эффекты и бонусы (v3.1): БИЛД и СНАРЯД — ВСЕГДА отдельной
+        # золотой строкой (не теряются среди активируемых сил), остальное
+        # переносится по строкам в пределах своей половины экрана —
+        # раньше одна длинная строка налезала на блок врага
         sfx = self._status_tags(t)
         if extra:
             sfx.append(extra)
+        f16 = get_font(16, bold=False)
+        head = [s for s in sfx if s.startswith(("БИЛД:", "СНАРЯД:"))]
+        rest = [s for s in sfx if s not in head]
         row_y = y + 32
-        if sfx:
-            img = get_font(16, bold=False).render("   ".join(sfx), True, (160, 200, 255))
+        if head:
+            img = f16.render("   ".join(head), True, COL_GOLD)
+            if right:
+                self.screen.blit(img, img.get_rect(topright=(x, row_y)))
+            else:
+                self.screen.blit(img, (x, row_y))
+            row_y += 24
+        for row in _wrap_tags(rest, f16, 540):
+            img = f16.render("   ".join(row), True, (160, 200, 255))
             if right:
                 self.screen.blit(img, img.get_rect(topright=(x, row_y)))
             else:
