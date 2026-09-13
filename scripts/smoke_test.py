@@ -106,8 +106,9 @@ def test_elements():
     arena = Arena(0)
 
     # стихии больше НЕТ на карте — она теперь выбирается в ангаре
-    check("на карте 10 бонусов, стихий среди них нет",
-          len(PU_INFO) == 10 and not
+    # (v2.9: бонусов теперь 12 — добавились ТУРЕЛЬ и РАЗРЫВНЫЕ)
+    check("на карте 12 бонусов, стихий среди них нет",
+          len(PU_INFO) == 12 and not
           (set(PU_INFO) & {"fire", "water", "earth", "electric", "air",
                            "ice", "poison", "vamp"}))
 
@@ -1700,6 +1701,303 @@ def test_ffa_big():
           % (seg_w, SCREEN_W), seg_w < SCREEN_W - 40)
 
 
+# ---------- 3x. v2.9: БИЛДЫ, ТУРЕЛИ, РАЗРЫВНЫЕ, ЭМИ-ЗАРЯД, ЛИМИТЫ, F11 ----------
+def test_builds_v29():
+    """v2.9: СЕМЬ стартовых билдов (максимум один на танк) — панель в
+    ангаре, выдача в начале каждого раунда; размещаемые ТУРЕЛИ (R);
+    РАЗРЫВНЫЕ снаряды с осколками; носимый ЭМИ-заряд (X); лимиты стен
+    и мин подняты; бонусы сыплются чаще и видны на миникарте."""
+    import math
+    from game import Game
+    from settings import (BUILDS, BUILD_KEYS, BARRIER_MAX, PU_MINE_CARRY,
+                          POWERUP_INTERVAL, POWERUP_MAX,
+                          TURRET_LIFE, TURRET_DAMAGE, HE_SPLASH_DAMAGE,
+                          BUILD_RAPID_TIME, BUILD_HE_SHOTS, PU_FREEZE_TIME,
+                          PU_TURRET_MAX)
+    from powerup import PU_INFO
+    from bullet import Bullet
+    from arena import Arena
+    from powerup import PowerUp
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    # ----- каталог билдов: семь штук, все с описанием и цветом -----
+    check("в игре СЕМЬ билдов", len(BUILDS) == 7 and len(BUILD_KEYS) == 7)
+    check("первый билд — СТРОИТЕЛЬ (5 стен и 2 мины)",
+          BUILD_KEYS[0] == "builder"
+          and BUILDS["builder"]["items"] == {"barrier": 5, "mine": 2})
+    check("АРТОБСТРЕЛ: 6 вееров и скорострел на 15 с",
+          BUILDS["barrage"]["items"].get("triple") == 6
+          and BUILDS["barrage"]["buffs"]["rapid_t"] == BUILD_RAPID_TIME
+          and BUILD_RAPID_TIME == 15.0)
+    check("все билды с именем, цветом и описанием",
+          all(b.get("name") and b.get("color") and b.get("desc")
+              for b in BUILDS.values()))
+
+    # ----- лимиты носимого подняты; бонусы сыплются чаще -----
+    check("ЛИМИТ СТЕН в инвентаре: %d (было 2)" % BARRIER_MAX,
+          BARRIER_MAX == 6)
+    check("мин можно нести %d (было 2)" % PU_MINE_CARRY, PU_MINE_CARRY == 6)
+    check("бонусы появляются каждые %.1f с и их до %d" % (POWERUP_INTERVAL,
+                                                          POWERUP_MAX),
+          POWERUP_INTERVAL == 4.0 and POWERUP_MAX == 9)
+    check("на карте 12 бонусов: есть ТУРЕЛЬ (Т) и РАЗРЫВНЫЕ (Р)",
+          "turret" in PU_INFO and "he" in PU_INFO
+          and PU_INFO["turret"]["letter"] == "Т"
+          and PU_INFO["he"]["letter"] == "Р")
+
+    # ----- выдача билдов игроку в начале раунда -----
+    g = Game()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    for idx, key, getter, want in (
+            (0, "builder", lambda t: (t.barrier_charges, t.mine_carried), (5, 2)),
+            (1, "barrage", lambda t: (t.triple, t.rapid_t), (6, 15.0)),
+            (2, "miner", lambda t: t.mine_carried, 5),
+            (3, "turrets", lambda t: t.turret_charges, 2),
+            (4, "assault", lambda t: t.shield_t, 5.0),
+            (5, "signal", lambda t: t.emp_charges, 1),
+            (6, "demoman", lambda t: t.he_shots, BUILD_HE_SHOTS)):
+        g.sel_build = idx
+        g._reset_round()
+        got = getter(g.player)
+        check("билд «%s» выдаёт %r" % (BUILDS[key]["name"], want),
+              got == want, "(got %r)" % (got,))
+    # боты ездят БЕЗ билдов
+    g.sel_build = 0
+    g._reset_round()
+    check("боты не получают билд (у всех пустой боекомплект)",
+          all(b.mine_carried == 0 and b.barrier_charges == 0
+              and b.turret_charges == 0 and b.he_shots == 0
+              for b in g.bots))
+    # билд выдаётся В КАЖДОМ раунде заново
+    g.player.barrier_charges = 0
+    g._reset_round()
+    check("билд выдаётся заново в начале каждого раунда",
+          g.player.barrier_charges == 5)
+    g.sel_build = None
+
+    # ----- панель билдов в ангаре: максимум ОДИН, клики и клавиши -----
+    g2 = Game()
+    g2.state = "select"
+    g2.draw()
+    zones = [r for r, kd, d in g2._click_zones if kd == "build"]
+    check("в ангаре 8 кнопок билдов («НЕТ» + 7)", len(zones) == 8)
+    z0 = next(r for r, kd, d in g2._click_zones
+              if kd == "build" and d == 0)
+    g2.on_click(z0.center)
+    check("клик выбирает билд №1 (СТРОИТЕЛЬ)", g2.sel_build == 0)
+    z3 = next(r for r, kd, d in g2._click_zones
+              if kd == "build" and d == 3)
+    g2.on_click(z3.center)
+    check("клик по другому билду ЗАМЕНЯЕТ выбор (макс. один на танк)",
+          g2.sel_build == 3)
+    g2.on_click(z3.center)
+    check("повторный клик снимает билд", g2.sel_build is None)
+    g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_5))
+    check("клавиша 5 выбирает билд №5 (ШТУРМОВИК)", g2.sel_build == 4)
+    g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("клавиша 0 снимает билд", g2.sel_build is None)
+
+    # ----- ТУРЕЛЬ: ставится, стреляет по чужакам, ломается, истекает -----
+    g3 = Game()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3._reset_round()
+    g3.arena = Arena(0)                # фиксированная «Классика»
+    p, bot = g3.player, g3.bot_tank
+    p.x, p.y, p.angle = 400, 540, 0    # смотрит вправо — турель встанет сзади
+    bot.x, bot.y = 900, 540            # в радиусе турели, LOS чистый
+    bot.frozen_t = 60.0                # заморозим — пусть не маневрирует
+    p.turret_charges = 2
+    ok = g3._place_turret(p)
+    check("турель ставится по R (заряд тратится)",
+          ok and len(g3.turrets) == 1 and p.turret_charges == 1)
+    tr = g3.turrets[0]
+    check("турель служит команде владельца", tr.team == p.team
+          and tr.hp > 0)
+    hp0 = bot.hp
+    for _ in range(150):               # 2.5 с: прогрев 0.8 + полёт пули
+        g3.update(1 / 60.0)
+        if bot.hp < hp0:
+            break
+    check("турель САМА нашла и обстреляла чужака (%d урона за выстрел)"
+          % TURRET_DAMAGE, bot.hp < hp0,
+          "(hp %d -> %d)" % (hp0, bot.hp))
+    # свой (союзник) турель не трогает: цель — ТОЛЬКО чужаки
+    g4 = Game()
+    g4.mode = 6
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4._reset_round()
+    g4.arena = Arena(0)
+    g4.player.turret_charges = 1
+    g4._place_turret(g4.player)
+    tr4 = g4.turrets[0]
+    ally = g4.bots[0]
+    ally.x, ally.y = tr4.x + 100, tr4.y          # союзник прямо рядом
+    for f in g4.foes:
+        f.x, f.y = -2000, -2000                   # врагов убрали далеко
+    check("турель НЕ берёт союзника в цель (целей нет)", tr4.aim(g4) is None)
+    for _ in range(120):
+        g4.update(1 / 60.0)
+    check("турель не стреляла вовсе (своих не бьёт)", not g4.bullets
+          and ally.hp == ally.max_hp)
+    # чужой снаряд ломает турель
+    trhp = g4.turrets[0].hp
+    bl = Bullet(g4.turrets[0].x - 60, g4.turrets[0].y, 0, g4.foes[0], damage=30)
+    bl.age = 1.0
+    for _ in range(30):
+        g4._bullets_vs_turrets(bl)
+        if bl.dead:
+            break
+        bl.x += 3
+    check("вражеский снаряд ломает турель", bl.dead
+          and g4.turrets[0].hp < trhp)
+    # лимит на арене и истечение по таймеру
+    g5 = Game()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5._reset_round()
+    g5.arena = Arena(0)
+    g5.player.turret_charges = 9
+    for _ in range(6):
+        g5.player.angle += 30
+        g5._place_turret(g5.player)
+    check("на арене не больше %d турелей владельца" % PU_TURRET_MAX,
+          len(g5.turrets) == PU_TURRET_MAX)
+    g5.turrets[0].t = TURRET_LIFE + 0.1
+    g5._turrets_step(1 / 60.0)
+    check("турель рассыпается по таймеру (%g с)" % TURRET_LIFE,
+          len(g5.turrets) == PU_TURRET_MAX - 1)
+
+    # ----- РАЗРЫВНЫЕ: осколки бьют ЧУЖИХ рядом, свои целы -----
+    g6 = Game()
+    g6.mode = 3                       # нужны ДВА бота: цель и «рядом стоящий»
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    g6._reset_round()
+    g6.arena = Arena(0)
+    p6, b1, b2 = g6.player, g6.bot_tank, g6.bots[1]
+    p6.x, p6.y, p6.angle = 300, 540, 0
+    b1.x, b1.y = 700, 540
+    b2.x, b2.y = 760, 540              # в 60 px от цели — в радиусе осколков
+    hp1, hp2 = b1.hp, b2.hp
+    hb = Bullet(b1.x - 10, b1.y, 0, p6, damage=30, he=True)
+    hb.age = 1.0
+    hb.update(1 / 60.0, g6.arena.walls_only(), tuple(g6.tanks), _Fx(), _Snd())
+    check("разрывной: прямое попадание бьёт как обычный снаряд",
+          abs((hp1 - b1.hp) - max(5, round(30 - b1.armor))) < 0.51)
+    check("разрывной: ОСКОЛКИ задевают чужака рядом (+%d)"
+          % HE_SPLASH_DAMAGE,
+          abs((hp2 - b2.hp) - max(5, round(HE_SPLASH_DAMAGE - b2.armor))) < 0.51,
+          "(урон %.0f)" % (hp2 - b2.hp))
+    # заряды: один выстрел — один заряд; разрывной — только центральный снаряд
+    p6.he_shots = 2
+    p6.cooldown = 0
+    p6.mag_ammo = p6.mag_size
+    bs = []
+    p6.try_shoot(bs, _Fx(), _Snd())
+    check("разрывные тратятся по одному на выстрел", p6.he_shots == 1)
+    check("разрывной у штатной пушки — сам снаряд", bs[0].he)
+    sh = Tank(0, 0, 0, "medium", "medium", COL, "shotgun", "none")
+    sh.he_shots = 1
+    sh.cooldown = 0
+    bs2 = []
+    sh.try_shoot(bs2, _Fx(), _Snd())
+    check("у дробовика осколочная только ПЕРВАЯ дробина",
+          bs2[0].he and sum(1 for b in bs2 if b.he) == 1)
+    # свои не страдают от осколков (команды)
+    g7 = Game()
+    g7.mode = 6
+    g7.state = "fight"
+    g7._fake_keys = FakeKeys(())
+    g7._reset_round()
+    g7.arena = Arena(0)
+    foe7 = g7.foes[0]
+    mate7 = g7.foes[1]
+    foe7.x, foe7.y = 600, 540
+    mate7.x, mate7.y = 660, 540        # напарник врага рядом с целью
+    hp_mate = mate7.hp
+    hb2 = Bullet(foe7.x - 10, foe7.y, 0, g7.player, damage=30, he=True)
+    hb2.age = 1.0
+    hp_player0 = g7.player.hp
+    hp_ally0 = g7.bots[0].hp
+    hb2.update(1 / 60.0, g7.arena.walls_only(), tuple(g7.tanks), _Fx(), _Snd())
+    check("осколки НЕ задевают команду стрелявшего (он и союзник целы)",
+          g7.player.hp == hp_player0 and g7.bots[0].hp == hp_ally0)
+
+    # ----- ЭМИ-ЗАРЯД по X: билд «Связист» -----
+    g8 = Game()
+    g8.state = "fight"
+    g8._fake_keys = FakeKeys(())
+    g8._reset_round()
+    g8.player.emp_charges = 1
+    ok8 = g8._use_emp(g8.player)
+    check("ЭМИ-заряд по X: все боты замерзли, заряд потрачен",
+          ok8 and all(b.frozen_t == PU_FREEZE_TIME for b in g8.bots)
+          and g8.player.emp_charges == 0 and g8.player.frozen_t == 0)
+    check("пустой боекомплект ЭМИ не срабатывает",
+          not g8._use_emp(g8.player))
+    g9 = Game()
+    g9.mode = 6
+    g9.state = "fight"
+    g9._fake_keys = FakeKeys(())
+    g9._reset_round()
+    g9.player.emp_charges = 1
+    g9._use_emp(g9.player)
+    check("ЭМИ-заряд щадит своих (союзник на ходу)",
+          g9.bots[0].frozen_t == 0.0
+          and all(f.frozen_t == PU_FREEZE_TIME for f in g9.foes))
+
+    # ----- ФИКС «маленькой полосочки здоровья» у убитого врага -----
+    g10 = Game()
+    g10.state = "fight"
+    g10._fake_keys = FakeKeys(())
+    g10._reset_round()
+    g10.draw()
+    from settings import SCREEN_W, SCREEN_H
+    # живой бот: полоска заполнена (розовый или красный)
+    col_live = g10.screen.get_at((SCREEN_W - 330 + 130, 99))
+    check("живой враг: полоска HP заполнена",
+          (col_live.r, col_live.g, col_live.b) != (30, 36, 60),
+          "(%s)" % (col_live,))
+    g10.bot_tank.alive = False
+    g10.bot_tank.hp = 0
+    g10.draw()
+    col_dead = g10.screen.get_at((SCREEN_W - 330 + 130, 99))
+    check("убитый враг: ПОЛОСОЧКИ НЕТ (только пустая рамка)",
+          (col_dead.r, col_dead.g, col_dead.b) == (30, 36, 60),
+          "(%s)" % (col_dead,))
+
+    # ----- миникарта с бонусами/минами/турелями и F11 не роняют игру -----
+    g10.powerups.append(PowerUp(g10.player.x + 200, g10.player.y, "turret"))
+    g10.powerups.append(PowerUp(g10.player.x + 260, g10.player.y, "he"))
+    g10.mines.append(__import__("powerup").Mine(g10.player.x, g10.player.y,
+                                                g10.player))
+    g10.draw()
+    check("миникарта рисуется с бонусами, минами и турелями", True)
+    g10.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F11))
+    check("F11 (во весь экран) не роняет игру", True)
+
+    # бонус Т/Р на карте выдаёт боекомплект (консоль тоже — через apply_powerup)
+    g11 = Game()
+    g11.state = "fight"
+    g11._fake_keys = FakeKeys(())
+    g11._reset_round()
+    g11._apply_pickup(g11.player, PowerUp(g11.player.x, g11.player.y, "turret"))
+    g11._apply_pickup(g11.player, PowerUp(g11.player.x, g11.player.y, "he"))
+    check("бонус «ТУРЕЛЬ» даёт заряд (R), «РАЗРЫВНЫЕ» — 6 выстрелов",
+          g11.player.turret_charges == 1 and g11.player.he_shots == 6)
+
+
 # ---------- 3s. КОМАНДНЫЕ РЕЖИМЫ v2.2: 2 на 2 и 2 против БОССА ----------
 def test_team_modes():
     import math
@@ -2249,6 +2547,7 @@ if __name__ == "__main__":
     test_ice_immunity()
     test_big_teams()
     test_army_teams()
+    test_builds_v29()
     test_bigmap()
     test_points()
     test_score_table()

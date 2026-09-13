@@ -23,6 +23,10 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       PU_MINE_ENEMY_DIST,
                       BARRIER_HP, BARRIER_LIFE, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
+                      TURRET_DAMAGE, PU_TURRET_MAX, TURRET_CARRY,
+                      TURRET_COOLDOWN,
+                      HE_SPLASH_RADIUS,
+                      BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       SCORE_CURSE_BONUS, SCORE_BLESS_PENALTY, SCORE_MULT_FLOOR,
                       ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS, VAMP_HEAL_RATIO,
                       SCORE_ROUND_WIN, SCORE_ROUND_DRAW, SCORE_MATCH_WIN,
@@ -32,6 +36,8 @@ from arena import Arena, LAYOUTS, WALL_T
 from tank import Tank
 from bot import BotAI, random_build
 from powerup import PowerUp, Mine, PU_INFO
+from turret import Turret
+from bullet import Bullet
 from effects import Effects, get_font
 from sound import SoundBank
 
@@ -231,7 +237,11 @@ class Game:
         self.mines = []
         self.smokes = []
         self.barriers = []
+        self.turrets = []               # v2.9: размещаемые турели
         self.powerup_t = POWERUP_INTERVAL * 0.6
+        # v2.9: стартовый билд (индекс в BUILD_KEYS или None — «без билда»),
+        # выбирается в ангаре; максимум ОДИН билд на танк
+        self.sel_build = None
 
         self._fake_keys = None  # только для автотестов
         # мышь: кликабельные зоны текущего кадра и позиция курсора
@@ -460,11 +470,13 @@ class Game:
         self.mines = []
         self.smokes = []
         self.barriers = []
+        self.turrets = []
         self.arena.set_dynamic([])
         self.powerup_t = POWERUP_INTERVAL * 0.6
         self.effects.particles.clear()
         self.effects.texts.clear()
         self.con_place = None
+        self._apply_build(self.player)   # v2.9: стартовый билд (если выбран)
         self._cam_snap()          # камера сразу на игрока
 
     def start_match(self):
@@ -483,6 +495,32 @@ class Game:
         self.sounds.play("round")
 
     # ================= жребий: проклятья и облегчения =================
+    def _apply_build(self, t):
+        """v2.9: выдать танку стартовый билд (в начале КАЖДОГО раунда).
+        Максимум ОДИН билд на танк: sel_build — индекс в BUILD_KEYS или None.
+        Предметы кладутся в боекомплект напрямую (лимиты носимого
+        соблюдены в самих билдах), баффы включаются на старте."""
+        if self.sel_build is None or t is None:
+            return
+        bd = BUILDS[BUILD_KEYS[self.sel_build]]
+        for item, n in bd.get("items", {}).items():
+            if item == "barrier":
+                t.barrier_charges = min(t.barrier_charges + n, BARRIER_MAX)
+            elif item == "mine":
+                t.mine_carried = min(t.mine_carried + n, 99)
+            elif item == "turret":
+                t.turret_charges = min(t.turret_charges + n, TURRET_CARRY)
+            elif item == "triple":
+                t.triple += n
+            elif item == "he":
+                t.he_shots = min(t.he_shots + n, 99)
+            elif item == "emp":
+                t.emp_charges = min(t.emp_charges + n, 99)
+        for buff, val in bd.get("buffs", {}).items():
+            setattr(t, buff, val)
+        self.effects.float_text(t.x, t.y - 78, "БИЛД: %s" % bd["name"],
+                                bd["color"])
+
     def _bless_cap(self):
         """Сколько облегчений можно взять: 1 + каждое проклятье."""
         return 1 + len(self.sel_curses)
@@ -535,6 +573,14 @@ class Game:
         if e.type != pygame.KEYDOWN:
             return
         k = e.key
+        # ----- ПОЛНОЭКРАННЫЙ РЕЖИМ (v2.9): F11 работает ВЕЗДЕ — в меню,
+        # ангаре, бою, паузе и таблице. pygame сам разворачивает окно.
+        if k == pygame.K_F11:
+            try:
+                pygame.display.toggle_fullscreen()
+            except Exception:
+                pass        # headless/dummy-драйвер — молча пропускаем
+            return
         # ----- КОНСОЛЬ РАЗРАБОТЧИКА: Ё (`) открывает и закрывает.
         # v2.5: на РУССКОЙ раскладке Windows Ё не даёт K_BACKQUOTE —
         # ловим и сканкод клавиши, и символ (работает на любой раскладке)
@@ -644,6 +690,30 @@ class Game:
             elif k == pygame.K_m:
                 self._toggle_enemy(self.sel_en)   # эффект НА ВРАГА
                 self.sounds.play("ric")
+            elif k in (pygame.K_0, pygame.K_KP0):
+                self.sel_build = None             # v2.9: без билда
+                self.sounds.play("ric")
+            elif k in (pygame.K_1, pygame.K_KP1):
+                self.sel_build = 0
+                self.sounds.play("ric")
+            elif k in (pygame.K_2, pygame.K_KP2):
+                self.sel_build = 1
+                self.sounds.play("ric")
+            elif k in (pygame.K_3, pygame.K_KP3):
+                self.sel_build = 2
+                self.sounds.play("ric")
+            elif k in (pygame.K_4, pygame.K_KP4):
+                self.sel_build = 3
+                self.sounds.play("ric")
+            elif k in (pygame.K_5, pygame.K_KP5):
+                self.sel_build = 4
+                self.sounds.play("ric")
+            elif k in (pygame.K_6, pygame.K_KP6):
+                self.sel_build = 5
+                self.sounds.play("ric")
+            elif k in (pygame.K_7, pygame.K_KP7):
+                self.sel_build = 6
+                self.sounds.play("ric")
             elif k in (pygame.K_RETURN, pygame.K_SPACE):
                 self.build = (CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu],
                               WP_KEYS[self.sel_wpn], PK_KEYS[self.sel_pk],
@@ -666,6 +736,10 @@ class Game:
                 self._place_barrier(self.player)   # стена-бустер
             elif k == pygame.K_e:
                 self._place_mine(self.player)      # мина руками
+            elif k == pygame.K_r:
+                self._place_turret(self.player)    # v2.9: турель
+            elif k == pygame.K_x:
+                self._use_emp(self.player)         # v2.9: носимый ЭМИ-заряд
         elif self.state == "pause":
             if k in (pygame.K_ESCAPE, pygame.K_RETURN):
                 self.state = "fight"
@@ -738,6 +812,9 @@ class Game:
             self.sounds.play("ric")
         elif kind == "menu_mode":              # режим боя: 2..7 танков/команды
             self.mode = data
+            self.sounds.play("ric")
+        elif kind == "build":                  # v2.9: выбор билда (макс. один)
+            self.sel_build = None if data == self.sel_build else data
             self.sounds.play("ric")
         elif kind == "kill_all":               # кнопка «УБИТЬ СРАЗУ» (окно v2.5)
             self._kill_all_foes()
@@ -987,6 +1064,8 @@ class Game:
         for b in self.bullets:
             self._bullet_vs_barriers(b)
             if not b.dead:
+                self._bullets_vs_turrets(b)   # v2.9: чужие снаряды ломают турели
+            if not b.dead:
                 b.update(dt, walls, tuple(self.tanks),
                          self.effects, self.sounds)
             self._bullet_vs_barriers(b)
@@ -1001,6 +1080,7 @@ class Game:
         self._mines_step(dt)
         self._smokes_step(dt)
         self._powerups_step(dt)
+        self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
 
         # очки за урон врагам: снаряды, лазер, мины, пожар — 1:1 за HP
         # (в FFA чужие боты, подбившие друг друга, тоже приносят очки)
@@ -1147,6 +1227,107 @@ class Game:
         self.effects.float_text(t.x, t.y - 54, "ЗДЕСЬ НЕ ПОСТАВИТЬ", (255, 90, 90))
         return False
 
+    def _place_turret(self, t):
+        """v2.9: ТУРЕЛЬ ставится по R чуть позади танка — сама ищет и
+        бьёт ближайшего чужака. Нельзя ставить в стену/танк. Лимит
+        PU_TURRET_MAX турелей одного владельца на арене: лишняя —
+        старейшая рассыпается."""
+        if t.turret_charges <= 0:
+            return False
+        rad = math.radians(t.angle)
+        bx, by = t.x - math.cos(rad) * 60, t.y - math.sin(rad) * 60
+        # пробуем позади танка, потом под собой и чуть вперёд
+        ok = None
+        for cx, cy in ((bx, by), (t.x, t.y),
+                       (t.x + math.cos(rad) * 50, t.y + math.sin(rad) * 50)):
+            if self.arena.circle_collides(cx, cy, 16):
+                continue
+            if any(o.alive and (o.x - cx) ** 2 + (o.y - cy) ** 2
+                   < (o.radius + 14) ** 2 for o in self.tanks if o is not t):
+                continue
+            ok = (cx, cy)
+            break
+        if ok is None:
+            self.effects.float_text(t.x, t.y - 54, "ЗДЕСЬ НЕ ПОСТАВИТЬ",
+                                    (255, 90, 90))
+            return False
+        own = [tr for tr in self.turrets if tr.owner is t and tr.alive]
+        if len(own) >= PU_TURRET_MAX:
+            self.turrets.remove(own[0])
+        t.turret_charges -= 1
+        self.turrets.append(Turret(ok[0], ok[1], t))
+        self.effects.burst(ok[0], ok[1], t.color, 8, 150, 0.3, 3)
+        self.sounds.play("mine")
+        return True
+
+    def _turrets_step(self, dt):
+        """v2.9: турели тикают, ищут цель и стреляют. Снаряд турели —
+        обычный Bullet с owner=турель (у неё есть team/color/radius)."""
+        for tr in self.turrets[:]:
+            tr.update(dt)
+            if tr.expired():
+                self.turrets.remove(tr)
+                self.effects.burst(tr.x, tr.y, tr.color, 10, 160, 0.4, 3)
+                continue
+            if tr.cd > 0:
+                continue
+            target = tr.aim(self)
+            if target is None:
+                continue
+            # маленькое упреждение: чуть опережаем цель по её курсу
+            ang = math.degrees(math.atan2(target.y - tr.y, target.x - tr.x))
+            tr.angle = ang
+            tr.cd = TURRET_COOLDOWN
+            rad = math.radians(ang)
+            self.bullets.append(Bullet(
+                tr.x + math.cos(rad) * 20, tr.y + math.sin(rad) * 20,
+                ang, tr, damage=TURRET_DAMAGE))
+            self.effects.burst(tr.x + math.cos(rad) * 22,
+                               tr.y + math.sin(rad) * 22, tr.light,
+                               4, 110, 0.15, 2)
+            self.sounds.play("shoot")
+
+    def _bullets_vs_turrets(self, b):
+        """v2.9: вражеские снаряды пробивают турели (свои пролетают)."""
+        if b.dead:
+            return
+        for tr in self.turrets:
+            if not tr.alive or b.owner is tr:
+                continue
+            if getattr(b.owner, "team", None) == tr.team:
+                continue   # снаряд союзной команды турель не трогает
+            if (tr.x - b.x) ** 2 + (tr.y - b.y) ** 2 < (tr.radius + 4) ** 2:
+                tr.take_damage(b.damage, self.effects, self.sounds)
+                b.dead = True
+                return
+
+    def _use_emp(self, t):
+        """v2.9: носимый ЭМИ-заряд (X, билд «Связист»): тот же blast, что
+        у бонуса ЭМИ — валит всех ЧУЖИХ, свои остаются на ходу."""
+        if t.emp_charges <= 0 or not t.alive:
+            return False
+        t.emp_charges -= 1
+        self._emp_blast(t)
+        return True
+
+    def _emp_blast(self, t):
+        """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
+        v2.6.2 — бьёт ТОЛЬКО ЧУЖИХ, союзники подобравшего целы (над
+        ними всплывает «СВОИ!»). В FFA у каждого танка своя команда,
+        поэтому там встают все, кроме владельца."""
+        info = PU_INFO["freeze"]
+        my = self.tank_team.get(t)
+        for o in self.tanks:
+            if o is t or not o.alive:
+                continue
+            if my is not None and self.tank_team.get(o) == my:
+                self.effects.float_text(o.x, o.y - 54, "СВОИ!",
+                                        TEAM_ALLY_COLOR)
+                continue
+            o.frozen_t = PU_FREEZE_TIME
+            self.effects.float_text(o.x, o.y - 54, "ЭМИ!", info["color"])
+        self.sounds.play("freeze")
+
     def _bullet_vs_barriers(self, b):
         """Снаряд врезался в стену-барьер: стена теряет прочность."""
         if b.dead:
@@ -1211,22 +1392,9 @@ class Game:
             self.smokes.append(Smoke(t.x, t.y))
             self.sounds.play("smoke")
         elif pu.kind == "freeze":
-            # v2.6.2: ЭМИ бьёт ТОЛЬКО ЧУЖИХ — союзники подобравшего
-            # остаются на ходу (над ними всплывает «СВОИ!»). В FFA у
-            # каждого танка своя команда, поэтому там по-прежнему
-            # встают все, кроме взявшего бонус.
-            my = self.tank_team.get(t)
-            for o in self.tanks:
-                if o is t or not o.alive:
-                    continue
-                if my is not None and self.tank_team.get(o) == my:
-                    self.effects.float_text(o.x, o.y - 54, "СВОИ!",
-                                            TEAM_ALLY_COLOR)
-                    continue
-                o.frozen_t = PU_FREEZE_TIME
-                self.effects.float_text(o.x, o.y - 54, "ЭМИ!",
-                                        info["color"])
-            self.sounds.play("freeze")
+            # v2.6.2: ЭМИ бьёт ТОЛЬКО ЧУЖИХ — общая логика с носимым
+            # зарядом (X, билд «Связист») вынесена в _emp_blast
+            self._emp_blast(t)
         else:
             # мина и стена носятся в боекомплекте (E / Q) — всё в apply_powerup
             t.apply_powerup(pu.kind)
@@ -1252,6 +1420,8 @@ class Game:
                 m.draw(self.world, ox, oy)
             for br in self.barriers:
                 br.draw(self.world, ox, oy)
+            for tr in self.turrets:      # v2.9: турели рисуются под танками
+                tr.draw(self.world, ox, oy)
             for b in self.bullets:
                 b.draw(self.world, ox, oy)
             for t in reversed(self.tanks):   # игрок рисуется поверх ботов
@@ -1348,19 +1518,19 @@ class Game:
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
-            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел",
-            "Q — стена   E — мина   Лазер + Веер = ЛАЗЕРНЫЙ ВЕЕР!",
+            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
+            "Q — стена (до 6!)   E — мина   R — ТУРЕЛЬ   X — ЭМИ-заряд   БИЛДЫ — в ангаре (7 штук)",
             "РЕЖИМЫ: 1вс1 · FFA ДО 10 · КОМАНДЫ 2×2…10×10 · 2 ПРОТИВ БОССА.",
             "Команды строятся шеренгами. 16 арен, рандом каждый раунд, камера и миникарта.",
-            "После смерти боты до 180 с выясняют победителя; кнопка: в FFA — жребий,"
-            " в командах — суд по живым (перевес 2+ танков).",
-            "Неуязвимости больше нет. Консоль читера — Ё (`), работает на любой раскладке.",
+            "Бонусы теперь сыпятся ЧАЩЕ (каждые 4 с) и видны на миникарте; есть ТУРЕЛЬ и",
+            "РАЗРЫВНЫЕ снаряды. Кнопка: в FFA — жребий, в командах — суд по живым.",
+            "Консоль читера — Ё (`), работает на любой раскладке.",
         ]
-        y = 306
+        y = 304
         for s in lines:
             img = get_font(21, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
-            y += 30
+            y += 28
         # выбор сложности (1/2/3 или клик)
         y += 6
         img = get_font(20, bold=False).render("Сложность бота (1/2/3 или клик):",
@@ -1381,7 +1551,7 @@ class Game:
         # раскладка динамическая, шрифт 16, зазор 16
         y += 40
         img = get_font(20, bold=False).render(
-            "Режим боя (клик; F2–F10 — горячие клавиши):", True, COL_DIM)
+            "Режим боя (клик; F2–F10):", True, COL_DIM)
         self.screen.blit(img, img.get_rect(midright=(SCREEN_W / 2 - 120, y)))
         mode_lbl = {2: "1×1", 3: "1×1×1", 4: "1×1×1×1", 5: "1×1×1×1×1",
                     6: "2×2", 7: "2×БОСС", 8: "3×3", 9: "4×4", 10: "5×5",
@@ -1426,7 +1596,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v2.8", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v2.9", True, (60, 66, 95))
         self.screen.blit(img, (SCREEN_W - 60, SCREEN_H - 34))
 
     # ================= тултипы ангарa =================
@@ -1579,25 +1749,29 @@ class Game:
         wp = WEAPONS[WP_KEYS[self.sel_wpn]]
         el = ELEMENTS[EL_KEYS[self.sel_el]]
 
-        # --- пять компактных панелей сборки ---
+        # --- пять компактных панелей сборки (v2.9: ужаты, чтобы
+        # вместить ещё и панель БИЛДОВ — «впихиваем невпихуемое»)
         self._choice_panel("ШАССИ — клик или A / D", CH_KEYS, self.sel_ch,
-                           CHASSIS, 96, "ch")
+                           CHASSIS, 94, "ch")
         self._choice_panel("КОРПУС — клик или W / S", HU_KEYS, self.sel_hu,
-                           HULL, 162, "hu")
+                           HULL, 156, "hu")
         self._choice_panel("ДУЛО — клик или Q / E", WP_KEYS, self.sel_wpn,
-                           WEAPONS, 228, "wpn")
+                           WEAPONS, 218, "wpn")
         self._choice_panel("ПЕРК — клик или Z / C", PK_KEYS, self.sel_pk,
-                           PERKS, 294, "pk")
+                           PERKS, 280, "pk")
         self._choice_panel("СТИХИЯ — клик или F / G", EL_KEYS, self.sel_el,
-                           ELEMENTS, 360, "el")
+                           ELEMENTS, 342, "el")
+
+        # --- БИЛДЫ (v2.9): стартовые наборы, максимум ОДИН на танк ---
+        self._build_panel(400)
 
         # --- жребий: проклятья (+очки) и облегчения (-очки) ---
         mult = self._fate_mult(self.sel_curses, self.sel_blessings,
                                self.sel_enemy_keys)
-        self._fate_panel(432, 468, mult)
+        self._fate_panel(456, 492, mult)
 
         # --- эффекты НА ВРАГА ---
-        self._enemy_panel(558)
+        self._enemy_panel(580)
 
         # итоговые характеристики — с учётом жребия
         preview = Tank(0, 0, 0, CH_KEYS[self.sel_ch], HU_KEYS[self.sel_hu], COL_P1,
@@ -1614,15 +1788,15 @@ class Game:
             stats_line += "    Разброс: %d°" % round(preview.mods["spread_deg"])
         img = get_font(18).render(stats_line, True,
                                   (255, 150, 90) if preview.speed < 110 else COL_TEXT)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 620)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 638)))
         img = get_font(21).render("Очки за забег: x%.2f      "
                                   "Enter — в бой, Esc — меню (или кнопки ниже)"
                                   % mult, True, COL_P1)
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 649)))
-        self._button(SCREEN_W / 2 - 95, 690, "В БОЙ ▶", "go_fight",
-                     w=270, h=32, fs=18)
-        self._button(SCREEN_W / 2 + 150, 690, "МЕНЮ", "garage_menu",
-                     w=130, h=32, fs=17)
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 660)))
+        self._button(SCREEN_W / 2 - 95, 694, "В БОЙ ▶", "go_fight",
+                     w=270, h=30, fs=18)
+        self._button(SCREEN_W / 2 + 150, 694, "МЕНЮ", "garage_menu",
+                     w=130, h=30, fs=17)
 
         # превью танка игрока (внизу справа, чтобы не мешать панелям)
         img = pygame.transform.scale_by(preview._sprite, 1.6)
@@ -1630,6 +1804,59 @@ class Game:
 
         # тултип рисуется САМЫМ ПОСЛЕДНИМ — поверх всех панелей и кнопок
         self._draw_tooltip()
+
+    def _build_panel(self, y):
+        """v2.9: БИЛДЫ — стартовые наборы в один ряд (8 кнопок: «НЕТ»
+        плюс семь билдов). МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому
+        билду заменяет выбор, повторный клик по выбранному снимает.
+        Клавиши 1…7 — билды, 0 — без билда. Билд выдаёт предметы и
+        баффы в начале КАЖДОГО раунда; боты ездят без билдов."""
+        t = get_font(16).render(
+            "БИЛД — стартовый набор на каждый раунд (клик; 1…7 — билд, 0 — без):",
+            True, COL_GOLD)
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
+        f = get_font(13)
+        gap = 10
+        btns = [(f.render("НЕТ", True,
+                          COL_TEXT if self.sel_build is None else COL_DIM), None)]
+        for i, key in enumerate(BUILD_KEYS):
+            sel = self.sel_build == i
+            btns.append((f.render(BUILDS[key]["name"], True,
+                                  COL_TEXT if sel else COL_DIM), i))
+        total = sum(im.get_width() + 18 for im, _ in btns) + gap * (len(btns) - 1)
+        bx = SCREEN_W / 2 - total / 2.0
+        hov_any, hov_bd = False, None
+        for im, i in btns:
+            r = pygame.Rect(bx, y - 13, im.get_width() + 18, 26)
+            sel = (i == self.sel_build)
+            hov = r.collidepoint(self._mouse)
+            if hov:
+                hov_any, hov_bd = True, i
+            if sel:
+                pygame.draw.rect(self.screen, (40, 52, 96), r, border_radius=8)
+            elif hov:
+                pygame.draw.rect(self.screen, (30, 40, 75), r, border_radius=8)
+            else:
+                bg = pygame.Rect(r.x, r.y - 2, r.w, r.h + 4)
+                pygame.draw.rect(self.screen, (24, 30, 56), bg, border_radius=8)
+            edge = BUILDS[BUILD_KEYS[i]]["color"] if (i is not None and
+                                                      (sel or hov)) else (70, 80, 120)
+            pygame.draw.rect(self.screen, edge, r,
+                             3 if sel else (2 if hov else 1), border_radius=8)
+            self.screen.blit(im, im.get_rect(center=r.center))
+            self._click_zones.append((r, "build", i))
+            bx += r.w + gap
+        if hov_any:
+            if hov_bd is None:
+                self._tooltip = ("БЕЗ БИЛДА", COL_TEXT,
+                                 ["чистый танк без стартовых предметов",
+                                  "клик — снять выбранный билд"])
+            else:
+                bd = BUILDS[BUILD_KEYS[hov_bd]]
+                self._tooltip = ("БИЛД «%s»" % bd["name"], bd["color"],
+                                 [bd["desc"],
+                                  "выдаётся В НАЧАЛЕ каждого раунда",
+                                  "максимум ОДИН билд на танк; боты без билдов"])
 
     def _fate_panel(self, y_cur, y_bless, mult):
         """Жребий: 8 проклятий (красные) и 8 облегчений (зелёные).
@@ -1729,7 +1956,7 @@ class Game:
             "   баффы врага +%d%%..+%d%% очков, дебаффы режут"
             % (round(min(buffs) * 100), round(max(buffs) * 100)),
             True, (255, 170, 80))
-        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 28)))
+        self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 24)))
         step = min(180, (SCREEN_W - 140) // len(EE_KEYS))
         box_w, box_h = step - 16, 36
         name_f = get_font(12)
@@ -1791,12 +2018,12 @@ class Game:
                                   % (item["name"], item["desc"], price,
                                      "ВЗЯТО" if taken else "свободно"),
                                   True, (255, 190, 110))
-        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 28)))
+        self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 24)))
         img2 = get_font(12, bold=False).render(
             "ЛИМИТА БОЛЬШЕ НЕТ (v2.2) — берите все 12 разом; баффы врагу"
             " ДОБАВЛЯЮТ очки (усиленный враг платит), дебаффы режут",
             True, COL_DIM)
-        self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 44)))
+        self.screen.blit(img2, img2.get_rect(center=(SCREEN_W / 2, y + 38)))
 
     def _choice_panel(self, title, keys, idx, table, y, kind=None):
         """Компактная панель выбора: заголовок сверху, карточки в ряд.
@@ -1935,13 +2162,18 @@ class Game:
         w = 260                  # ширина одна и та же, меняется только высота
         rect = pygame.Rect(x, y, w, h)
         pygame.draw.rect(self.screen, (30, 36, 60), rect, border_radius=4)
-        k = tank.hp / tank.max_hp
-        fill = rect.copy()
-        fill.w = max(2, int(w * k))
-        if right:
-            fill.x = x + w - fill.w
-        color = tank.color if k > 0.3 else (255, 90, 90)
-        pygame.draw.rect(self.screen, color, fill, border_radius=4)
+        # v2.9 ФИКС «маленькой полосочки здоровья»: у убитого танка
+        # заливки НЕТ вообще — раньше остаток рисовался как 2-пиксельная
+        # красная нитка (max(2, ...)) и висела над местом смерти врага
+        k = max(0.0, tank.hp / tank.max_hp) if tank.alive else 0.0
+        fill_w = int(w * k)
+        if fill_w > 0:
+            fill = rect.copy()
+            fill.w = fill_w
+            if right:
+                fill.x = x + w - fill.w
+            color = tank.color if k > 0.3 else (255, 90, 90)
+            pygame.draw.rect(self.screen, color, fill, border_radius=4)
         pygame.draw.rect(self.screen, (70, 80, 120), rect, 1, border_radius=4)
 
     def _build_label(self, t, who=None, color=None, cap=22):
@@ -1972,6 +2204,12 @@ class Game:
             sfx.append("МИНА x%d (E)" % t.mine_carried)
         if t.barrier_charges > 0:
             sfx.append("СТЕНА x%d (Q)" % t.barrier_charges)
+        if t.turret_charges > 0:
+            sfx.append("ТУРЕЛЬ x%d (R)" % t.turret_charges)
+        if t.emp_charges > 0:
+            sfx.append("ЭМИ-ЗАРЯД x%d (X)" % t.emp_charges)
+        if t.he_shots > 0:
+            sfx.append("РАЗРЫВНЫЕ x%d" % t.he_shots)
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
@@ -2161,8 +2399,9 @@ class Game:
     # ----- миникарта большого мира (v2.2) -----
     def _draw_minimap(self):
         """Миникарта в правом нижнем углу: мир 2240x1260 больше окна,
-        без ориентира легко заблудиться. Показывает препятствия, танки
-        и рамку видимой области."""
+        без ориентира легко заблудиться. Показывает препятствия, танки,
+        рамку видимой области. v2.9: на ней видны и ВСЕ БОНУСЫ (точки
+        своих цветов), мины и турели — трофеи больше не теряются."""
         mw, mh = 192, 108
         x0, y0 = SCREEN_W - mw - 16, SCREEN_H - mh - 16
         k = mw / float(self.arena.w)
@@ -2174,6 +2413,21 @@ class Game:
             pygame.draw.rect(self.screen, (72, 84, 140),
                              (x0 + r.x * k, y0 + r.y * k,
                               max(1.0, r.w * k), max(1.0, r.h * k)))
+        # v2.9: бонусы — пульсирующие точки цветов бонусов
+        for pu in self.powerups:
+            px, py = int(x0 + pu.x * k), int(y0 + pu.y * k)
+            pygame.draw.circle(self.screen, PU_INFO[pu.kind]["color"],
+                               (px, py), 3)
+            pygame.draw.circle(self.screen, (10, 12, 26), (px, py), 3, 1)
+        # мины — оранжевые ромбики, турели — квадратики цвета владельца
+        for m in self.mines:
+            mx, my = int(x0 + m.x * k), int(y0 + m.y * k)
+            pygame.draw.rect(self.screen, (255, 140, 0) if m.armed
+                             else (150, 150, 160),
+                             (mx - 1, my - 1, 3, 3))
+        for tr in self.turrets:
+            tx, ty = int(x0 + tr.x * k), int(y0 + tr.y * k)
+            pygame.draw.rect(self.screen, tr.color, (tx - 2, ty - 2, 4, 4))
         for t in self.tanks:
             if not t.alive:
                 continue

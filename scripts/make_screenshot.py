@@ -52,6 +52,9 @@ g.arena = Arena(5, team=True)   # «Соты» на КРУПНОЙ карте �
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
 for _ in range(300):        # полминуты боя: следы, снаряды, дым
     g.update(1 / 60.0)
+# v2.9: постановочная ТУРЕЛЬ у игрока — новинка в кадре
+g.player.turret_charges = 1
+g._place_turret(g.player)
 g._cam_snap()
 g.draw()
 out = "/home/z/my-project/tool-results/ffa.png"
@@ -108,9 +111,11 @@ pygame.image.save(g.screen, out)
 print("console.png:", out)
 g.con_open = False
 
-# ангар: 5 панелей + жребий + эффекты на врага — снимок для проверки верстки
+# ангар: панель БИЛДОВ + 5 панелей сборки + жребий + эффекты на врага
+# (v2.9: выбран билд «СТРОИТЕЛЬ» — видно подсветку и новейшую панель)
 g.mode = 2
 g.state = "select"
+g.sel_build = 0                  # СТРОИТЕЛЬ выделен
 g.sel_el = 1                    # «Огонь» выделен
 g.sel_curses = ["shaky", "rusty"]      # взято два проклятья
 g.sel_blessings = ["armor"]            # открыто три облегчения, взято одно

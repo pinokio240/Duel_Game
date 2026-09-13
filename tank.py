@@ -17,7 +17,8 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       EARTH_TIME, EARTH_MULT, SHOCK_TIME, SHOCK_MULT,
                       AIR_PUSH, WATER_CLEAR_DMG, WATER_SLOW_TIME,
                       ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS,
-                      PU_MINE_CARRY, BARRIER_MAX)
+                      PU_MINE_CARRY, BARRIER_MAX,
+                      TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP)
 from bullet import Bullet, ELEMENT_COLORS
 
 # уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
@@ -103,9 +104,13 @@ class Tank:
         self._poison_tick = 0.0
         # рикошеты: базовое число + бонус перка «Рикошет»
         self.bullet_bounces = BULLET_BOUNCES + int(self.perk.get("bounces", 0))
-        # ручные бустеры: мины и стены-барьеры носятся в боекомплекте
+        # ручные бустеры: мины, стены-барьеры, турели, ЭМИ-заряды и
+        # разрывные снаряды носятся в боекомплекте (v2.9)
         self.mine_carried = 0
         self.barrier_charges = 0
+        self.turret_charges = 0    # турели (R) — бонус «Т» или билд «Турельщик»
+        self.emp_charges = 0       # носимые ЭМИ-заряды (X) — билд «Связист»
+        self.he_shots = 0          # разрывные снаряды — бонус «Р» или билд
         self._sprite = self._make_sprite()
         if self.scale != 1.0:
             self._sprite = pygame.transform.smoothscale(
@@ -268,16 +273,23 @@ class Tank:
                * self.elem["damage_mult"] * self.mods["damage_mult"])
         spd = (self.weapon["speed_mult"] * self.elem["speed_mult"]
                * self.mods["bullet_speed_mult"])
+        # v2.9 РАЗРЫВНЫЕ: один заряд — один ВЫСТРЕЛ. Разрывным становится
+        # ЦЕНТРАЛЬНЫЙ снаряд залпа (у дробовика — первая дробина, у веера —
+        # центральный): иначе дробовик с осколками превращается в артобстрел
+        he = self.he_shots > 0
+        if he:
+            self.he_shots -= 1
         # несколько стихий (консоль): каждый снаряд получает случайную из них
         elem = random.choice(self.element_keys) if self.element_keys else None
         # «Разбитый прицел» разбрасывает снаряды, «Твёрдые руки» лечат прицел
         sp = max(0.0, self.mods["spread_deg"])
-        for a in angles:
+        for i, a in enumerate(angles):
             if sp > 0:
                 a = a + random.uniform(-sp, sp)
             bullets.append(Bullet(mx, my, a, self, damage=dmg, speed_mult=spd,
                                   element=elem, bounces=self.bullet_bounces,
-                                  big=self.weapon.get("bigshot", False)))
+                                  big=self.weapon.get("bigshot", False),
+                                  he=(he and i == 0)))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
         if self.mag_ammo > 1:
             self.mag_ammo -= 1
@@ -433,6 +445,12 @@ class Tank:
             self.mine_carried = min(self.mine_carried + 1, PU_MINE_CARRY)
         elif kind == "barrier":
             self.barrier_charges = min(self.barrier_charges + 1, BARRIER_MAX)
+        elif kind == "turret":
+            # v2.9: турель в боекомплекте (клавиша R)
+            self.turret_charges = min(self.turret_charges + 1, TURRET_CARRY)
+        elif kind == "he":
+            # v2.9: разрывные снаряды — бонус даёт 6 разрывных выстрелов
+            self.he_shots = min(self.he_shots + HE_CHARGES_PICKUP, HE_MAX_CARRY)
 
     def update(self, dt):
         self.cooldown = max(0.0, self.cooldown - dt)

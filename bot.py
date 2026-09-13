@@ -17,6 +17,7 @@ PU_VALUE = {
     "repair": 3.0, "shield": 2.4, "freeze": 2.4, "laser": 2.2,
     "triple": 1.8, "rapid": 1.8, "boost": 1.5, "barrier": 1.3,
     "mine": 1.2, "smoke": 0.7,
+    "turret": 1.6, "he": 1.4,          # v2.9: турель и разрывные
 }
 
 
@@ -49,6 +50,7 @@ class BotAI:
         # ручные бустеры
         self.drop_cd = 0.0      # пауза между минами
         self.wall_cd = 0.0      # пауза между стенами
+        self.turret_cd = 0.0    # v2.9: пауза между турелями
         # v2.1: цель (в 1на1 — игрок, в FFA — ближайший чужой танк)
         self.target = None
 
@@ -179,6 +181,7 @@ class BotAI:
 
         self.drop_cd = max(0.0, self.drop_cd - dt)
         self.wall_cd = max(0.0, self.wall_cd - dt)
+        self.turret_cd = max(0.0, self.turret_cd - dt)
         self.pu_t = max(0.0, self.pu_t - dt)
 
         dx, dy = p.x - t.x, p.y - t.y
@@ -246,6 +249,11 @@ class BotAI:
         if (t.barrier_charges > 0 and self.wall_cd <= 0 and dist < 520):
             if game._place_barrier(t, math.degrees(math.atan2(p.y - t.y, p.x - t.x))):
                 self.wall_cd = 3.5
+        # v2.9: турель — цель держит дистанцию, ставим станок подальше от себя:
+        # он прикроет позицию, пока бот маневрирует
+        if (t.turret_charges > 0 and self.turret_cd <= 0 and dist > 420):
+            if game._place_turret(t):
+                self.turret_cd = 8.0
 
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""
