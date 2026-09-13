@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """ТУРЕЛЬ (v2.9): размещаемый станок — ставится танком по R, сама ищет
 ближайшего чужака в радиусе, целится и стреляет. Служит команде владельца,
-пробивается снарядами, рассыпается по таймеру. Рисуется как неоновый
+пробивается снарядами; v3.1.1 — ПОСТОЯННАЯ, таймера жизни нет
+(как у мин и стен), гибнет только от урона. Рисуется как неоновый
 треугольный станок с коротким стволом, поворачивается к цели."""
 import math
 import pygame
-from settings import TURRET_HP, TURRET_LIFE, TURRET_RANGE, TURRET_COOLDOWN
+from settings import TURRET_HP, TURRET_RANGE, TURRET_COOLDOWN
 
 
 class Turret:
@@ -18,7 +19,7 @@ class Turret:
         self.team = owner.team
         self.hp = TURRET_HP
         self.max_hp = TURRET_HP
-        self.t = 0.0            # время жизни
+        self.t = 0.0            # время с установки (для анимации)
         self.cd = 0.8           # «прогрев» после установки
         self.angle = owner.angle  # куда смотрит ствол
         self.alive = True
@@ -33,7 +34,8 @@ class Turret:
         return self.light
 
     def expired(self):
-        return self.t >= TURRET_LIFE or self.hp <= 0
+        # v3.1.1: таймера жизни больше нет — только от урона
+        return self.hp <= 0
 
     def take_damage(self, dmg, effects, sounds):
         if not self.alive:
@@ -70,8 +72,9 @@ class Turret:
 
     def draw(self, surf, ox=0, oy=0):
         x, y = int(self.x + ox), int(self.y + oy)
-        blink = self.t > TURRET_LIFE - 4 and int(self.t * 6) % 2 == 0
         k = self.hp / self.max_hp
+        # v3.1.1: мигаем не перед «рассыпанием», а когда вот-вот сломается
+        blink = k < 0.35 and int(self.t * 6) % 2 == 0
         core = (90, 95, 115) if blink else self.color
         # платформа
         pygame.draw.circle(surf, (30, 36, 60), (x, y), 14)

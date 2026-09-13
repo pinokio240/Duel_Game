@@ -1784,7 +1784,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.1 · КРУГОВОЙ АД", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.1.1 · КРУГОВОЙ АД", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 

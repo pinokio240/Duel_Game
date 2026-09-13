@@ -1713,7 +1713,7 @@ def test_builds_v29():
     from game import Game
     from settings import (BUILDS, BUILD_KEYS, BARRIER_MAX, PU_MINE_CARRY,
                           POWERUP_INTERVAL, POWERUP_MAX,
-                          TURRET_LIFE, TURRET_DAMAGE, HE_SPLASH_DAMAGE,
+                          TURRET_DAMAGE, HE_SPLASH_DAMAGE,
                           BUILD_RAPID_TIME, BUILD_HE_SHOTS, PU_FREEZE_TIME,
                           PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT)
     from powerup import PU_INFO
@@ -1882,7 +1882,7 @@ def test_builds_v29():
         bl.x += 3
     check("вражеский снаряд ломает турель", bl.dead
           and g4.turrets[0].hp < trhp)
-    # лимит на арене и истечение по таймеру
+    # лимит на арене; v3.1.1: турель ПОСТОЯННАЯ — таймера жизни нет
     g5 = Game()
     g5.state = "fight"
     g5._fake_keys = FakeKeys(())
@@ -1894,10 +1894,13 @@ def test_builds_v29():
         g5._place_turret(g5.player)
     check("на арене не больше %d турелей владельца" % PU_TURRET_MAX,
           len(g5.turrets) == PU_TURRET_MAX)
-    g5.turrets[0].t = TURRET_LIFE + 0.1
+    g5.turrets[0].t = 9999.0
     g5._turrets_step(1 / 60.0)
-    check("турель рассыпается по таймеру (%g с)" % TURRET_LIFE,
-          len(g5.turrets) == PU_TURRET_MAX - 1)
+    check("турель ПОСТОЯННАЯ — таймера жизни нет (v3.1.1)",
+          len(g5.turrets) == PU_TURRET_MAX)
+    g5.turrets[0].take_damage(9999, _Fx(), _Snd())
+    g5._turrets_step(1 / 60.0)
+    check("турель гибнет только от урона", len(g5.turrets) == PU_TURRET_MAX - 1)
 
     # ----- РАЗРЫВНЫЕ: осколки бьют ЧУЖИХ рядом, свои целы -----
     g6 = Game()
