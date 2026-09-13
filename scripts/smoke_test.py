@@ -2352,6 +2352,30 @@ def test_v30_zavarushka():
     check("тултип карточки снаряда показывает название",
           g9._tooltip is not None
           and g9._tooltip[0] == SHELL_TYPES["ap"]["name"])
+    # РЕГРЕССИЯ (краш из v3.0): наведение на «РАЗРЫВНОЙ» роняло игру —
+    # HE_SPLASH_DAMAGE не был импортирован в game.py. Наводим на ВСЕ
+    # 4 карточки снарядов: тултип собирается без падений, имя верное.
+    for key in SHELL_KEYS:
+        z = next(r for r, d in zones if d == SHELL_KEYS.index(key))
+        g9._mouse = z.center
+        g9.draw()
+        check("наведение на «%s» не крашит, тултип верный"
+              % SHELL_TYPES[key]["name"],
+              g9._tooltip is not None
+              and g9._tooltip[0] == SHELL_TYPES[key]["name"])
+    # и вообще ЛЮБАЯ карточка ангара при наведении не должна ронять игру
+    g10 = Game()
+    g10.state = "select"
+    g10.draw()
+    bad = []
+    for r, kd, d in list(g10._click_zones):
+        g10._mouse = r.center
+        try:
+            g10.draw()
+        except Exception as e:   # NameError/KeyError/... — краш из репорта
+            bad.append("%s:%r -> %s: %s" % (kd, d, type(e).__name__, e))
+    check("наведение на ЛЮБУЮ зону ангара не падает", not bad,
+          "(%s)" % "; ".join(bad[:3]))
 
     # ----- HUD показывает билд и тип снаряда -----
     p.shell_type = "ap"
