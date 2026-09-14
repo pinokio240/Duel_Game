@@ -7,10 +7,13 @@
 v2.1: РЕЖИМЫ 1вс1вс1 — цель выбирается КАЖДЫЙ САМ ЗА СЕБЯ: ближайший
 чужой танк (в том числе другой бот), а пули/мины ЛЮБОГО чужака опасны.
 Сложность настраивается пресетом (1 лёгкий / 2 норм / 3 хардкор).
+v3.2: ШТУРМ — защитники держатся точки, строят форт и ЧИНЯТ стены;
+атакующие, когда цель не видна, давят на точку захвата.
 """
 import math
 import random
-from settings import CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, DIFF_PRESETS
+from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, DIFF_PRESETS,
+                      ASSAULT_POINT_R)
 
 # сколько какой бонус стоит для бота (чем больше — тем охотнее едет)
 PU_VALUE = {
@@ -18,6 +21,7 @@ PU_VALUE = {
     "triple": 1.8, "rapid": 1.8, "boost": 1.5, "barrier": 1.3,
     "mine": 1.2, "smoke": 0.7,
     "turret": 1.6, "he": 1.4,          # v2.9: турель и разрывные
+    "wall_strong": 1.4, "wall_heavy": 1.5, "wall_ultra": 1.6,  # v3.2
 }
 
 
@@ -190,7 +194,7 @@ class BotAI:
         dist = math.hypot(dx, dy)
         ang_to = math.degrees(math.atan2(dy, dx))
 
-        self._use_items(game, dist)
+        self._use_items(game, dist, ang_to)
 
         forward, turn = 0, 0
         desired = None
@@ -215,6 +219,19 @@ class BotAI:
                 desired = self._choose_direction(game, ang_to, dist)
                 if abs(_ang_diff(desired, t.angle)) < 75:
                     forward = 1
+                # v3.2: ШТУРМ — задачи важнее погони:
+                # защитник далеко от точки — домой; атакующий не видит
+                # цель и далеко от точки — давит на захват
+                if getattr(game, "is_assault", False):
+                    capx, capy = game.cap_xy
+                    dp = math.hypot(t.x - capx, t.y - capy)
+                    if t.team == 0 and dp > ASSAULT_POINT_R * 2.6 and dist > 320:
+                        desired = math.degrees(math.atan2(capy - t.y,
+                                                          capx - t.x))
+                    elif (t.team == 1 and dist > 640
+                          and not self._visible(game, p.x, p.y)):
+                        desired = math.degrees(math.atan2(capy - t.y,
+                                                          capx - t.x))
 
             if desired is not None:
                 d = _ang_diff(desired, t.angle)
@@ -232,12 +249,37 @@ class BotAI:
 
     # ---------- куда едем ----------
 
-    def _use_items(self, game, dist):
-        """Ручные бустеры: мины под догоняющего, стены между собой и целью."""
+    def _use_items(self, game, dist, ang_to=None):
+        """Ручные бустеры: мины под догоняющего, стены между собой и целью.
+        v3.2: в ШТУРМЕ защитники строят и ЧИНЯТ форт, атакующие бережут
+        снаряды для стен."""
         t = self.t
         p = self.target
         if p is None:
             return
+        # v3.2: ШТУРМ — поведение защитников
+        assault = getattr(game, "is_assault", False)
+        if assault and t.team == 0:
+            capx, capy = game.cap_xy
+            dp = math.hypot(t.x - capx, t.y - capy)
+            # чиним потрёпанные свои стены, пока враг далеко (dist — до цели)
+            if dist > 450:
+                game._repair_step(t, True, 1 / 60.0)
+            # мины на подходах: ставим под собой, пока стоим у точки
+            if (t.mine_carried > 0 and self.drop_cd <= 0
+                    and dp < ASSAULT_POINT_R * 2.2):
+                if game._place_mine(t):
+                    self.drop_cd = 3.0
+            # стены форта: ставим наружу от точки (на пути атаки),
+            # даже если враг ещё далеко — форт должен вырасти ДО штурма
+            if (t.wall_total() > 0 and self.wall_cd <= 0
+                    and dp < ASSAULT_POINT_R * 3.2
+                    and (dist < 520 or dp < ASSAULT_POINT_R * 1.6)):
+                wall_ang = math.degrees(math.atan2(t.y - capy, t.x - capx)) \
+                    if dist > 520 else math.degrees(
+                        math.atan2(p.y - t.y, p.x - t.x))
+                if game._place_barrier(t, wall_ang):
+                    self.wall_cd = 2.2
         # мина: цель давит сзади на средней дистанции — кидаем под нос
         if (t.mine_carried > 0 and self.drop_cd <= 0 and 115 < dist < 460):
             rad = math.radians(t.angle)
@@ -247,8 +289,9 @@ class BotAI:
             if dot < -0.25:          # цель именно сзади
                 if game._place_mine(t):
                     self.drop_cd = 2.0
-        # стена: игрок близко — строим поперёк линии огня
-        if (t.barrier_charges > 0 and self.wall_cd <= 0 and dist < 520):
+        # стена: игрок близко — строим поперёк линии огня (любой ярус,
+        # _place_barrier сама возьмёт самую обычную из имеющихся)
+        if (t.wall_total() > 0 and self.wall_cd <= 0 and dist < 520):
             if game._place_barrier(t, math.degrees(math.atan2(p.y - t.y, p.x - t.x))):
                 self.wall_cd = 3.5
         # v2.9: турель — цель держит дистанцию, ставим станок подальше от себя:

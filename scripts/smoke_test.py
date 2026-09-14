@@ -107,9 +107,9 @@ def test_elements():
     arena = Arena(0)
 
     # стихии больше НЕТ на карте — она теперь выбирается в ангаре
-    # (v2.9: бонусов теперь 12 — добавились ТУРЕЛЬ и РАЗРЫВНЫЕ)
-    check("на карте 12 бонусов, стихий среди них нет",
-          len(PU_INFO) == 12 and not
+    # (v3.2: бонусов теперь 15 — добавились 3 прочные стены)
+    check("на карте 15 бонусов, стихий среди них нет",
+          len(PU_INFO) == 15 and not
           (set(PU_INFO) & {"fire", "water", "earth", "electric", "air",
                            "ice", "poison", "vamp"}))
 
@@ -1197,13 +1197,13 @@ def test_map_shuffle():
     from arena import Arena, MAP_NAMES, LAYOUTS
     from settings import PROP_MAX
 
-    check("карт стало 16", len(LAYOUTS) == 16 and len(MAP_NAMES) == 16)
+    check("карт стало 20", len(LAYOUTS) == 20 and len(MAP_NAMES) == 20)
     a = Arena(2, shuffle=True)
     check("перемешанная карта: внешние стены на месте",
           a.point_blocked(10, 360) and a.point_blocked(640, 10))
     check("баррикад не больше %d" % PROP_MAX,
           all(len(Arena(i, shuffle=True).obstacles)
-              <= len(LAYOUTS[i]) + PROP_MAX for i in range(16)))
+              <= len(LAYOUTS[i]) + PROP_MAX for i in range(20)))
     names = set()
     for _ in range(40):
         c = Arena(0, shuffle=True)
@@ -2945,6 +2945,209 @@ def test_army_teams():
           and g15.score[g15.winner] == 1)
 
 
+# ---------- 3w. v3.2: ШТУРМ, ПРОЧНЫЕ СТЕНЫ, РЕМОНТ, НОВЫЕ КАРТЫ ----------
+def test_v32_assault():
+    """v3.2: три яруса прочных стен (8/12/16 ЛЮБЫХ выстрелов), расход
+    ярусов по Q, ремонт стен по H (свои чинятся, чужие — нет), режим
+    ШТУРМ 21-27 (оборона против атаки, точка захвата, комплект защитника
+    5 стен + 2 турели + 3 мины), четыре новые карты, бонусы прочных стен."""
+    from game import Game, Barrier, TEAM_MODES
+    from settings import (WALL_TIERS, WALL_HIT_MAX, WALL_CARRY,
+                          WALL_REPAIR_RATE,
+                          ASSAULT_MODES, ASSAULT_POINT_R, ASSAULT_CAPTURE_T,
+                          ASSAULT_HOLD_T, ASSAULT_KIT_WALLS,
+                          ASSAULT_KIT_TURRETS, ASSAULT_KIT_MINES)
+    from arena import Arena, LAYOUTS, MAP_NAMES
+    from bullet import Bullet
+    from powerup import PU_INFO, PowerUp
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # ----- каталог ярусов стен -----
+    check("стены: 4 яруса, обычная по-прежнему 120",
+          len(WALL_TIERS) == 4 and WALL_TIERS["std"]["hp"] == 120)
+    check("ПРОЧНАЯ=8, ОЧЕНЬ ПРОЧНАЯ=12, НЕВЕРОЯТНО ПРОЧНАЯ=16 злых выстрелов (66 урона)",
+          WALL_HIT_MAX == 66
+          and WALL_TIERS["strong"]["hp"] == WALL_HIT_MAX * 8
+          and WALL_TIERS["heavy"]["hp"] == WALL_HIT_MAX * 12
+          and WALL_TIERS["ultra"]["hp"] == WALL_HIT_MAX * 16)
+    # физика: каждый ярус умирает РОВНО от N попаданий по 66 урона
+    g = Game()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g._reset_round()
+    g.arena = Arena(0)
+    g.effects, g.sounds = fx, snd
+    g.ais = []
+    p = g.player
+    ok_hits = True
+    for tier, n in (("strong", 8), ("heavy", 12), ("ultra", 16)):
+        br = Barrier(1000, 800, 0, p, tier=tier)
+        g.barriers = [br]
+        hits = 0
+        while g.barriers and hits < n + 2:
+            b = Bullet(br.x, br.y - 3, 0, g.foes[0], damage=WALL_HIT_MAX)
+            g._bullet_vs_barriers(b)
+            hits += 1
+        if not (hits == n and br.hp <= 0):
+            ok_hits = False
+    check("каждый ярус пробивается РОВНО своим числом самых злых выстрелов",
+          ok_hits)
+    # ----- порядок расхода: Q тратит сначала обычные -----
+    p.wall_charges = {"std": 2, "strong": 1, "heavy": 0, "ultra": 0}
+    check("Q сначала тратит ОБЫЧНЫЕ стены, редкие ярусы бережёт",
+          p.next_wall_tier() == "std")
+    p.wall_charges["std"] = 0
+    check("обычных нет — Q берёт ПРОЧНУЮ",
+          p.next_wall_tier() == "strong")
+    p.give_walls("ultra", 9)
+    check("лимит ношения невероятно прочных — %d" % WALL_CARRY["ultra"],
+          p.wall_charges["ultra"] == WALL_CARRY["ultra"])
+    # ----- РЕМОНТ стен -----
+    g.barriers = [Barrier(p.x + 60, p.y, 0, p, tier="strong")]
+    br = g.barriers[0]
+    br.hp = br.max_hp * 0.4
+    g._repair_step(p, True, 1.0)
+    check("держишь H у своей стены — гаечный ключ вернул %g HP/с"
+          % WALL_REPAIR_RATE,
+          abs(br.hp - (br.max_hp * 0.4 + WALL_REPAIR_RATE)) < 0.01)
+    g._repair_step(p, False, 1.0)
+    check("без H ничего не чинится", br.hp == br.max_hp * 0.4 + WALL_REPAIR_RATE)
+    foe_br = Barrier(g.foes[0].x + 10, g.foes[0].y, 0, g.foes[0], tier="std")
+    foe_br.hp = 10
+    g.barriers.append(foe_br)
+    p.x, p.y = foe_br.x - 20, foe_br.y      # встали вплотную к ЧУЖОЙ стене
+    g._repair_step(p, True, 1.0)
+    check("ЧУЖУЮ стену не починить", foe_br.hp == 10)
+    p.x, p.y = br.x - 30, br.y
+    br.hp = br.max_hp - 1
+    g._repair_step(p, True, 1.0)
+    check("перелечить стену выше максимума нельзя", br.hp == br.max_hp)
+    g.barriers = []
+    # ----- ШТУРМ: режимы, комплект, точка -----
+    check("ШТУРМ — 7 режимов 21…27, все командные",
+          ASSAULT_MODES == (21, 22, 23, 24, 25, 26, 27)
+          and all(m in TEAM_MODES for m in ASSAULT_MODES))
+    ga = Game()
+    ga.mode = 23                      # ШТУРМ 3 на 3
+    ga.start_match()
+    ga.state = "fight"
+    ga._fake_keys = FakeKeys(())
+    ga.ais = []
+    check("ШТУРМ 3на3: 6 танков, по 3 в команде",
+          len(ga.tanks) == 6
+          and sum(1 for t in ga.tanks if ga.tank_team[t] == 0) == 3
+          and sum(1 for t in ga.tanks if ga.tank_team[t] == 1) == 3)
+    check("комплект защитника: 5 ПРОЧНЫХ стен, 2 турели, 3 мины",
+          all(t.wall_charges.get("strong") == ASSAULT_KIT_WALLS
+              and t.turret_charges >= ASSAULT_KIT_TURRETS
+              and t.mine_carried >= ASSAULT_KIT_MINES
+              for t in ga.tanks if ga.tank_team[t] == 0))
+    capx, capy = ga.cap_xy
+    check("точка — в центре карты, и центр чист от препятствий",
+          abs(capx - ga.arena.w / 2) < 1 and abs(capy - ga.arena.h / 2) < 1
+          and not ga.arena.circle_collides(capx, capy, ASSAULT_POINT_R))
+    ga.draw()
+    check("HUD и точка захвата рисуются без падений", True)
+    # захват: атакующий на пустой точке — прогресс капает и доходит до победы
+    atk = ga.foes[0]
+    for j, t in enumerate(ga.tanks):
+        if t is not atk:
+            t.x, t.y = capx - 1500 - 60 * j, capy + 700
+    atk.x, atk.y = capx + 30, capy
+    ga.cap_progress = 0.0
+    ga._fight_step(0.5)
+    check("атакующий на пустой точке: захват капает",
+          abs(ga.cap_progress - 0.5) < 1e-9)
+    ga._fight_step(ASSAULT_CAPTURE_T)
+    check("захват целиком — раунд за АТАКОЙ",
+          ga.state == "round_end" and ga.winner == 1)
+    # защитник на точке откатывает захват; обе стороны — спор
+    gb = Game()
+    gb.mode = 21
+    gb.start_match()
+    gb.state = "fight"
+    gb._fake_keys = FakeKeys(())
+    gb.ais = []
+    capx, capy = gb.cap_xy
+    gb.cap_progress = 6.0
+    gb.player.x, gb.player.y = capx, capy
+    gb.foes[0].x, gb.foes[0].y = capx + 1400, capy + 900
+    gb._fight_step(0.5)
+    check("защитник на точке откатывает захват вдвое быстрее",
+          abs(gb.cap_progress - 5.0) < 1e-9)
+    gb.foes[0].x, gb.foes[0].y = capx + 20, capy
+    gb._fight_step(0.5)
+    check("обе стороны на точке — СПОР: захват заморожен",
+          abs(gb.cap_progress - 5.0) < 1e-9)
+    # таймер обороны: продержались — победа обороны
+    gc = Game()
+    gc.mode = 22
+    gc.start_match()
+    gc.state = "fight"
+    gc._fake_keys = FakeKeys(())
+    gc.ais = []
+    gc.cap_hold = 0.3
+    gc._fight_step(0.4)
+    check("продержались %g с — раунд за ОБОРОНОЙ" % ASSAULT_HOLD_T,
+          gc.state == "round_end" and gc.winner == 0
+          and gc.cap_hold <= 0)
+    # меню: кнопки ШТУРМА есть и кликаются
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("в меню появились кнопки ШТУРМА 21…27",
+          all(any(kd == "menu_mode" and d == m
+                  for _, kd, d in gm._click_zones) for m in ASSAULT_MODES))
+    zone = next(r for r, kd, d in gm._click_zones
+                if kd == "menu_mode" and d == 27)
+    gm.on_click(zone.center)
+    check("клик по кнопке включает ШТУРМ 7на7", gm.mode == 27)
+    # карты: 20 штук, имена уникальны, все создаются
+    check("карт стало 20 (+Цитадель, Тиски, Гребёнка, Перекрёсток)",
+          len(LAYOUTS) == 20 and len(MAP_NAMES) == 20
+          and len(set(MAP_NAMES)) == 20)
+    check("все 20 карт создаются в командном размере",
+          all(Arena(i, team=True).w > 0 for i in range(20)))
+    # бонусы прочных стен
+    check("в каталоге бонусов 15 позиций (+3 прочные стены)",
+          len(PU_INFO) == 15
+          and all(k in PU_INFO
+                  for k in ("wall_strong", "wall_heavy", "wall_ultra")))
+    gd = Game()
+    gd.state = "fight"
+    gd._fake_keys = FakeKeys(())
+    gd._reset_round()
+    gd.ais = []
+    for kind in ("wall_ultra", "wall_heavy", "wall_strong"):
+        gd._apply_pickup(gd.player, PowerUp(gd.player.x, gd.player.y, kind))
+    check("бонусы стен кладутся в боекомплект по ярусам (Н=1, О=2, П=2)",
+          gd.player.wall_charges["ultra"] == 1
+          and gd.player.wall_charges["heavy"] == 2
+          and gd.player.wall_charges["strong"] == 2)
+    # живой прогон: ШТУРМ 5на5 с полноценным ИИ — форт, ремонт, захват
+    ge = Game()
+    ge.mode = 25
+    ge.start_match()
+    ge.state = "fight"
+    ge._fake_keys = FakeKeys(())
+    for _ in range(180):
+        ge._fight_step(1 / 60.0)
+    ge.draw()
+    check("ШТУРМ 5на5: 3 секунды боя с ИИ — без падений, у точки есть форт",
+          ge.state in ("fight", "round_end")
+          and len(ge.barriers) + len(ge.mines) + len(ge.turrets) > 0)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -2975,6 +3178,7 @@ if __name__ == "__main__":
     test_builds_v29()
     test_v30_zavarushka()
     test_v31_nova()
+    test_v32_assault()
     test_bigmap()
     test_points()
     test_score_table()

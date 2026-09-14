@@ -23,8 +23,13 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       PU_MINE_ENEMY_DIST,
                       BARRIER_HP, BARRIER_LEN, BARRIER_THICK,
                       BARRIER_DIST, BARRIER_MAX,
+                      WALL_TIERS, WALL_TIER_ORDER,
+                      WALL_REPAIR_RATE, WALL_REPAIR_DIST,
                       TURRET_DAMAGE, PU_TURRET_MAX, TURRET_CARRY,
                       TURRET_COOLDOWN,
+                      ASSAULT_MODES, ASSAULT_POINT_R, ASSAULT_CAPTURE_T,
+                      ASSAULT_HOLD_T, ASSAULT_KIT_WALLS, ASSAULT_KIT_TURRETS,
+                      ASSAULT_KIT_MINES,
                       HE_SPLASH_DAMAGE, HE_SPLASH_RADIUS,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
@@ -52,7 +57,8 @@ BOSS_MODS = {"hp_mult": BOSS_HP_MULT, "damage_mult": 1.3,
 # v2.7/v2.8: какие режимы КОМАНДНЫЕ (счёт на две стороны: наша против
 # чужой), а какие — «АРМЕЙСКИЕ» (12-20 танков на самых больших картах).
 # В FFA (2-5, 11-15) team_mode выключен — у каждого танка свой team-номер.
-TEAM_MODES = (6, 7, 8, 9, 10, 16, 17, 18, 19, 20)
+# v3.2: ШТУРМ 21-27 тоже командный (ОБОРОНА игрока против АТАКИ ботов).
+TEAM_MODES = ((6, 7, 8, 9, 10, 16, 17, 18, 19, 20) + ASSAULT_MODES)
 ARMY_MODES = (16, 17, 18, 19, 20)
 
 CH_KEYS = list(CHASSIS)
@@ -143,19 +149,25 @@ def _pt_seg_dist(px, py, p1, p2):
 
 
 class Barrier:
-    """Стена-бустер: ставится танком по Q, имеет 120 прочности,
-    блокирует танки и взгляд, пробивается снарядами.
+    """Стена-бустер: ставится танком по Q, блокирует танки и взгляд,
+    пробивается снарядами.
     v3.0: ПОСТОЯННАЯ — таймера жизни больше нет (по просьбе игрока:
-    «почему стены временные? не дело»): лежит, пока её не разнесут."""
+    «почему стены временные? не дело»): лежит, пока её не разнесут.
+    v3.2: ЯРУСЫ ПРОЧНОСТИ — обычная (120), ПРОЧНАЯ (переживает 8 самых
+    злых выстрелов игры), ОЧЕНЬ ПРОЧНАЯ (12) и НЕВЕРОЯТНО ПРОЧНАЯ (16).
+    Ярус задаёт прочность, цвет и цену попадания (она везде одинакова —
+    каждый снаряд снимает свой урон)."""
 
-    def __init__(self, x, y, angle_deg, owner):
+    def __init__(self, x, y, angle_deg, owner, tier="std"):
         self.x, self.y = float(x), float(y)
         self.owner = owner
+        self.tier = tier if tier in WALL_TIERS else "std"
         rad = math.radians(angle_deg)
         hl = BARRIER_LEN / 2
         self.p1 = (x - math.cos(rad) * hl, y - math.sin(rad) * hl)
         self.p2 = (x + math.cos(rad) * hl, y + math.sin(rad) * hl)
-        self.hp = BARRIER_HP
+        self.max_hp = WALL_TIERS[self.tier]["hp"]
+        self.hp = self.max_hp
         self.t = 0.0
 
     def _dist(self, px, py):
@@ -176,9 +188,10 @@ class Barrier:
     def draw(self, surf, ox=0, oy=0):
         ax, ay = self.p1[0] + ox, self.p1[1] + oy
         bx, by = self.p2[0] + ox, self.p2[1] + oy
-        k = self.hp / BARRIER_HP
+        k = self.hp / self.max_hp
+        tier_col = WALL_TIERS[self.tier]["color"]
         if k > 0.5:
-            core = (205, 210, 225)
+            core = tier_col
         else:
             core = (235, 150, 80)   # треснула — вот-вот развалится
         pygame.draw.line(surf, (52, 58, 84), (ax, ay), (bx, by), BARRIER_THICK + 6)
@@ -186,6 +199,17 @@ class Barrier:
         pygame.draw.line(surf, core, (ax, ay), (bx, by), 4)
         for px, py in ((ax, ay), (bx, by)):
             pygame.draw.circle(surf, core, (int(px), int(py)), 4)
+        # v3.2: у прочных стен — полоска прочности, пока они потрёпаны
+        if k < 0.999:
+            mx, my = (ax + bx) / 2, (ay + by) / 2
+            w = 34
+            r = pygame.Rect(int(mx - w / 2), int(my + BARRIER_THICK / 2 + 4),
+                            w, 4)
+            pygame.draw.rect(surf, (30, 36, 60), r, border_radius=2)
+            f = r.copy()
+            f.w = max(0, int(w * k))
+            if f.w > 0:
+                pygame.draw.rect(surf, core, f, border_radius=2)
 
 
 class FireZone:
@@ -312,7 +336,13 @@ class Game:
         self.smokes = []
         self.barriers = []
         self.turrets = []               # v2.9: размещаемые турели
-        self.fire_zones = []            # v3.0: огненные лужи зажигательных
+        self.fire_zones = []            # v3.0: огненные лужи
+        # v3.2: ШТУРМ — точка захвата, прогресс и таймер обороны
+        self.is_assault = False
+        self.cap_xy = (0.0, 0.0)
+        self.cap_progress = 0.0         # 0..ASSAULT_CAPTURE_T — на сколько захватили
+        self.cap_hold = ASSAULT_HOLD_T  # сколько обороне ещё держаться
+        self._repair_fx = 0.0           # троттлер искр ремонта стен
         self.powerup_t = POWERUP_INTERVAL * 0.6
         # v2.9: стартовый билд (индекс в BUILD_KEYS или None — «без билда»),
         # выбирается в ангаре; максимум ОДИН билд на танк
@@ -387,11 +417,13 @@ class Game:
         8 = «3 на 3» (6 танков), 9 = «4 на 4» (8 танков),
         10 = «5 на 5» (10 танков, v2.5),
         v2.8 — армейские: 16 = «6 на 6» (12), 17 = «7 на 7» (14),
-        18 = «8 на 8» (16), 19 = «9 на 9» (18), 20 = «10 на 10» (20)."""
+        18 = «8 на 8» (16), 19 = «9 на 9» (18), 20 = «10 на 10» (20).
+        v3.2 — ШТУРМ: 21…27 = n на n (n = 1…7): оборона против атаки."""
         return {6: 4, 7: 3, 8: 6, 9: 8, 10: 10,
                 11: 6, 12: 7, 13: 8, 14: 9, 15: 10,
-                16: 12, 17: 14, 18: 16, 19: 18, 20: 20}.get(self.mode,
-                                                            self.mode)
+                16: 12, 17: 14, 18: 16, 19: 18, 20: 20,
+                21: 2, 22: 4, 23: 6, 24: 8, 25: 10, 26: 12, 27: 14
+                }.get(self.mode, self.mode)
 
     def _spawn_points(self, n):
         """Точки появления для n танков: 1вс1 — классика по краям, FFA —
@@ -399,8 +431,22 @@ class Game:
         шеренгами: наша снизу, чужая сверху. Точки без стен и
         подальше друг от друга."""
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
-        if n == 2:
+        if n == 2 and self.mode not in ASSAULT_MODES:
             ring = [(cx - 520, cy), (cx + 520, cy)]
+        elif self.mode in ASSAULT_MODES:
+            # v3.2: ШТУРМ — защитники (команда игрока) кольцом вокруг точки
+            # захвата в центре, атакующие — шеренгой на дальней стороне
+            our = n // 2
+            foes_n = n - our
+            row = self.arena.h / 3.0
+            our_pts = []
+            for j in range(our):
+                a = math.radians(90 + j * 360.0 / max(1, our))  # игрок — снизу точки
+                our_pts.append((cx + math.cos(a) * 330,
+                                cy + math.sin(a) * 330))
+            foe_pts = [(cx + (j - (foes_n - 1) / 2.0) * 300, cy - row)
+                       for j in range(foes_n)]
+            ring = our_pts + foe_pts
         elif self.mode in TEAM_MODES:
             # командные режимы: наша команда — нижняя шеренга,
             # чужая — верхняя (сразу видно, кто с кем)
@@ -457,11 +503,20 @@ class Game:
         # арена переразыгрывается КАЖДЫЙ РАУНД и перемешивается (v2.1);
         # v2.5: командные режимы играют на КРУПНЫХ картах (3888x2187);
         # v2.7: большие FFA (6-10 танков) — на тех же крупных картах;
-        # v2.8: армии 6на6…10на10 — на САМЫХ БОЛЬШИХ (5120x2880)
-        self.arena = Arena(random.randrange(len(LAYOUTS)), shuffle=True,
+        # v2.8: армии 6на6…10на10 — на САМЫХ БОЛЬШИХ (5120x2880);
+        # v3.2: ШТУРМ — без перемешивания: точка захвата и форт каждый
+        # раз честные, без случайных баррикад в центре карты
+        self.is_assault = self.mode in ASSAULT_MODES
+        self.arena = Arena(random.randrange(len(LAYOUTS)),
+                           shuffle=not self.is_assault,
                            team=self.mode >= 6,
                            army=self.mode in ARMY_MODES)
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
+        if self.is_assault:
+            # точка захвата — центр карты: сносим статические препятствия,
+            # влезающие в круг точки с запасом под форт
+            self.cap_xy = (cx, cy)
+            self.arena.clear_around(cx, cy, ASSAULT_POINT_R + 70)
         pts = self._spawn_points(self._tank_count())
         # v2.7: команды — ТОЛЬКО режимы 6-10 (большие FFA 11-15 — каждый сам за себя);
         # v2.8: к ним добавились армии 6на6…10на10 (16-20)
@@ -568,6 +623,18 @@ class Game:
         self.effects.texts.clear()
         self.con_place = None
         self._apply_build(self.player)   # v2.9: стартовый билд (если выбран)
+        # v3.2: ШТУРМ — сброс точки и комплект защитников:
+        # у каждого по 5 ПРОЧНЫХ стен, 2 турели и 3 мины (просьба игрока)
+        self.cap_progress = 0.0
+        self.cap_hold = ASSAULT_HOLD_T
+        self._repair_fx = 0.0
+        if self.is_assault:
+            for tk in self.tanks:
+                if self.tank_team.get(tk) == 0:
+                    tk.give_walls("strong", ASSAULT_KIT_WALLS)
+                    tk.turret_charges = min(tk.turret_charges + ASSAULT_KIT_TURRETS,
+                                            TURRET_CARRY)
+                    tk.mine_carried = min(tk.mine_carried + ASSAULT_KIT_MINES, 99)
         self.spec_target = None          # v3.0: спектатор-камера с начала
         self._cam_snap()          # камера сразу на игрока
 
@@ -1239,6 +1306,9 @@ class Game:
         self._smokes_step(dt)
         self._powerups_step(dt)
         self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
+        # v3.2: РЕМОНТ СТЕН — держите H рядом со своей (командной) стеной;
+        # боты чинят своим же механизмом из ИИ
+        self._repair_step(self.player, bool(keys[pygame.K_h]), dt)
         # v3.0: огненные лужи жгут чужих и гаснут по таймеру
         for fz in self.fire_zones:
             fz.step(dt, self)
@@ -1260,6 +1330,30 @@ class Game:
         elif len(alive) <= 1:
             done = True
             winner = self.tanks.index(alive[0]) if alive else -1
+        # v3.2: ШТУРМ — если всех не перебили, решает ТОЧКА:
+        # атакующие на ней без защитников — захват капает; защитники на
+        # точке — откатывают; обе стороны — спор (заморожено). Захватили
+        # целиком — победа атаки; защитники продержались до конца таймера —
+        # победа обороны.
+        if self.is_assault and not done:
+            capx, capy = self.cap_xy
+            r2 = ASSAULT_POINT_R ** 2
+            on_atk = sum(1 for t in alive
+                         if self.tank_team.get(t) == 1
+                         and (t.x - capx) ** 2 + (t.y - capy) ** 2 < r2)
+            on_dfn = sum(1 for t in alive
+                         if self.tank_team.get(t) == 0
+                         and (t.x - capx) ** 2 + (t.y - capy) ** 2 < r2)
+            if on_atk and not on_dfn:
+                self.cap_progress += dt
+                if self.cap_progress >= ASSAULT_CAPTURE_T:
+                    done, winner = True, 1      # ТОЧКУ ЗАХВАТИЛИ
+            elif on_dfn and not on_atk:
+                self.cap_progress = max(0.0, self.cap_progress - dt * 2.0)
+            if not done:
+                self.cap_hold -= dt
+                if self.cap_hold <= 0:
+                    done, winner = True, 0      # ОБОРОНА ПРОДЕРЖАЛАСЬ
         if done:
             if dmg > 0:            # урон в этом кадре (включая добивание)
                 self.points += dmg
@@ -1362,8 +1456,12 @@ class Game:
 
     def _place_barrier(self, t, angle=None):
         """Стена-бустер: встаёт поперёк курса в паре метров перед танком.
-        Если там стена/танк — пробуем ближе; совсем нельзя — честно скажем."""
-        if t.barrier_charges <= 0:
+        v3.2: расходуется самая ОБЫЧНАЯ из имеющихся стен (сначала штатные,
+        потом прочные, очень прочные и невероятно прочные — редкие ярусы
+        бережём). Если там стена/танк — пробуем ближе; совсем нельзя —
+        честно скажем."""
+        tier = t.next_wall_tier()
+        if tier is None:
             return False
         if angle is None:
             angle = t.angle
@@ -1371,7 +1469,7 @@ class Game:
         ux, uy = math.cos(rad), math.sin(rad)
         for dist in (BARRIER_DIST, 64, 44, 28):
             cx, cy = t.x + ux * dist, t.y + uy * dist
-            br = Barrier(cx, cy, angle + 90, t)
+            br = Barrier(cx, cy, angle + 90, t, tier=tier)
             # стены/препятствия не трогаем
             if any(self.arena.circle_collides(px, py, BARRIER_THICK)
                    for px, py in (br.p1, (br.x, br.y), br.p2)):
@@ -1380,14 +1478,43 @@ class Game:
             if any(tk.alive and br.blocks_circle(tk.x, tk.y, tk.radius)
                    for tk in self.tanks):
                 continue
-            t.barrier_charges -= 1
+            t.consume_wall(tier)
             self.barriers.append(br)
             self.arena.set_dynamic(self.barriers)
-            self.effects.burst(cx, cy, (205, 210, 225), 8, 150, 0.3, 3)
+            self.effects.burst(cx, cy, WALL_TIERS[tier]["color"], 8, 150, 0.3, 3)
             self.sounds.play("ric")
             return True
         self.effects.float_text(t.x, t.y - 54, "ЗДЕСЬ НЕ ПОСТАВИТЬ", (255, 90, 90))
         return False
+
+    def _repair_step(self, t, holding, dt):
+        """v3.2: РЕМОНТ СТЕН (просьба игрока: «чтоб можно было чинить
+        стены»). Держите H рядом со своей (или командной) стеной — гаечный
+        ключ тикает прочность обратно. Чинятся только СВОИ стены: в FFA —
+        ваши, в командах — всей вашей стороны. Боты-защитники чинят форт
+        тем же механизмом."""
+        if not holding or not t.alive:
+            return False
+        my = self.tank_team.get(t)
+        best, best_d = None, WALL_REPAIR_DIST
+        for br in self.barriers:
+            if br.hp >= br.max_hp:
+                continue
+            if self.tank_team.get(br.owner) != my:
+                continue      # чужие стены не чиним
+            d = br._dist(t.x, t.y)
+            if d < best_d:
+                best, best_d = br, d
+        if best is None:
+            return False
+        before = best.hp
+        best.hp = min(best.max_hp, best.hp + WALL_REPAIR_RATE * dt)
+        # искры у ближнего конца стены — раз в 0.2 с
+        self._repair_fx -= dt
+        if self._repair_fx <= 0:
+            self._repair_fx = 0.2
+            self.effects.burst(best.x, best.y, (120, 255, 170), 4, 90, 0.25, 2)
+        return best.hp > before
 
     def _place_turret(self, t):
         """v2.9: ТУРЕЛЬ ставится по R чуть позади танка — сама ищет и
@@ -1600,6 +1727,8 @@ class Game:
 
         in_battle = self.state in ("intro", "fight", "round_end", "pause", "match_end")
         if in_battle:
+            if self.is_assault:      # v3.2: точка захвата — под всем остальным
+                self._draw_capture_point(self.world, ox, oy)
             for pu in self.powerups:
                 pu.draw(self.world, ox, oy)
             for m in self.mines:
@@ -1640,12 +1769,16 @@ class Game:
             elif self.state == "round_end":
                 if self.team_mode:
                     if self.winner == 0:
-                        self._banner("РАУНД ЗА ВАШЕЙ КОМАНДОЙ", COL_P1,
+                        self._banner("ОБОРОНА ВЫДЕРЖАЛА" if self.is_assault
+                                     else "РАУНД ЗА ВАШЕЙ КОМАНДОЙ", COL_P1,
                                      sub2="+%d ОЧКОВ" % SCORE_ROUND_WIN)
                     elif self.winner == 1:
                         col = self.foes[0].color if self.foes else COL_P2
-                        self._banner("РАУНД ЗА БОССОМ" if self.mode == 7
-                                     else "РАУНД ЗА КОМАНДОЙ БОТОВ", col)
+                        if self.is_assault:
+                            self._banner("ТОЧКУ ЗАХВАТИЛИ", col)
+                        else:
+                            self._banner("РАУНД ЗА БОССОМ" if self.mode == 7
+                                         else "РАУНД ЗА КОМАНДОЙ БОТОВ", col)
                     else:
                         self._banner("НИЧЬЯ", COL_TEXT,
                                      sub2="+%d ОЧКОВ" % SCORE_ROUND_DRAW)
@@ -1685,6 +1818,29 @@ class Game:
         if self.con_open:
             self._draw_console()
 
+    def _draw_capture_point(self, surf, ox=0, oy=0):
+        """v3.2: ТОЧКА ЗАХВАТА ШТУРМА — пульсирующее золотое кольцо в
+        центре карты; по мере захвата заливка и дуга краснеют."""
+        x, y = int(self.cap_xy[0] + ox), int(self.cap_xy[1] + oy)
+        r = ASSAULT_POINT_R
+        t = pygame.time.get_ticks() / 1000.0
+        k = max(0.0, min(1.0, self.cap_progress / ASSAULT_CAPTURE_T))
+        col = (255, 208 - int(148 * k), int(60 * (1 - k) + 40))
+        # тёмный диск под точкой, чтобы читалась на любой карте
+        pygame.draw.circle(surf, (24, 30, 56), (x, y), r)
+        pygame.draw.circle(surf, col, (x, y), r, 4)
+        # пульсирующее внутреннее кольцо
+        rr = int((r - 14) * (0.55 + 0.06 * math.sin(t * 2.2)))
+        pygame.draw.circle(surf, col, (x, y), rr, 1)
+        # крест прицела в центре
+        pygame.draw.line(surf, col, (x - 16, y), (x + 16, y), 2)
+        pygame.draw.line(surf, col, (x, y - 16), (x, y + 16), 2)
+        # дуга прогресса захвата (красная — тем длиннее, чем ближе захват)
+        if k > 0.001:
+            rect = pygame.Rect(x - r + 8, y - r + 8, (r - 8) * 2, (r - 8) * 2)
+            pygame.draw.arc(surf, (255, 70, 70), rect,
+                            math.radians(-90), math.radians(-90 + 360 * k), 5)
+
     def _banner(self, text, color, sub="", sub2=None):
         dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
         dim.fill((5, 6, 14, 150))
@@ -1707,17 +1863,17 @@ class Game:
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
-            "Q — стена (до 12!)   E — мина   R — ТУРЕЛЬ   X — ЭМИ-заряд   БИЛДЫ — в ангаре (8 штук)",
-            "СНАРЯДЫ: стандартный · разрывной · бронебойный · зажигательный — у ботов СВОИ.",
-            "БИЛДЫ теперь и У БОТОВ — случайный каждому: заварушка в 10×10! СТРОЙКА ВЕКА:",
-            "10 стен + 3 мины + 2 турели, но вы вдвое медленнее. Мины и стены — ПОСТОЯННЫЕ.",
-            "После смерти — СПЕКТАТОР: ←/→ переключают, за кем смотреть. Консоль читера — Ё (`).",
+            "Q — стена (4 ярусов!)   E — мина   R — ТУРЕЛЬ   H — РЕМОНТ стен   X — ЭМИ   V — КРУГОВОЙ АД",
+            "НОВОЕ — ШТУРМ: одна команда ДЕРЖИТ точку в центре, вторая ШТУРМУЕТ (1×1…7×7).",
+            "СТЕНЫ: обычные, ПРОЧНЫЕ (8 выстрелов), ОЧЕНЬ ПРОЧНЫЕ (12) и НЕВЕРОЯТНО ПРОЧНЫЕ (16)",
+            "— держите H у своей стены, и гаечный ключ вернёт ей прочность. У защитников в ШТУРМЕ:",
+            "5 прочных стен, 2 турели и 3 мины каждому. После смерти — СПЕКТАТОР: ←/→. Консоль — Ё (`).",
         ]
-        y = 304
+        y = 296
         for s in lines:
             img = get_font(21, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
-            y += 28
+            y += 24
         # выбор сложности (1/2/3 или клик)
         y += 6
         img = get_font(20, bold=False).render("Сложность бота (1/2/3 или клик):",
@@ -1745,7 +1901,10 @@ class Game:
                     11: "FFA×6", 12: "FFA×7", 13: "FFA×8",
                     14: "FFA×9", 15: "FFA×10",
                     16: "6×6", 17: "7×7", 18: "8×8", 19: "9×9",
-                    20: "ЗАВАРУШКА 10×10"}
+                    20: "ЗАВАРУШКА 10×10",
+                    21: "ШТУРМ 1×1", 22: "ШТУРМ 2×2", 23: "ШТУРМ 3×3",
+                    24: "ШТУРМ 4×4", 25: "ШТУРМ 5×5", 26: "ШТУРМ 6×6",
+                    27: "ШТУРМ 7×7"}
         gap = 18
         fmode = get_font(16)
 
@@ -1768,6 +1927,8 @@ class Game:
         mode_row((2, 3, 4, 5, 11, 12, 13, 14, 15), y)   # все против всех
         y += 34
         mode_row((6, 7, 8, 9, 10, 16, 17, 18, 19, 20), y)  # команды, босс и армии
+        y += 34
+        mode_row(ASSAULT_MODES, y)                     # v3.2: ШТУРМ 1×1…7×7
         # статистика матчей и рекорд
         y += 38
         st = "Побед: %d   Поражений: %d   Ничьих: %d   ·   Рекорд очков: %d" % (
@@ -1784,7 +1945,7 @@ class Game:
             "или Enter / T — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.1.1 · КРУГОВОЙ АД", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.2 · ШТУРМ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -2457,8 +2618,15 @@ class Game:
             sfx.append("стихия: %s" % t.elem["name"])
         if t.mine_carried > 0:
             sfx.append("МИНА x%d (E)" % t.mine_carried)
-        if t.barrier_charges > 0:
-            sfx.append("СТЕНА x%d (Q)" % t.barrier_charges)
+        # v3.2: стены по ярусам — все ставятся по Q (сначала обычные)
+        if t.wall_charges.get("std", 0) > 0:
+            sfx.append("СТЕНА x%d (Q)" % t.wall_charges["std"])
+        if t.wall_charges.get("strong", 0) > 0:
+            sfx.append("ПРОЧН.СТЕНА x%d" % t.wall_charges["strong"])
+        if t.wall_charges.get("heavy", 0) > 0:
+            sfx.append("ОЧ.ПРОЧН.СТЕНА x%d" % t.wall_charges["heavy"])
+        if t.wall_charges.get("ultra", 0) > 0:
+            sfx.append("НЕВЕРОЯТН.СТЕНА x%d" % t.wall_charges["ultra"])
         if t.turret_charges > 0:
             sfx.append("ТУРЕЛЬ x%d (R)" % t.turret_charges)
         if t.emp_charges > 0:
@@ -2542,11 +2710,18 @@ class Game:
             seg_f = get_font(26 if len(self.tanks) <= 7 else 15)
             dot = seg_f.render(" · ", True, COL_DIM)
             if self.team_mode:
-                segs = [seg_f.render("КОМАНДА %d" % self.score[0], True, COL_P1),
-                        seg_f.render(("БОСС %d" if self.mode == 7 else "БОТЫ %d")
-                                     % self.score[1],
-                                     True, self.foes[0].color if self.foes
-                                     else COL_P2)]
+                if self.is_assault:   # v3.2: в ШТУРМЕ стороны — ОБОРОНА и АТАКА
+                    segs = [seg_f.render("ОБОРОНА (ВЫ) %d" % self.score[0],
+                                         True, COL_P1),
+                            seg_f.render("АТАКА %d" % self.score[1], True,
+                                         self.foes[0].color if self.foes
+                                         else COL_P2)]
+                else:
+                    segs = [seg_f.render("КОМАНДА %d" % self.score[0], True, COL_P1),
+                            seg_f.render(("БОСС %d" if self.mode == 7 else "БОТЫ %d")
+                                         % self.score[1],
+                                         True, self.foes[0].color if self.foes
+                                         else COL_P2)]
             else:
                 segs = []
                 for i, t in enumerate(self.tanks):
@@ -2568,6 +2743,40 @@ class Game:
             img = get_font(14, bold=False).render(map_line, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2,
                                                        SCREEN_H - 22)))
+        # v3.2: ШТУРМ — панель ТОЧКИ: роль, прогресс захвата и таймер обороны
+        if self.is_assault and self.state in ("fight", "intro", "pause"):
+            capx, capy = self.cap_xy
+            r2 = ASSAULT_POINT_R ** 2
+            on_atk = sum(1 for t in self.tanks if t.alive
+                         and self.tank_team.get(t) == 1
+                         and (t.x - capx) ** 2 + (t.y - capy) ** 2 < r2)
+            on_dfn = sum(1 for t in self.tanks if t.alive
+                         and self.tank_team.get(t) == 0
+                         and (t.x - capx) ** 2 + (t.y - capy) ** 2 < r2)
+            img = get_font(16).render("ВЫ — ОБОРОНА: ДЕРЖИТЕ ТОЧКУ В ЦЕНТРЕ",
+                                      True, COL_GOLD)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 64)))
+            k = max(0.0, min(1.0, self.cap_progress / ASSAULT_CAPTURE_T))
+            bar = pygame.Rect(0, 0, 320, 12)
+            bar.center = (SCREEN_W / 2, 86)
+            pygame.draw.rect(self.screen, (30, 36, 60), bar, border_radius=6)
+            if k > 0:
+                f = bar.copy()
+                f.w = max(3, int(bar.w * k))
+                pygame.draw.rect(self.screen, (255, 70, 70), f, border_radius=6)
+            pygame.draw.rect(self.screen, (70, 80, 120), bar, 1, border_radius=6)
+            if on_atk and on_dfn:
+                st, col = "ТОЧКА В СПОРЕ", (255, 208, 0)
+            elif on_atk:
+                st, col = "ВРАГ ЗАХВАТЫВАЕТ ТОЧКУ!", (255, 70, 70)
+            elif on_dfn:
+                st, col = "ВЫ НА ТОЧКЕ — ЗАХВАТ ОТКАТЫВАЕТСЯ", (120, 255, 150)
+            else:
+                st, col = "ТОЧКА НИКЕМ НЕ ЗАНЯТА", (160, 200, 255)
+            img = get_font(14, bold=False).render(
+                "%s   ·   ОБОРОНЕ ДЕРЖАТЬ: %d С" % (st, int(self.cap_hold + 0.99)),
+                True, col)
+            self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 106)))
         if self.spectate_t > 0 and self.state == "fight":
             img = get_font(16).render(
                 "БОТЫ ВЫЯСНЯЮТ ОТНОШЕНИЯ — ДОХНУТ ЧЕРЕЗ %d С (НИЧЬЯ)"

@@ -19,7 +19,8 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       ICE_TIME, ICE_IMMUNE_T, POISON_TIME, POISON_DPS,
                       PU_MINE_CARRY, BARRIER_MAX,
                       TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP,
-                      SHELL_TYPES, SHELL_AP_RELOAD_MULT)
+                      SHELL_TYPES, SHELL_AP_RELOAD_MULT,
+                      WALL_TIER_ORDER, WALL_CARRY, WALL_BONUS_GIVE)
 from bullet import Bullet, ELEMENT_COLORS
 
 # уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
@@ -108,7 +109,11 @@ class Tank:
         # ручные бустеры: мины, стены-барьеры, турели, ЭМИ-заряды и
         # разрывные снаряды носятся в боекомплекте (v2.9)
         self.mine_carried = 0
-        self.barrier_charges = 0
+        # v3.2: стены носятся ПО ЯРУСАМ: обычные («СТЕНА»), прочные,
+        # очень прочные и невероятно прочные. barrier_charges — свойство
+        # над wall_charges["std"]: старый код (билды, бонусы, тесты)
+        # продолжает работать без изменений.
+        self.wall_charges = {tier: 0 for tier in WALL_TIER_ORDER}
         self.turret_charges = 0    # турели (R) — бонус «Т» или билд «Турельщик»
         self.emp_charges = 0       # носимые ЭМИ-заряды (X) — билд «Связист»
         self.he_shots = 0          # разрывные снаряды — бонус «Р» или билд
@@ -123,6 +128,40 @@ class Tank:
         if self.scale != 1.0:
             self._sprite = pygame.transform.smoothscale(
                 self._sprite, (int(64 * self.scale), int(50 * self.scale)))
+
+    # ----- v3.2: стены по ярусам -----
+    @property
+    def barrier_charges(self):
+        """Сколько ОБЫЧНЫХ стен в боекомплекте (совместимость с v2.9-v3.1.1:
+        билды, бонусы и тесты продолжают читать/писать старое поле)."""
+        return self.wall_charges.get("std", 0)
+
+    @barrier_charges.setter
+    def barrier_charges(self, v):
+        self.wall_charges["std"] = max(0, int(v))
+
+    def wall_total(self):
+        """Стен всех ярусов в боекомплекте."""
+        return sum(self.wall_charges.values())
+
+    def next_wall_tier(self):
+        """Какой ярус уйдёт следующим при установке по Q: сначала обычные,
+        потом прочные, очень прочные и невероятно прочные (или None)."""
+        for tier in WALL_TIER_ORDER:
+            if self.wall_charges.get(tier, 0) > 0:
+                return tier
+        return None
+
+    def consume_wall(self, tier):
+        if self.wall_charges.get(tier, 0) > 0:
+            self.wall_charges[tier] -= 1
+
+    def give_walls(self, tier, n):
+        """Выдать n стен яруса tier (бонус, билд, комплект ШТУРМА)."""
+        if tier not in self.wall_charges:
+            return
+        cap = WALL_CARRY.get(tier, 4)
+        self.wall_charges[tier] = min(self.wall_charges[tier] + n, cap)
 
     # ----- характеристики с учётом бонусов, дула и перка -----
     @property
@@ -470,7 +509,14 @@ class Tank:
             # мина больше не ставится сама — носим в боекомплекте (клавиша E)
             self.mine_carried = min(self.mine_carried + 1, PU_MINE_CARRY)
         elif kind == "barrier":
-            self.barrier_charges = min(self.barrier_charges + 1, BARRIER_MAX)
+            self.wall_charges["std"] = min(self.wall_charges["std"] + 1,
+                                           WALL_CARRY["std"])
+        elif kind == "wall_strong":   # v3.2: прочная стена (8 выстрелов)
+            self.give_walls("strong", WALL_BONUS_GIVE["strong"])
+        elif kind == "wall_heavy":    # v3.2: очень прочная (12 выстрелов)
+            self.give_walls("heavy", WALL_BONUS_GIVE["heavy"])
+        elif kind == "wall_ultra":    # v3.2: невероятно прочная (16 выстрелов)
+            self.give_walls("ultra", WALL_BONUS_GIVE["ultra"])
         elif kind == "turret":
             # v2.9: турель в боекомплекте (клавиша R)
             self.turret_charges = min(self.turret_charges + 1, TURRET_CARRY)
