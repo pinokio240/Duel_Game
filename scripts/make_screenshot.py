@@ -142,4 +142,35 @@ g.draw()
 out3 = "/home/z/my-project/tool-results/menu.png"
 pygame.image.save(g.screen, out3)
 print("menu.png:", out3)
+
+# ----- кадр v3.3 «КРЕПОСТЬ»: оборона ВНУТРИ здания штурмовой карты -----
+# этот кадр становится главным screenshot.png: здание из прочных стен,
+# точка захвата внутри, защитники с комплектом, атака снаружи
+from arena import ASSAULT_MAPS
+g.mode = 25                       # ШТУРМ 5 на 5
+g.assault_side = "def"
+g.score = [0, 0]
+g.bot_builds = [("light", "compact", "shotgun", "sprinter", "electric"),
+                ("heavy", "armored", "howitzer", "turtle", "fire"),
+                ("medium", "medium", "rapidgun", "gunner", "poison"),
+                ("sport", "light", "long", "none", "vamp"),
+                ("heavy", "heavy", "standard", "turtle", "earth"),
+                ("light", "light", "twin", "sprinter", "water"),
+                ("medium", "armored", "shotgun", "none", "ice"),
+                ("sport", "compact", "rapidgun", "gunner", "fire"),
+                ("heavy", "medium", "howitzer", "turtle", "poison")]
+g._pick_assault_map = lambda: ASSAULT_MAPS[0]      # «ДОМ» — стабильный кадр
+g._reset_round()
+g.state = "fight"
+g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+for _ in range(420):              # 7 секунд: форт растёт, бой закипает
+    g.update(1 / 60.0)
+g.player.x, g.player.y = g.cap_xy[0] + 120, g.cap_xy[1] + 150
+g._cam_snap()                     # камера в здание, на точку
+g.update(1 / 60.0)
+g.draw()
+pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
+out4 = "/home/z/my-project/tool-results/fort.png"
+pygame.image.save(g.screen, out4)
+print("screenshot.png (КРЕПОСТЬ) + fort.png:", out4)
 pygame.quit()

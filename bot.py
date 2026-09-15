@@ -56,6 +56,7 @@ class BotAI:
         self.wall_cd = 0.0      # пауза между стенами
         self.turret_cd = 0.0    # v2.9: пауза между турелями
         self.emp_cd = 0.0       # v3.0: пауза между ЭМИ-зарядами
+        self.invisible_t = 0.0  # v3.3: как долго цель прячется в тени
         # v2.1: цель (в 1на1 — игрок, в FFA — ближайший чужой танк)
         self.target = None
 
@@ -221,15 +222,19 @@ class BotAI:
                     forward = 1
                 # v3.2: ШТУРМ — задачи важнее погони:
                 # защитник далеко от точки — домой; атакующий не видит
-                # цель и далеко от точки — давит на захват
+                # цель — давит на захват. v3.3: роли по assault_def/atk_team
+                # (игрок мог выбрать АТАКУ и штурмовать сам), и давить на
+                # точку в здании можно с любой дистанции, пока цель не видна
                 if getattr(game, "is_assault", False):
                     capx, capy = game.cap_xy
                     dp = math.hypot(t.x - capx, t.y - capy)
-                    if t.team == 0 and dp > ASSAULT_POINT_R * 2.6 and dist > 320:
+                    if (t.team == getattr(game, "assault_def_team", 0)
+                            and dp > ASSAULT_POINT_R * 2.6 and dist > 320):
                         desired = math.degrees(math.atan2(capy - t.y,
                                                           capx - t.x))
-                    elif (t.team == 1 and dist > 640
-                          and not self._visible(game, p.x, p.y)):
+                    elif (t.team == getattr(game, "assault_atk_team", 1)
+                          and not self._visible(game, p.x, p.y)
+                          and dp > ASSAULT_POINT_R * 1.5):
                         desired = math.degrees(math.atan2(capy - t.y,
                                                           capx - t.x))
 
@@ -246,6 +251,11 @@ class BotAI:
 
         t.control(dt, game.arena, forward, turn, tuple(game.tanks))
         self._try_fire(dt, game, p, ang_to)
+        # v3.3: атакующий в ШТУРМЕ крушит чужие и казённые стены, если
+        # живых врагов не видно — иначе здание не пройти
+        if (getattr(game, "is_assault", False)
+                and t.team == getattr(game, "assault_atk_team", 1)):
+            self._breach_fire(game, p)
 
     # ---------- куда едем ----------
 
@@ -257,9 +267,10 @@ class BotAI:
         p = self.target
         if p is None:
             return
-        # v3.2: ШТУРМ — поведение защитников
+        # v3.2: ШТУРМ — поведение защитников (v3.3: сторона обороны —
+        # assault_def_team, игрок мог сам стать атакой)
         assault = getattr(game, "is_assault", False)
-        if assault and t.team == 0:
+        if assault and t.team == getattr(game, "assault_def_team", 0):
             capx, capy = game.cap_xy
             dp = math.hypot(t.x - capx, t.y - capy)
             # чиним потрёпанные свои стены, пока враг далеко (dist — до цели)
@@ -332,9 +343,17 @@ class BotAI:
         if self.pu_target is not None:
             return math.degrees(math.atan2(self.pu_target.y - t.y,
                                            self.pu_target.x - t.x))
-        # 3) цель скрыта препятствием, стеной или дымом — заходим с фланга
+        # 3) цель скрыта препятствием, стеной или дымом — заходим с фланга;
+        # v3.3: если цель прячется УЖЕ ДОЛГО — рвёмся напролом: орбита
+        # может вечнопетлять в «тени» препятствия (найденный зависший
+        # паттерн стресс-теста: бот кружит, стоячая цель в тени — вечность)
         if not self._visible(game, p.x, p.y):
+            self.invisible_t += 1 / 60.0
+            if self.invisible_t > 4.0:
+                self.invisible_t = 0.0
+                return ang_to               # прямо на цель — выйдем из тени
             return self._flank_angle(ang_to, dist)
+        self.invisible_t = 0.0
         # 4) цель видна: сближение / отход / орбита
         return self._combat_angle(ang_to, dist)
 
@@ -361,6 +380,36 @@ class BotAI:
         return ang_to + 90 * self.orbit       # орбита
 
     # ---------- стрельба ----------
+
+    def _breach_wall(self, game):
+        """v3.3: ближайшая НЕ СВОЯ стена-барьер в радиусе 340 px —
+        чужая казённая стена здания или личная стена врага."""
+        t = self.t
+        best, best_d = None, 340.0
+        for br in getattr(game, "barriers", []):
+            if getattr(br, "team", None) == t.team:
+                continue          # свои не крушим
+            d = br._dist(t.x, t.y)
+            if d < best_d:
+                best, best_d = br, d
+        return best
+
+    def _breach_fire(self, game, p):
+        """v3.3: ПРОЛОМАНИЕ СТЕН — цель не видна, а рядом чужая стена:
+        доворачиваем и долбим её снарядами, пока не откроется проход."""
+        t = self.t
+        if self.fire_delay > 0 or t.cooldown > 0 or not p.alive:
+            return
+        if self._visible(game, p.x, p.y):
+            return                # враг виден — снаряды ему, не стене
+        br = self._breach_wall(game)
+        if br is None:
+            return
+        aim = math.degrees(math.atan2(br.y - t.y, br.x - t.x))
+        if abs(_ang_diff(aim, t.angle)) < 10:
+            game.fire_weapon(t)
+            self.fire_delay = random.uniform(self.preset["fire_min"],
+                                             max(0.35, self.preset["fire_max"]))
 
     def _try_fire(self, dt, game, p, ang_to):
         t = self.t

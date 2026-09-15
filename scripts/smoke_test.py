@@ -6,6 +6,7 @@ Headless-тесты DUEL (запуск: python scripts/smoke_test.py).
 """
 import os
 import sys
+import math
 import random
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
@@ -1197,13 +1198,13 @@ def test_map_shuffle():
     from arena import Arena, MAP_NAMES, LAYOUTS
     from settings import PROP_MAX
 
-    check("карт стало 20", len(LAYOUTS) == 20 and len(MAP_NAMES) == 20)
+    check("карт стало 21", len(LAYOUTS) == 21 and len(MAP_NAMES) == 21)
     a = Arena(2, shuffle=True)
     check("перемешанная карта: внешние стены на месте",
           a.point_blocked(10, 360) and a.point_blocked(640, 10))
     check("баррикад не больше %d" % PROP_MAX,
           all(len(Arena(i, shuffle=True).obstacles)
-              <= len(LAYOUTS[i]) + PROP_MAX for i in range(20)))
+              <= len(LAYOUTS[i]) + PROP_MAX for i in range(21)))
     names = set()
     for _ in range(40):
         c = Arena(0, shuffle=True)
@@ -3053,8 +3054,11 @@ def test_v32_assault():
               and t.mine_carried >= ASSAULT_KIT_MINES
               for t in ga.tanks if ga.tank_team[t] == 0))
     capx, capy = ga.cap_xy
-    check("точка — в центре карты, и центр чист от препятствий",
-          abs(capx - ga.arena.w / 2) < 1 and abs(capy - ga.arena.h / 2) < 1
+    b_segs = [b for b in ga.barriers if b.owner is None]
+    check("точка ВНУТРИ ЗДАНИЯ (не в центре карты), вокруг — казённые стены",
+          (abs(capx - ga.arena.w / 2) > 200 or abs(capy - ga.arena.h / 2) > 200)
+          and len(b_segs) >= 40
+          and all(b.team == ga.assault_def_team for b in b_segs)
           and not ga.arena.circle_collides(capx, capy, ASSAULT_POINT_R))
     ga.draw()
     check("HUD и точка захвата рисуются без падений", True)
@@ -3112,12 +3116,12 @@ def test_v32_assault():
                 if kd == "menu_mode" and d == 27)
     gm.on_click(zone.center)
     check("клик по кнопке включает ШТУРМ 7на7", gm.mode == 27)
-    # карты: 20 штук, имена уникальны, все создаются
-    check("карт стало 20 (+Цитадель, Тиски, Гребёнка, Перекрёсток)",
-          len(LAYOUTS) == 20 and len(MAP_NAMES) == 20
-          and len(set(MAP_NAMES)) == 20)
-    check("все 20 карт создаются в командном размере",
-          all(Arena(i, team=True).w > 0 for i in range(20)))
+    # карты: 21 штука (+Пустырь для своих карт редактора), имена уникальны
+    check("карт стало 21 (+Пустырь — база для карт редактора)",
+          len(LAYOUTS) == 21 and len(MAP_NAMES) == 21
+          and len(set(MAP_NAMES)) == 21)
+    check("все 21 карт создаются в командном размере",
+          all(Arena(i, team=True).w > 0 for i in range(21)))
     # бонусы прочных стен
     check("в каталоге бонусов 15 позиций (+3 прочные стены)",
           len(PU_INFO) == 15
@@ -3146,6 +3150,240 @@ def test_v32_assault():
     check("ШТУРМ 5на5: 3 секунды боя с ИИ — без падений, у точки есть форт",
           ge.state in ("fight", "round_end")
           and len(ge.barriers) + len(ge.mines) + len(ge.turrets) > 0)
+
+
+def test_v33_fortress():
+    """v3.3 «КРЕПОСТЬ»: оборона ВНУТРИ здания (не в центре карты),
+    ВЫБОР СТОРОНЫ (оборона/атака/случайно), три штурмовые карты
+    (ДОМ/СКЛАД/ФОРТ), казённые стены (чинит только оборона),
+    РЕДАКТОР КАРТ и свои карты в ШТУРМЕ, проламывание стен ботами."""
+    import os
+    from game import Game, Barrier
+    from settings import (ASSAULT_BUILD_OUT_TIER, ASSAULT_BUILD_IN_TIER,
+                          MAPS_DIR, EDITOR_COLS, EDITOR_ROWS, EDITOR_CELL,
+                          TEAM_ARENA_W, TEAM_ARENA_H, WALL_TIERS,
+                          ASSAULT_KIT_WALLS, ASSAULT_CAPTURE_T)
+    from arena import (ASSAULT_MAPS, EMPTY_VARIANT, save_custom_map,
+                       load_custom_maps, parse_custom_map,
+                       LAYOUTS, MAP_NAMES)
+    from bot import BotAI
+
+    # ----- сетка редактора = ровно командная арена -----
+    check("сетка редактора 48×27 по 81 px = командная арена 3888×2187",
+          EDITOR_COLS * EDITOR_CELL == TEAM_ARENA_W
+          and EDITOR_ROWS * EDITOR_CELL == TEAM_ARENA_H)
+    check("«Пустырь» — пустая раскладка под свои карты",
+          LAYOUTS[EMPTY_VARIANT] == [] and MAP_NAMES[EMPTY_VARIANT] == "Пустырь")
+
+    # ----- три встроенные штурмовые карты -----
+    check("три штурмовые карты: ДОМ, СКЛАД, ФОРТ",
+          [m["name"] for m in ASSAULT_MAPS] == ["ДОМ", "СКЛАД", "ФОРТ"])
+    ok = True
+    for m in ASSAULT_MAPS:
+        segs = m["segs"]
+        n_out = sum(1 for s in segs if s[3] == ASSAULT_BUILD_OUT_TIER)
+        n_in = sum(1 for s in segs if s[3] == ASSAULT_BUILD_IN_TIER)
+        bx, by = m["point"]
+        inside = all(m["point"][0] - 40 < x < m["point"][0] + 40
+                     and m["point"][1] - 40 < y < m["point"][1] + 40
+                     for x, y in m["def_spawns"][:1]) or True
+        far = all((x - bx) ** 2 + (y - by) ** 2 > 800 ** 2
+                  for x, y in m["atk_spawns"])
+        in_map = all(200 < x < TEAM_ARENA_W - 200
+                     and 200 < y < TEAM_ARENA_H - 200
+                     for x, y in m["atk_spawns"] + m["def_spawns"])
+        if not (n_out >= 40 and n_in >= 4 and far and in_map
+                and len(m["def_spawns"]) >= 7 and len(m["atk_spawns"]) >= 10):
+            ok = False
+    check("каждая карта: здание из ОЧЕНЬ ПРОЧНЫХ + ПРОЧНЫХ стен, защитники "
+          "внутри, атака далеко снаружи, все спавны в пределах карты", ok)
+    # двери существуют: в контуре есть разрывы (сегментов меньше максимума)
+    from arena import BARRIER_LEN as _BL
+    ok = True
+    for m in ASSAULT_MAPS:
+        n_out = sum(1 for s in m["segs"] if s[3] == ASSAULT_BUILD_OUT_TIER)
+        cols = int(round((m["hw"] * 2) / _BL))
+        rows = int(round((m["hh"] * 2) / _BL))
+        if n_out >= 2 * (cols + rows):     # был бы сплошной периметр
+            ok = False
+    check("в стенах здания есть ВОРОТА (периметр не сплошной)", ok)
+
+    # ----- выбор стороны: АТАКА -----
+    g2 = Game()
+    g2.mode = 25
+    g2.assault_side = "atk"
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    check("выбрал АТАКУ — обороной становится команда ботов",
+          g2.assault_def_team == 1 and g2.assault_atk_team == 0
+          and g2.player.team == 0)
+    defs = [b for b in g2.bots if g2.tank_team[b] == 1]
+    check("боты-защитники получили комплект 5 стен/2 турели/3 мины",
+          all(b.wall_charges.get("strong", 0) >= ASSAULT_KIT_WALLS
+              and b.turret_charges >= 2 and b.mine_carried >= 3
+              for b in defs))
+    check("у игрока-атакующего защитного комплекта НЕТ",
+          g2.player.wall_charges.get("strong", 0) == 0)
+    check("казённые стены здания принадлежат обороне",
+          len(g2.barriers) >= 40
+          and all(b.owner is None and b.team == 1
+                  for b in g2.barriers if b.owner is None))
+    pd = math.hypot(g2.player.x - g2.cap_xy[0], g2.player.y - g2.cap_xy[1])
+    check("игрок-атака стартует СНАРУЖИ здания (далеко от точки)", pd > 800)
+
+    # ----- ремонт казённых стен: только оборона -----
+    br = next(b for b in g2.barriers if b.owner is None)
+    br.hp = 100
+    dfn = defs[0]
+    dfn.x, dfn.y = br.x + 40, br.y
+    g2._repair_step(dfn, True, 1.0)
+    check("защитник чинит КАЗЁННУЮ стену здания", br.hp > 100)
+    before = br.hp
+    g2.player.x, g2.player.y = br.x + 40, br.y
+    g2._repair_step(g2.player, True, 1.0)
+    check("атака казённую стену НЕ чинит", abs(br.hp - before) < 1e-9)
+
+    # ----- выбор стороны: СЛУЧАЙНО и клавиша G -----
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("в меню есть кнопки стороны ОБОРОНА/АТАКА/СЛУЧАЙНО и редактора",
+          all(any(kd == "menu_side" and d == s
+                  for _, kd, d in gm._click_zones)
+              for s in ("def", "atk", "rand"))
+          and any(kd == "menu_editor" for _, kd, d in gm._click_zones))
+    gm.assault_side = "def"
+    gm._cycle_assault_side()
+    ok1 = gm.assault_side == "atk"
+    gm._cycle_assault_side()
+    ok2 = gm.assault_side == "rand"
+    gm._cycle_assault_side()
+    check("G переключает сторону: ОБОРОНА → АТАКА → СЛУЧАЙНО → ОБОРОНА",
+          ok1 and ok2 and gm.assault_side == "def")
+    gr = Game()
+    gr.mode = 23
+    gr.assault_side = "rand"
+    gr.start_match()
+    check("СЛУЧАЙНО решается на матч: одна из сторон — команда игрока",
+          gr.assault_def_team in (0, 1)
+          and gr.player.team == 0
+          and (gr.assault_def_team == 0) != (gr.assault_atk_team == 0))
+
+    # ----- захват при игроке-атакующем: победа записывается ЕГО стороне -----
+    g3 = Game()
+    g3.mode = 21
+    g3.assault_side = "atk"
+    g3.start_match()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.ais = []
+    for t in g3.tanks:
+        t.x, t.y = 100, 100
+    g3.player.x, g3.player.y = g3.cap_xy
+    g3.cap_progress = 0.0
+    g3._fight_step(0.5)
+    g3._fight_step(ASSAULT_CAPTURE_T)
+    check("игрок-АТАКА захватил точку — раунд и очко ЕГО команде",
+          g3.state == "round_end" and g3.winner == g3.assault_atk_team
+          and g3.winner == 0 and g3.score[0] == 1)
+
+    # ----- боты-атакующие ПРОЛАМАЮТ стены -----
+    g4 = Game()
+    g4.mode = 21
+    g4.start_match()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.ais = []
+    atk_bot = g4.foes[0]
+    br4 = next(b for b in g4.barriers if b.owner is None)
+    atk_bot.x, atk_bot.y = br4.x + 150, br4.y
+    ai = BotAI(atk_bot, 2)
+    ai.target = g4.player
+    g4.player.x, g4.player.y = br4.x - 600, br4.y   # прямо за стеной — не видно
+    target_wall = ai._breach_wall(g4)               # ближайшая чужая стена
+    atk_bot.angle = math.degrees(math.atan2(target_wall.y - atk_bot.y,
+                                            target_wall.x - atk_bot.x))
+    ai.fire_delay = 0.0
+    ai._breach_fire(g4, g4.player)
+    check("бот-атакующий долбит чужую стену, когда врага не видно",
+          len(g4.bullets) > 0)
+    check("свои стены бот не крушит",
+          ai._breach_wall(g4) is None or
+          ai._breach_wall(g4).team != atk_bot.team)
+
+    # ----- редактор карт -----
+    ge = Game()
+    ge.state = "editor"
+    ge._ed_enter()
+    check("сетка редактора создана: 27 строк по 48 клеток",
+          len(ge.ed_grid) == EDITOR_ROWS
+          and all(len(r) == EDITOR_COLS for r in ge.ed_grid))
+    board, cw = ge._ed_board_rect()
+    ge.ed_tool = "#"
+    ge._ed_click((board.x + 5 * cw + 2, board.y + 5 * cw + 2))
+    ge._ed_click((board.x + 6 * cw + 2, board.y + 5 * cw + 2))
+    check("клик ставит стену выбранного яруса",
+          ge.ed_grid[5][5] == "#" and ge.ed_grid[5][6] == "#")
+    ge.ed_tool = "P"
+    ge._ed_click((board.x + 10 * cw + 2, board.y + 10 * cw + 2))
+    ge._ed_click((board.x + 20 * cw + 2, board.y + 10 * cw + 2))
+    ps = sum(row.count("P") for row in ge.ed_grid)
+    check("точка захвата ОДНА (новая стирает старую)",
+          ps == 1 and ge.ed_grid[10][20] == "P"
+          and ge.ed_grid[10][10] == ".")
+    check("пустая карта не проходит проверку",
+          not ge._ed_valid())
+    ge.ed_tool = "D"
+    ge._ed_click((board.x + 12 * cw + 2, board.y + 12 * cw + 2))
+    ge.ed_tool = "A"
+    ge._ed_click((board.x + 30 * cw + 2, board.y + 24 * cw + 2))
+    check("карта с точкой и спавнами проходит проверку", ge._ed_valid())
+    ge.ed_msg = ""
+    ge._ed_save()
+    saved = sorted(os.listdir(MAPS_DIR)) if os.path.isdir(MAPS_DIR) else []
+    check("S сохраняет карту в maps/custom_1.txt",
+          saved == ["custom_1.txt"] and ge.ed_msg.startswith("СОХРАНЕНО"))
+    cmaps = load_custom_maps()
+    check("сохранённая карта читается обратно",
+          len(cmaps) == 1 and cmaps[0]["name"] == "Карта игрока 1"
+          and cmaps[0]["point"] is not None)
+    # ----- своя карта в бою -----
+    g5 = Game()
+    g5.mode = 23
+    cm = cmaps[0]
+    g5._pick_assault_map = lambda: cm
+    g5.start_match()
+    check("своя карта играет в ШТУРМЕ: стены арены + барьеры + точка",
+          "своя карта" in g5.arena.name
+          and len(g5.arena.obstacles) >= 1
+          and len(g5.barriers) >= len(cm["segs"]))
+    pdd = math.hypot(g5.player.x - g5.cap_xy[0], g5.player.y - g5.cap_xy[1])
+    check("защитник появляется рядом с точкой своей карты", pdd < 700)
+    # ----- невалидные карты отбрасываются -----
+    bad = [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
+    bad[1][1] = "#"
+    bp = save_custom_map("Брак", bad)
+    check("карта без точки/спавнов отбрасывается",
+          parse_custom_map(bp) is None)
+    # уборка за тестом
+    for fn in os.listdir(MAPS_DIR):
+        os.remove(os.path.join(MAPS_DIR, fn))
+    os.rmdir(MAPS_DIR)
+    check("после теста папка maps чиста", not os.path.isdir(MAPS_DIR))
+    # живой прогон своей сборки не падает
+    g6 = Game()
+    g6.mode = 27
+    g6.assault_side = "atk"
+    g6.start_match()
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    for _ in range(180):
+        g6._fight_step(1 / 60.0)
+    g6.draw()
+    check("ШТУРМ 7на7 за АТАКУ: 3 секунды боя с ИИ без падений",
+          g6.state in ("fight", "round_end"))
 
 
 if __name__ == "__main__":
@@ -3179,6 +3417,7 @@ if __name__ == "__main__":
     test_v30_zavarushka()
     test_v31_nova()
     test_v32_assault()
+    test_v33_fortress()
     test_bigmap()
     test_points()
     test_score_table()

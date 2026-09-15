@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Арена: 20 вариантов расстановки препятствий, стены, коллизии, лучи.
+"""Арена: 21 вариант расстановки препятствий, стены, коллизии, лучи.
 v2.1: РАНДОМИЗАЦИЯ — перед боем карта может зеркально отразиться и получить
 несколько случайных баррикад, а сама арена переразыгрывается КАЖДЫЙ РАУНД.
 v2.2: КАРТЫ ПОБОЛЬШЕ — мир больше окна 1280x720: камера следует за игроком
@@ -7,14 +7,22 @@ v2.2: КАРТЫ ПОБОЛЬШЕ — мир больше окна 1280x720: к�
 v2.5: РАЗМЕРЫ ПОД РЕЖИМ: обычные карты 2752x1548 (ещё x1.5 площади к v2.4),
 командные 3888x2187 (ещё x3 площади к v2.4) — каждая арена несёт свой
 размер, масштаб раскладки и толщину стен.
-v2.8: АРМЕЙСКИЕ карты 5120x2880 — под командные 6на6…10на10 (12-20 танков)."""
+v2.8: АРМЕЙСКИЕ карты 5120x2880 — под командные 6на6…10на10 (12-20 танков).
+v3.3: КРЕПОСТЬ — ШТУРМОВЫЕ КАРТЫ со ЗДАНИЕМ из казённых прочных стен
+(защитники внутри, точка захвата в здании) и СВОИ КАРТЫ игрока из
+редактора: папка maps/custom_*.txt рядом с игрой."""
 import math
+import os
 import random
 import pygame
 from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
                       PROP_MAX, ARENA_W, ARENA_H,
                       TEAM_ARENA_W, TEAM_ARENA_H,
-                      ARMY_ARENA_W, ARMY_ARENA_H)
+                      ARMY_ARENA_W, ARMY_ARENA_H,
+                      BARRIER_LEN, ASSAULT_BUILD_OUT_TIER,
+                      ASSAULT_BUILD_IN_TIER, ASSAULT_DEF_SPAWNS,
+                      ASSAULT_ATK_SPAWNS, MAPS_DIR,
+                      EDITOR_COLS, EDITOR_ROWS, EDITOR_CELL)
 
 WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется)
 
@@ -140,12 +148,217 @@ LAYOUTS = [
      (760, 180, 140, 36), (864, 180, 36, 140),
      (380, 504, 140, 36), (380, 404, 36, 140),
      (602, 332, 76, 56)],
+    # v3.3 «Пустырь»: чистый пол — база для СВОИХ карт из редактора
+    # (и честная дуэль без укрытий, если выпадет в обычных режимах)
+    [],
 ]
 
 MAP_NAMES = ["Классика", "Крестовина", "Колонны", "Уголки",
              "Полоса", "Соты", "Мосты", "Бункер", "Веер", "Шахты",
              "Вилка", "Кольцо", "Зигзаг", "Казармы", "Ступени", "Бухта",
-             "Цитадель", "Тиски", "Гребёнка", "Перекрёсток"]
+             "Цитадель", "Тиски", "Гребёнка", "Перекрёсток",
+             "Пустырь"]
+
+# индекс пустой раскладки — на ней строятся СВОИ карты из редактора
+EMPTY_VARIANT = len(LAYOUTS) - 1
+
+
+# ================= ШТУРМОВЫЕ КАРТЫ (v3.3 «КРЕПОСТЬ») =================
+#
+# Три встроенные карты со ЗДАНИЕМ: защитники запираются внутри, точка
+# захвата стоит в здании, атака приезжает с противоположной стороны.
+# Здание собрано из КАЗЁННЫХ стен-барьеров: их можно ПРОЛОМАТЬ снарядами
+# и ЧИНИТЬ ключом (H) — но только защитникам.
+
+# наружные стены — ОЧЕНЬ ПРОЧНЫЕ, перегородки — ПРОЧНЫЕ (см. settings)
+
+
+def _wall_run(x, y, ux, uy, n, tier, skip=()):
+    """Прямой ряд из n сегментов стен шагом РОВНО в длину сегмента —
+    концы сходятся встык, щелей нет. skip — номера сегментов,
+    вырезанных под дверной проём."""
+    out = []
+    for i in range(n):
+        if i in skip:
+            continue
+        out.append((x + ux * BARRIER_LEN * i, y + uy * BARRIER_LEN * i,
+                    0.0 if ux else 90.0, tier))
+    return out
+
+
+def _door_skips(n, frac, units):
+    """Номера сегментов, попавших в дверной проём шириной units сегментов
+    с центром на frac доле стороны (0…1). Дырка в 2 сегмента = 152 px —
+    танк (48 px) проходит свободно."""
+    c = frac * (n - 1)
+    return tuple(i for i in range(n) if abs(i - c) < units / 2.0)
+
+
+def _assault_map(name, variant, bx, by, cols, rows, doors, inners,
+                 atk_side):
+    """Собрать штурмовую карту: здание cols×rows сегментов с центром
+    (bx, by), двери на сторонах (N/S/W/E), перегородки внутри.
+    doors: [(сторона, доля вдоль стороны, ширина в сегментах)].
+    inners: [("h"|"v", смещение в сегментах от левого/верхнего края,
+    от, до, доля двери, ширина двери)]. atk_side — где появляются
+    атакующие (противоположная зданию сторона)."""
+    hw, hh = cols * BARRIER_LEN / 2.0, rows * BARRIER_LEN / 2.0
+    x0, y0 = bx - hw, by - hh
+    segs = []
+    for side, n, sx, sy, ux, uy in (
+            ("N", cols, x0 + BARRIER_LEN / 2, y0, 1, 0),
+            ("S", cols, x0 + BARRIER_LEN / 2,
+             y0 + rows * BARRIER_LEN, 1, 0),
+            ("W", rows, x0, y0 + BARRIER_LEN / 2, 0, 1),
+            ("E", rows, x0 + cols * BARRIER_LEN,
+             y0 + BARRIER_LEN / 2, 0, 1)):
+        skip = set()
+        for dside, frac, units in doors:
+            if dside == side:
+                skip |= set(_door_skips(n, frac, units))
+        segs += _wall_run(sx, sy, ux, uy, n, ASSAULT_BUILD_OUT_TIER, skip)
+    for kind, off, a, b, dfrac, dunits in inners:
+        if kind == "h":
+            segs += _wall_run(x0 + a * BARRIER_LEN + BARRIER_LEN / 2,
+                              y0 + off * BARRIER_LEN, 1, 0, b - a,
+                              ASSAULT_BUILD_IN_TIER,
+                              _door_skips(b - a, dfrac, dunits))
+        else:
+            segs += _wall_run(x0 + off * BARRIER_LEN,
+                              y0 + a * BARRIER_LEN + BARRIER_LEN / 2,
+                              0, 1, b - a, ASSAULT_BUILD_IN_TIER,
+                              _door_skips(b - a, dfrac, dunits))
+    # защитники — кольцом вокруг точки ВНУТРИ здания (радиус 190:
+    # до перегородок остаётся зазор, танки появляются не в стенах)
+    def_spawns = []
+    for j in range(ASSAULT_DEF_SPAWNS):
+        a = math.radians(90 + j * 360.0 / ASSAULT_DEF_SPAWNS)
+        def_spawns.append((bx + math.cos(a) * 190,
+                           by + math.sin(a) * 190))
+    # атакующие — ровной шеренгой ВО ВСЮ противоположную сторону
+    # (всегда внутри карты, шаг ≥ 158 px)
+    atk_spawns = []
+    for j in range(ASSAULT_ATK_SPAWNS):
+        t = j * (TEAM_ARENA_W - 760) / (ASSAULT_ATK_SPAWNS - 1.0) + 380
+        s = j * (TEAM_ARENA_H - 760) / (ASSAULT_ATK_SPAWNS - 1.0) + 380
+        if atk_side == "S":
+            atk_spawns.append((t, TEAM_ARENA_H - 320))
+        elif atk_side == "N":
+            atk_spawns.append((t, 320))
+        elif atk_side == "W":
+            atk_spawns.append((420, s))
+        else:                                   # "E"
+            atk_spawns.append((TEAM_ARENA_W - 420, s))
+    return dict(name=name, variant=variant, segs=segs, point=(bx, by),
+                hw=hw, hh=hh, def_spawns=def_spawns,
+                atk_spawns=atk_spawns)
+
+
+ASSAULT_MAPS = [
+    # «ДОМ»: жилье на севере карты; главный вход с юга (широкие ворота),
+    # боковые двери с запада и востока; внутри — зал с двумя галереями
+    _assault_map("ДОМ", 15, 1944, 760, 18, 10,
+                 doors=(("S", 0.5, 3), ("W", 0.5, 2), ("E", 0.35, 2)),
+                 inners=(("h", 2, 2, 16, 0.5, 2),
+                         ("h", 8, 2, 16, 0.5, 2)),
+                 atk_side="S"),
+    # «СКЛАД»: длинное хранилище у восточной стены; ворота с запада (двое),
+    # калитки с севера и юга; внутри — ряды стеллажей-перегородок
+    _assault_map("СКЛАД", 12, 3054, 1094, 14, 18,
+                 doors=(("W", 0.3, 2), ("W", 0.75, 2),
+                        ("N", 0.5, 2), ("S", 0.5, 2)),
+                 inners=(("v", 2, 2, 16, 0.5, 2),
+                         ("v", 12, 2, 16, 0.5, 2)),
+                 atk_side="W"),
+    # «ФОРТ»: крепость в северо-западном углу; ворота с юга и калитка
+    # с востока; внутри — казарма-перегородка и колонный зал
+    _assault_map("ФОРТ", 10, 910, 644, 16, 9,
+                 doors=(("S", 0.4, 3), ("E", 0.6, 2)),
+                 inners=(("h", 3, 2, 14, 0.5, 2),
+                         ("v", 4, 2, 6, 0.5, 0)),
+                 atk_side="S"),
+]
+
+# ================= СВОИ КАРТЫ (v3.3: редактор карт) =================
+#
+# Формат maps/custom_N.txt: первая строка — название, дальше 27 строк
+# по 48 символов (клетка 81 px = ровно командная арена):
+#   .  пусто          #  стена (вечная)      S/H/U  прочные стены-барьеры
+#   P  точка захвата  D  спавн обороны       A      спавн атаки
+
+_CUSTOM_TIER = {"S": "strong", "H": "heavy", "U": "ultra"}
+
+
+def custom_map_path(idx):
+    return os.path.join(MAPS_DIR, "custom_%d.txt" % idx)
+
+
+def save_custom_map(name, grid):
+    """Сохранить карту редактора: ищем свободный номер custom_N.txt.
+    grid — список из EDITOR_ROWS строк по EDITOR_COLS символов.
+    Возвращает путь записанного файла."""
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    idx = 1
+    while os.path.exists(custom_map_path(idx)):
+        idx += 1
+    path = custom_map_path(idx)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write((name or "Карта игрока") + "\n")
+        for row in grid:
+            f.write("".join(row) + "\n")
+    return path
+
+
+def parse_custom_map(path):
+    """Разобрать файл своей карты. Возвращает dict с именем, стенами,
+    сегментами барьеров, точкой и спавнами — или None, если карта
+    нечитаема/неполноценна (нет точки или спавнов)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.rstrip("\n") for ln in f]
+    except OSError:
+        return None
+    lines = [ln for ln in lines if ln.strip() != ""]
+    if len(lines) < EDITOR_ROWS + 1:
+        return None
+    name = lines[0].strip()[:40] or "Карта игрока"
+    grid = lines[1:1 + EDITOR_ROWS]
+    walls, segs, point = [], [], None
+    def_spawns, atk_spawns = [], []
+    for r, row in enumerate(grid):
+        for c, ch in enumerate(row[:EDITOR_COLS]):
+            wx, wy = c * EDITOR_CELL + EDITOR_CELL / 2.0, \
+                     r * EDITOR_CELL + EDITOR_CELL / 2.0
+            if ch == "#":
+                walls.append(pygame.Rect(c * EDITOR_CELL, r * EDITOR_CELL,
+                                         EDITOR_CELL, EDITOR_CELL))
+            elif ch in _CUSTOM_TIER:
+                segs.append((wx, wy, 0.0, _CUSTOM_TIER[ch]))
+            elif ch == "P":
+                point = (wx, wy)
+            elif ch == "D":
+                def_spawns.append((wx, wy))
+            elif ch == "A":
+                atk_spawns.append((wx, wy))
+    if point is None or not def_spawns or not atk_spawns:
+        return None
+    return dict(name=name, custom=True, walls=walls, segs=segs,
+                point=point, def_spawns=def_spawns,
+                atk_spawns=atk_spawns)
+
+
+def load_custom_maps():
+    """Все свои карты из папки maps (custom_*.txt) — пригодные к бою.
+    Папки может не быть — это нормально, вернём пустой список."""
+    if not os.path.isdir(MAPS_DIR):
+        return []
+    out = []
+    for fn in sorted(os.listdir(MAPS_DIR)):
+        if fn.startswith("custom_") and fn.endswith(".txt"):
+            m = parse_custom_map(os.path.join(MAPS_DIR, fn))
+            if m is not None:
+                out.append(m)
+    return out
 
 
 class Arena:
@@ -235,6 +448,23 @@ class Arena:
         box = pygame.Rect(int(x - r), int(y - r), int(2 * r), int(2 * r))
         self.obstacles = [o for o in self.obstacles if not o.colliderect(box)]
         self.rects = self.walls + self.obstacles
+
+    def clear_box(self, rect):
+        """v3.3: убрать статические препятствия, влезающие в ПРЯМОУГОЛЬНИК
+        (под здание штурмовой карты — круг там срезал бы углы)."""
+        rect = pygame.Rect(rect)
+        self.obstacles = [o for o in self.obstacles
+                          if not o.colliderect(rect)]
+        self.rects = self.walls + self.obstacles
+
+    def add_static(self, rects):
+        """v3.3: добавить статические препятствия (свои карты редактора).
+        Вечные, как и прочие стены арены: снаряды отскакивают, танки
+        объезжают. Возвращает число добавленных."""
+        rects = [pygame.Rect(r) for r in rects]
+        self.obstacles.extend(rects)
+        self.rects = self.walls + self.obstacles
+        return len(rects)
 
     def walls_only(self):
         """Вид арены без барьеров — для снарядов (те бьют барьеры отдельно)."""
