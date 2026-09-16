@@ -200,8 +200,9 @@ class BotAI:
         # v3.4: ПРИКАЗЫ КОМАНДИРА — «держи позицию» и «за мной» важнее
         # собственного ИИ: движением управляет приказ, но стрелять и
         # пользоваться предметами (мины/стены/турели/ремонт) бот не перестаёт.
+        # v3.5: к ним добавились «в атаку» и «к точке».
         order = getattr(t, "order", None)
-        if order in ("hold", "follow"):
+        if order in ("hold", "follow", "attack", "point"):
             # задавили в стену (или построили её вплотную) — приказ
             # подождёт: сначала выбираемся, как и обычный ИИ
             if (game.arena.circle_collides(t.x, t.y, t.radius * 0.9)
@@ -240,6 +241,34 @@ class BotAI:
                 self._try_fire(dt, game, p, ang_to)
                 return
             # командир погиб — «за мной» потеряло смысл, воюем сами
+        if order == "attack":
+            # v3.5 «В АТАКУ»: давим на цель — идём к ней, даже если она
+            # не видна (по курсу на неё), стреляем как обычно; у самого
+            # носа не тремся — встаем и расстреливаем
+            dd = _ang_diff(ang_to, t.angle)
+            turn = 1 if dd > 3 else (-1 if dd < -3 else 0)
+            drive = 0 if dist < 210 else 1
+            t.control(dt, game.arena, drive, turn, tuple(game.tanks))
+            self._try_fire(dt, game, p, ang_to)
+            return
+        if order == "point":
+            # v3.5 «К ТОЧКЕ»: идем к точке сбора (order_xy — точка
+            # захвата в ШТУРМЕ или центр арены в командах); дойдя —
+            # встаем и держим оборону, стреляя по чужакам
+            px2, py2 = getattr(t, "order_xy", None) or game._order_point()
+            ddx, ddy = px2 - t.x, py2 - t.y
+            if math.hypot(ddx, ddy) > 240:
+                a2 = math.degrees(math.atan2(ddy, ddx))
+                dv = _ang_diff(a2, t.angle)
+                tv = 1 if dv > 3 else (-1 if dv < -3 else 0)
+                t.control(dt, game.arena, 1 if abs(dv) < 55 else 0, tv,
+                          tuple(game.tanks))
+            else:
+                dv = _ang_diff(ang_to, t.angle)
+                tv = 1 if dv > 4 else (-1 if dv < -4 else 0)
+                t.control(dt, game.arena, 0, tv, tuple(game.tanks))
+            self._try_fire(dt, game, p, ang_to)
+            return
 
         forward, turn = 0, 0
         desired = None

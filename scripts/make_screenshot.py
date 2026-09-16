@@ -176,12 +176,17 @@ for _ in range(420):              # 7 секунд: форт растёт, бо�
     g.update(1 / 60.0)
 g.player.x, g.player.y = g.cap_xy[0] + 120, g.cap_xy[1] + 150
 g._cam_snap()                     # камера в здание, на точку
+# v3.5: открываем ОКНО ПРИКАЗОВ — новый интерфейс генерала поверх боя
+g.orders_open = True
+g.orders_all = False
+g._mouse = (640, 240)             # курсор вне строк — без подсветки
 g.update(1 / 60.0)
 g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 out4 = "/home/z/my-project/tool-results/fort.png"
 pygame.image.save(g.screen, out4)
-print("screenshot.png (КРЕПОСТЬ + КОМАНДИР) + fort.png:", out4)
+print("screenshot.png (КРЕПОСТЬ + КОМАНДИР + ОКНО ПРИКАЗОВ) + fort.png:",
+      out4)
 
 # ----- кадр v3.4: КОМАНДНЫЙ бой с ВРАЖЕСКИМ КОМАНДИРОМ (★) -----
 # 4на4: у врагов звезда командира и приказы «ДЕРЖАТ», у союзников тоже

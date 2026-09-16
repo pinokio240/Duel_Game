@@ -3471,18 +3471,40 @@ def test_v34_commander():
     ally.x, ally.y = 1400, 1000
     g3.cam = [0.0, 0.0]
     g3._mouse = (1400, 1000)
-    g3._command_order()
-    check("E — приказ ближайшему к прицелу: ДЕРЖИ ПОЗИЦИЮ",
+    g3._command_order("hold")
+    check("приказ боту у прицела: ДЕРЖАТЬ ПОЗИЦИЮ",
           ally.order == "hold" and ally.order_xy == (1400, 1000))
-    g3._command_order()
-    check("второе E — ЗА МНОЙ", ally.order == "follow")
-    g3._command_order()
-    check("третье E — СВОБОДНО", ally.order is None)
-    g3._command_order(all_=True)
-    check("Shift+E — приказ ВСЕЙ команде разом",
+    g3._command_order("follow")
+    check("приказ ЗА МНОЙ", ally.order == "follow")
+    g3._command_order("free")
+    check("приказ СВОБОДНО", ally.order is None)
+    g3._command_order("hold", all_=True)
+    check("T/Shift+E — приказ ВСЕЙ команде разом",
           all(b.order == "hold" for b in allies))
     check("приказы получают только СВОИ боты",
           all(b.order is None for b in g3.bots if g3.tank_team.get(b) != 0))
+    # ----- v3.5: ОКНО ПРИКАЗОВ открывается на E и РАБОТАЕТ -----
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_e))
+    check("E ОТКРЫВАЕТ окно приказов", g3.orders_open)
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_t))
+    check("T в окне — цель «ВСЯ КОМАНДА»", g3.orders_all)
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
+    check("клавиша 3 — В АТАКУ всей команде (окно не закрылось)",
+          g3.orders_open and all(b.order == "attack" for b in allies))
+    g3.draw()
+    check("окно приказов рисуется без падений", True)
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_e))
+    check("E закрывает окно приказов", not g3.orders_open)
+    g3._command_open(all_=True)
+    check("Shift+E — окно сразу с целью ВСЯ КОМАНДА",
+          g3.orders_open and g3.orders_all)
+    g3.orders_all = False
+    g3.draw()
+    zone = next(z for z in g3._click_zones if z[1] == "ord_row")
+    g3.on_click((zone[0].centerx, zone[0].centery))
+    check("клик по строке окна отдаёт приказ боту у прицела",
+          ally.order == "hold")
+    g3.orders_open = False
     # боты слушаются: ДЕРЖАТЬ — стоят на месте
     for b in allies[1:]:
         b.x, b.y = 1000, 1700
@@ -3532,7 +3554,7 @@ def test_v34_commander():
     check("приказ держать НЕ ВЕЧНЫЙ: истёк — бот снова свободен",
           all(b.order is None for b in holds))
     g4.cmd_t = 9.0
-    g4._command_order(all_=True)
+    g4._command_order("hold", all_=True)
     check("после приказа игрока вражеский командир отвечает быстрее",
           g4.cmd_t <= CMD_REACT_T)
     # проигрыш по живым — «ВСЕ В АТАКУ»
@@ -3548,8 +3570,9 @@ def test_v34_commander():
     f5[0].order = "hold"
     f5[0].order_t = 10.0
     g5._enemy_commander()
-    check("врагов стало мало — командир снял оборону: ВСЕ В АТАКУ",
-          all(b.order is None for b in f5 if b.alive))
+    check("врагов стало мало — командир бросил всех В АТАКУ",
+          all(b.order == "attack" and b.order_t > 0
+              for b in f5 if b.alive))
     g4.draw()
     check("значки ★ КОМАНДИР и приказов рисуются без падений", True)
     tags = g4._status_tags(foes[0])
@@ -3562,9 +3585,17 @@ def test_v34_commander():
     g6.start_match()
     g6.state = "fight"
     g6._fake_keys = FakeKeys(())
-    g6._command_order()
+    g6._command_order("hold")
     check("в FFA командовать некем — E честно отвечает отказом",
           all(b.order is None for b in g6.bots))
+    g6.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_e))
+    check("в FFA окно приказов тоже открывается", g6.orders_open)
+    g6.draw()
+    check("окно в FFA честно пишет про отсутствие подчинённых", True)
+    g6.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_2))
+    check("в FFA приказ из окна не падает и не работает",
+          all(b.order is None for b in g6.bots))
+    g6.orders_open = False
 
     # ----- мина на F, E больше не мина -----
     g9 = Game()
@@ -3674,6 +3705,168 @@ def test_v34_commander():
           g11.state in ("fight", "round_end"))
 
 
+def test_v35_general():
+    """v3.5 «ГЕНЕРАЛ»: КРУГОВОЙ АД стреляет ВЫБРАННЫМ в ангаре снарядом
+    (ap/he/fire/star поверх x1.10, звёздный = 45 разрывов звездой),
+    вражеский командир бросает часть ботов В АТАКУ (не только «держать»),
+    приказы «в атаку» и «к точке» реально двигают бота, точка сбора в
+    ШТУРМЕ — точка захвата."""
+    from game import Game
+    from settings import (NOVA_SHELLS, NOVA_DAMAGE_MULT, BULLET_DAMAGE,
+                          BULLET_SPEED, SHELL_STAR_DAMAGE_MULT,
+                          STAR_SHARDS, STAR_SHARD_DAMAGE, STAR_SHARD_LIFE,
+                          CMD_HOLD_MIN, CMD_HOLD_MAX)
+    from arena import Arena, EMPTY_VARIANT
+    from bot import BotAI
+
+    # ----- НОВА из выбранного СНАРЯДА -----
+    g = Game()
+    g.mode = 2
+    g.start_match()
+    g.arena = Arena(EMPTY_VARIANT)
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    P = g.player
+
+    P.nova_charges = 1
+    P.shell_type = "ap"
+    g.bullets = []
+    g._fire_nova(P)
+    check("НОВА из БРОНЕБОЙНОГО: 45 пробивающих без рикошетов",
+          len(g.bullets) == NOVA_SHELLS
+          and all(b.shell == "ap" and b.pierce and b.bounces == 0
+                  for b in g.bullets))
+    check("НОВА бронебойного: урон x1.10x1.30 и скорость x1.30",
+          all(b.damage == round(BULLET_DAMAGE * NOVA_DAMAGE_MULT * 1.30)
+              for b in g.bullets)
+          and abs(math.hypot(g.bullets[0].vx, g.bullets[0].vy)
+                  - BULLET_SPEED * 1.30) < 1.0)
+
+    P.nova_charges = 1
+    P.shell_type = "he"
+    g.bullets = []
+    g._fire_nova(P)
+    check("НОВА из РАЗРЫВНОГО: все осколочные, урон x1.10x0.80",
+          all(b.he and b.shell == "he"
+              and b.damage == round(BULLET_DAMAGE * NOVA_DAMAGE_MULT * 0.80)
+              for b in g.bullets))
+
+    P.nova_charges = 1
+    P.shell_type = "fire"
+    g.bullets = []
+    g._fire_nova(P)
+    check("НОВА из ЗАЖИГАТЕЛЬНОГО: огненные снаряды (лужи на гибели)",
+          all(b.shell == "fire" and b.element == "fire"
+              for b in g.bullets))
+
+    P.nova_charges = 1
+    P.shell_type = "star"
+    g.bullets = []
+    g._fire_nova(P)
+    check("НОВА из ЗВЁЗДНОГО: ВСЕ 45 рвутся звездой (не только центральный)",
+          len(g.bullets) == NOVA_SHELLS
+          and all(b.star_split and b.shell == "star" for b in g.bullets))
+    check("урон звёздного залпа x1.10 x0.90",
+          all(b.damage == round(BULLET_DAMAGE * NOVA_DAMAGE_MULT
+                                * SHELL_STAR_DAMAGE_MULT)
+              for b in g.bullets))
+    shards = g.bullets[0].star_children()
+    check("осколок звёздного залпа: 5 лучей без повторного разрыва",
+          len(shards) == STAR_SHARDS
+          and all(not s.star_split and s.damage == STAR_SHARD_DAMAGE
+                  and abs(s.life - STAR_SHARD_LIFE) < 0.01
+                  for s in shards))
+
+    P.nova_charges = 1
+    P.shell_type = "std"
+    g.bullets = []
+    g._fire_nova(P)
+    check("НОВА из СТАНДАРТНОГО: классический урон x1.10",
+          all(b.damage == round(BULLET_DAMAGE * NOVA_DAMAGE_MULT)
+              for b in g.bullets))
+    P.nova_charges = 1                      # для проверки HUD-тега
+    tags = g._status_tags(P)
+    check("HUD: стандартный залп — без хвоста типа",
+          any(s.startswith("КРУГОВОЙ АД x1 (V)") for s in tags))
+    P.shell_type = "star"
+    tags = g._status_tags(P)
+    check("HUD: КРУГОВОЙ АД · ЗВЁЗДНЫЙ",
+          any("КРУГОВОЙ АД" in s and "ЗВЁЗДНЫЙ" in s for s in tags))
+
+    # ----- вражеский командир: часть В АТАКУ -----
+    g2 = Game()
+    g2.mode = 10           # 5на5: 4 свободных бота — держат и атакуют
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    f2 = [b for b in g2.bots if g2.tank_team.get(b) == 1]
+    g2._enemy_commander()
+    atks = [b for b in f2 if b.order == "attack"]
+    holds = [b for b in f2 if b.order == "hold"]
+    check("вражеский командир бросает часть ботов В АТАКУ",
+          len(atks) >= 1
+          and all(CMD_HOLD_MIN - 0.01 <= b.order_t <= CMD_HOLD_MAX
+                  for b in atks))
+    check("часть врагов при этом ДЕРЖИТ рубежи", len(holds) >= 1)
+    atks[0].order_t = 0.01
+    g2._fight_step(0.05)
+    check("приказ В АТАКУ от вражьего командира тоже НЕ вечный",
+          atks[0].order is None)
+
+    # ----- приказ В АТАКУ: бот давит на цель -----
+    g3 = Game()
+    g3.mode = 9            # 4на4, пустырь командного размера
+    g3.start_match()
+    g3.arena = Arena(EMPTY_VARIANT, team=True)
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.ais = []
+    a = next(b for b in g3.bots if g3.tank_team.get(b) == 0)
+    foe = next(b for b in g3.bots if g3.tank_team.get(b) != 0)
+    g3.player.x, g3.player.y = 300, 1800
+    a.x, a.y = 1000, 1000
+    foe.x, foe.y = 2200, 1000
+    foe.frozen_t = 99.0          # чтобы не толкал и не стрелял
+    foe.hp = foe.max_hp = 10 ** 9   # не умрёт от обстрела за тест
+    a.order = "attack"
+    a.order_t = 0.0
+    ai = BotAI(a, 2)
+    ai.target = foe
+    d0 = math.hypot(a.x - foe.x, a.y - foe.y)
+    for _ in range(300):
+        ai.update(1 / 60.0, g3)
+    d1 = math.hypot(a.x - foe.x, a.y - foe.y)
+    check("бот с приказом В АТАКУ сократил дистанцию до врага",
+          d1 < d0 - 200, "d0=%.0f d1=%.0f" % (d0, d1))
+
+    # ----- приказ К ТОЧКЕ: бот идёт к точке сбора -----
+    a2 = next(b for b in g3.bots
+              if g3.tank_team.get(b) == 0 and b is not a)
+    a2.x, a2.y = 500, 1000
+    a2.order = "point"
+    a2.order_xy = (3000, 1000)   # точка сбора далеко справа
+    ai2 = BotAI(a2, 2)
+    ai2.target = foe
+    p0 = math.hypot(a2.x - 3000, a2.y - 1000)
+    for _ in range(300):
+        ai2.update(1 / 60.0, g3)
+    p1 = math.hypot(a2.x - 3000, a2.y - 1000)
+    check("бот с приказом К ТОЧКЕ приблизился к точке сбора",
+          p1 < p0 - 200, "p0=%.0f p1=%.0f" % (p0, p1))
+
+    # в ШТУРМЕ точка сбора = точка захвата
+    g4 = Game()
+    g4.mode = 21           # ШТУРМ 1на1
+    g4.start_match()
+    check("в ШТУРМЕ приказ К ТОЧКЕ ведёт к точке захвата",
+          math.hypot(g4._order_point()[0] - g4.cap_xy[0],
+                     g4._order_point()[1] - g4.cap_xy[1]) < 1)
+    g4.draw()
+    check("рисование боя со звёздным залпом и приказами не падает", True)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -3707,6 +3900,7 @@ if __name__ == "__main__":
     test_v32_assault()
     test_v33_fortress()
     test_v34_commander()
+    test_v35_general()
     test_bigmap()
     test_points()
     test_score_table()
