@@ -281,7 +281,7 @@ def test_mine_rules():
     # враг далеко — ставится под себя
     bot.x, bot.y = p.x + 300, p.y
     ok = g._place_mine(p)
-    check("мина ставится по E, когда враг далеко",
+    check("мина ставится по F (E отдана командиру), когда враг далеко",
           ok and p.mine_carried == 0 and len(g.mines) == 1)
 
 
@@ -2150,8 +2150,9 @@ def test_v30_zavarushka():
     fx, snd = _Fx(), _Snd()
 
     # ----- каталог типов снарядов -----
-    check("в игре 4 ТИПА СНАРЯДОВ (std/he/ap/fire)",
-          len(SHELL_TYPES) == 4 and SHELL_KEYS == ["std", "he", "ap", "fire"])
+    check("в игре 5 ТИПОВ СНАРЯДОВ (std/he/ap/fire + звёздный)",
+          len(SHELL_TYPES) == 5
+          and SHELL_KEYS == ["std", "he", "ap", "fire", "star"])
     check("все типы с именем, цветом и описанием",
           all(s.get("name") and s.get("color") and s.get("desc")
               for s in SHELL_TYPES.values()))
@@ -2360,7 +2361,7 @@ def test_v30_zavarushka():
     g9.state = "select"
     g9.draw()
     zones = [(r, d) for r, kd, d in g9._click_zones if kd == "shell"]
-    check("в ангаре 4 кнопки ТИПА СНАРЯДА", len(zones) == 4)
+    check("в ангаре 5 кнопок ТИПА СНАРЯДА", len(zones) == 5)
     z_ap = next(r for r, d in zones if d == SHELL_KEYS.index("ap"))
     g9.on_click(z_ap.center)
     check("клик выбирает БРОНЕБОЙНЫЙ", g9.sel_shell == 2)
@@ -3386,6 +3387,293 @@ def test_v33_fortress():
           g6.state in ("fight", "round_end"))
 
 
+def test_v34_commander():
+    """v3.4 «КОМАНДИР»: приказы ботам по E (держи/за мной/свободно,
+    Shift+E — всем), ВРАЖЕСКИЙ КОМАНДИР (★) со своими приказами,
+    ЗВЁЗДНЫЙ снаряд (разрыв на 5 осколков звездой), редактор для
+    ОБЫЧНЫХ режимов (FFA и командные, custom_battle_*.txt), мина на F."""
+    import os
+    from game import Game, Barrier
+    from settings import (SHELL_TYPES, SHELL_KEYS, STAR_SHARDS,
+                          STAR_SHARD_DAMAGE, STAR_SHARD_LIFE,
+                          SHELL_STAR_DAMAGE_MULT,
+                          CMD_HOLD_MIN, CMD_HOLD_MAX, CMD_REACT_T)
+    from arena import (save_custom_battle_map, load_custom_battle_maps,
+                       load_custom_maps, parse_custom_battle_map,
+                       MAPS_DIR, EDITOR_COLS, EDITOR_ROWS, EMPTY_VARIANT,
+                       Arena)
+    from bot import BotAI
+
+    # ----- ЗВЁЗДНЫЙ СНАРЯД: разрыв на 5 звездой (пустая арена — без
+    # случайных препятствий на линии огня) -----
+    g = Game()
+    g.mode = 2
+    g.start_match()
+    g.arena = Arena(EMPTY_VARIANT)          # «Пустырь» — чистая линия огня
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    g.player.shell_type = "star"
+    g.player.cooldown = 0
+    bot = g.bot_tank
+    # оба — по центру пустыря: линия огня гарантированно чиста
+    g.player.x, g.player.y = g.arena.w / 2 - 200, g.arena.h / 2
+    bot.x, bot.y = g.player.x + 200, g.player.y
+    g.player.angle = 0.0
+    g.fire_weapon(g.player)
+    check("звёздный снаряд выпущен и помечен звездой",
+          len(g.bullets) == 1 and g.bullets[0].star_split
+          and abs(g.bullets[0].damage
+                  - 30 * 1.10 * SHELL_STAR_DAMAGE_MULT) < 0.2)
+    for _ in range(22):
+        g._fight_step(1 / 60.0)
+    check("при попадании снаряд разорвался на %d осколка" % STAR_SHARDS,
+          len(g.bullets) == STAR_SHARDS
+          and all(s.damage == STAR_SHARD_DAMAGE for s in g.bullets))
+    angs = sorted(round(math.degrees(math.atan2(s.vy, s.vx)) % 360)
+                  for s in g.bullets)
+    diffs = [(angs[(i + 1) % STAR_SHARDS] - angs[i]) % 360
+             for i in range(STAR_SHARDS)]
+    check("осколки летят РОВНО ЗВЕЗДОЙ (72° между лучами)",
+          all(abs(d - 360.0 / STAR_SHARDS) < 2 for d in diffs))
+    check("осколки не разрываются повторно",
+          all(not s.star_split for s in g.bullets))
+    for _ in range(60):
+        g._fight_step(1 / 60.0)
+    check("осколки угасают через %g с — не летят через всю карту"
+          % STAR_SHARD_LIFE, len(g.bullets) == 0)
+    # дробовик: звезда только у ПЕРВОЙ дробины (иначе артобстрел)
+    g2 = Game()
+    g2.mode = 2
+    g2.build = ("light", "light", "shotgun", "none", "none", (), (), ())
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    g2.player.shell_type = "star"
+    g2.player.cooldown = 0
+    g2.fire_weapon(g2.player)
+    check("дробовик со ЗВЁЗДНЫМ: 5 дробин, звезда только у первой",
+          len(g2.bullets) == 5
+          and sum(1 for b in g2.bullets if b.star_split) == 1)
+
+    # ----- ПРИКАЗЫ ПО E: держи / за мной / свободно -----
+    g3 = Game()
+    g3.mode = 9            # 4 на 4 — трое союзников
+    g3.start_match()
+    g3.arena = Arena(EMPTY_VARIANT, team=True)  # пустырь КОМАНДНОГО размера
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.ais = []
+    g3.player.x, g3.player.y = 1000, 1000
+    allies = [b for b in g3.bots if g3.tank_team.get(b) == 0]
+    ally = allies[0]
+    ally.x, ally.y = 1400, 1000
+    g3.cam = [0.0, 0.0]
+    g3._mouse = (1400, 1000)
+    g3._command_order()
+    check("E — приказ ближайшему к прицелу: ДЕРЖИ ПОЗИЦИЮ",
+          ally.order == "hold" and ally.order_xy == (1400, 1000))
+    g3._command_order()
+    check("второе E — ЗА МНОЙ", ally.order == "follow")
+    g3._command_order()
+    check("третье E — СВОБОДНО", ally.order is None)
+    g3._command_order(all_=True)
+    check("Shift+E — приказ ВСЕЙ команде разом",
+          all(b.order == "hold" for b in allies))
+    check("приказы получают только СВОИ боты",
+          all(b.order is None for b in g3.bots if g3.tank_team.get(b) != 0))
+    # боты слушаются: ДЕРЖАТЬ — стоят на месте
+    for b in allies[1:]:
+        b.x, b.y = 1000, 1700
+    foe = next(b for b in g3.bots if g3.tank_team.get(b) != 0)
+    foe.x, foe.y = ally.x + 300, ally.y
+    foe.frozen_t = 99.0          # чтобы не толкал и не стрелял
+    ai = BotAI(ally, 2)
+    ai.target = foe
+    x0, y0 = ally.x, ally.y
+    for _ in range(60):
+        ai.update(1 / 60.0, g3)
+    check("бот с приказом ДЕРЖАТЬ стоит на месте",
+          abs(ally.x - x0) < 1 and abs(ally.y - y0) < 1 and ally.alive)
+    # ЗА МНОЙ — идёт к командиру (сборка бота случайная: меряем ПРИБАВКУ
+    # за 5 секунд, а не абсолютную дистанцию; сажаем на ЧИСТОЕ место —
+    # союзник мог настроить стен на своей линии)
+    a2 = allies[1]
+    a2.order = "follow"
+    a2.x, a2.y = g3.player.x + 500, g3.player.y + 400
+    ai2 = BotAI(a2, 2)
+    ai2.target = foe
+    for _ in range(300):
+        ai2.update(1 / 60.0, g3)
+    d2 = math.hypot(a2.x - g3.player.x, a2.y - g3.player.y)
+    check("бот с приказом ЗА МНОЙ подошёл к командиру", d2 < 400)
+
+    # ----- ВРАЖЕСКИЙ КОМАНДИР -----
+    g4 = Game()
+    g4.mode = 10           # 5 на 5
+    g4.start_match()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.ais = []
+    foes = [b for b in g4.bots if g4.tank_team.get(b) == 1]
+    check("у врагов ТОЖЕ есть командир — ровно один (★)",
+          sum(1 for b in foes if b.is_commander) == 1)
+    g4._enemy_commander()
+    holds = [b for b in foes if b.order == "hold"]
+    check("вражеский командир оставил часть ботов ДЕРЖАТЬ рубежи",
+          len(holds) >= 1
+          and all(CMD_HOLD_MIN - 0.01 <= b.order_t <= CMD_HOLD_MAX
+                  for b in holds)
+          and all(not b.is_commander for b in holds))
+    for b in holds:
+        b.order_t = 0.01
+    g4._fight_step(0.05)
+    check("приказ держать НЕ ВЕЧНЫЙ: истёк — бот снова свободен",
+          all(b.order is None for b in holds))
+    g4.cmd_t = 9.0
+    g4._command_order(all_=True)
+    check("после приказа игрока вражеский командир отвечает быстрее",
+          g4.cmd_t <= CMD_REACT_T)
+    # проигрыш по живым — «ВСЕ В АТАКУ»
+    g5 = Game()
+    g5.mode = 10
+    g5.start_match()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5.ais = []
+    f5 = [b for b in g5.bots if g5.tank_team.get(b) == 1]
+    for b in f5[2:]:
+        b._die(g5.effects, g5.sounds)
+    f5[0].order = "hold"
+    f5[0].order_t = 10.0
+    g5._enemy_commander()
+    check("врагов стало мало — командир снял оборону: ВСЕ В АТАКУ",
+          all(b.order is None for b in f5 if b.alive))
+    g4.draw()
+    check("значки ★ КОМАНДИР и приказов рисуются без падений", True)
+    tags = g4._status_tags(foes[0])
+    check("HUD показывает КОМАНДИРА и приказы",
+          any("КОМАНДИР" in s for s in tags))
+
+    # ----- в FFA подчинённых нет -----
+    g6 = Game()
+    g6.mode = 3
+    g6.start_match()
+    g6.state = "fight"
+    g6._fake_keys = FakeKeys(())
+    g6._command_order()
+    check("в FFA командовать некем — E честно отвечает отказом",
+          all(b.order is None for b in g6.bots))
+
+    # ----- мина на F, E больше не мина -----
+    g9 = Game()
+    g9.mode = 2
+    g9.start_match()
+    g9.state = "fight"
+    g9._fake_keys = FakeKeys(())
+    g9.bot_tank.x, g9.bot_tank.y = g9.player.x + 400, g9.player.y
+    g9.player.apply_powerup("mine")
+    g9.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_f))
+    check("мина теперь ставится по F",
+          g9.player.mine_carried == 0 and len(g9.mines) == 1)
+    g9.player.apply_powerup("mine")
+    g9.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_e))
+    check("E в бою — ПРИКАЗ, а не мина",
+          g9.player.mine_carried == 1 and len(g9.mines) == 1)
+    check("HUD показывает мину на клавише F",
+          any("(F)" in s for s in g9._status_tags(g9.player)))
+
+    # ----- ангар: кнопка и тултип ЗВЁЗДНОГО -----
+    g10 = Game()
+    g10.state = "select"
+    g10.draw()
+    zones = [(r, d) for r, kd, d in g10._click_zones if kd == "shell"]
+    z_star = next(r for r, d in zones if d == SHELL_KEYS.index("star"))
+    g10.on_click(z_star.center)
+    check("клик выбирает ЗВЁЗДНЫЙ",
+          g10.sel_shell == SHELL_KEYS.index("star"))
+    g10._mouse = z_star.center
+    g10.draw()
+    check("тултип ЗВЁЗДНОГО: имя и осколки звездой",
+          g10._tooltip is not None
+          and g10._tooltip[0] == SHELL_TYPES["star"]["name"]
+          and any("звезда" in ln for ln in g10._tooltip[2]))
+
+    # ----- РЕДАКТОР для ОБЫЧНЫХ режимов (БОЙ) -----
+    ge = Game()
+    ge.state = "editor"
+    ge._ed_enter()
+    check("редактор по умолчанию — ШТУРМ", ge.ed_kind == "assault")
+    ge.ed_kind = "battle"
+    ge._ed_enter()
+    check("у типа БОЙ — своя чистая сетка",
+          all(v == "." for row in ge.ed_grid for v in row))
+    board, cw = ge._ed_board_rect()
+    ge.ed_tool = "D"
+    ge._ed_click((board.x + 5 * cw + 2, board.y + 5 * cw + 2))
+    ge.ed_tool = "A"
+    ge._ed_click((board.x + 40 * cw + 2, board.y + 20 * cw + 2))
+    check("в БОЕ не нужна точка захвата — только спавны сторон",
+          ge._ed_valid())
+    ge._ed_save()
+    saved = sorted(os.listdir(MAPS_DIR)) if os.path.isdir(MAPS_DIR) else []
+    check("боевая карта сохранена в maps/custom_battle_1.txt",
+          "custom_battle_1.txt" in saved)
+    bmaps = load_custom_battle_maps()
+    check("боевая карта читается: спавны D и A на месте",
+          len(bmaps) == 1 and len(bmaps[0]["spawns_d"]) == 1
+          and len(bmaps[0]["spawns_a"]) == 1
+          and bmaps[0]["battle"] is True)
+    check("штурмовая ротация БОЕВЫЕ карты не подбирает",
+          all(m.get("battle") is not True for m in load_custom_maps()))
+    # ----- своя БОЕВАЯ карта играет в FFA и в КОМАНДНЫХ -----
+    g7 = Game()
+    g7.mode = 3
+    g7.prefer_battle_map = bmaps[0]
+    g7.start_match()
+    check("своя БОЕВАЯ карта играет в FFA",
+          "своя" in g7.arena.name and g7._battle_custom is bmaps[0])
+    g8 = Game()
+    g8.mode = 6
+    g8.prefer_battle_map = bmaps[0]
+    g8.start_match()
+    dxy = bmaps[0]["spawns_d"][0]
+    axy = bmaps[0]["spawns_a"][0]
+    foe8 = next(b for b in g8.bots if g8.tank_team.get(b) == 1)
+    check("в командах союзники появляются на D, враги — на A",
+          "своя" in g8.arena.name
+          and math.hypot(g8.player.x - dxy[0], g8.player.y - dxy[1]) < 400
+          and math.hypot(foe8.x - axy[0], foe8.y - axy[1]) < 400)
+    # брак без спавнов сторон отбрасывается
+    bad = [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
+    bad[1][1] = "#"
+    bp = save_custom_battle_map("Брак", bad)
+    from arena import parse_custom_battle_map
+    check("боевая карта без спавнов D/A отбрасывается",
+          parse_custom_battle_map(bp) is None)
+    # уборка за тестом
+    for fn in os.listdir(MAPS_DIR):
+        os.remove(os.path.join(MAPS_DIR, fn))
+    os.rmdir(MAPS_DIR)
+    check("после теста папка maps чиста", not os.path.isdir(MAPS_DIR))
+    # живой прогон командного боя с приказами не падает
+    g11 = Game()
+    g11.mode = 9
+    g11.start_match()
+    g11.state = "fight"
+    g11._fake_keys = FakeKeys(())
+    for b in g11.bots:
+        if g11.tank_team.get(b) == 0:
+            b.order = "hold"
+    g11._enemy_commander()
+    for _ in range(240):
+        g11._fight_step(1 / 60.0)
+    g11.draw()
+    check("4на4 с приказами обеих сторон: 4 секунды боя без падений",
+          g11.state in ("fight", "round_end"))
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -3418,6 +3706,7 @@ if __name__ == "__main__":
     test_v31_nova()
     test_v32_assault()
     test_v33_fortress()
+    test_v34_commander()
     test_bigmap()
     test_points()
     test_score_table()

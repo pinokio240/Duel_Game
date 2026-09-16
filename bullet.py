@@ -7,11 +7,16 @@ v3.0: ТИПЫ СНАРЯДОВ (shell) — у каждого танка сво�
   "he"   — разрывной: тот же осколочный взрыв, что у зарядов «Р»;
   "ap"   — бронебойный: пробивает броню (pierce), без рикошетов;
   "fire" — зажигательный: на месте гибели снаряда остаётся ОГНЕННАЯ
-           ЛУЖА (game подхватывает координату из self.zone)."""
+           ЛУЖА (game подхватывает координату из self.zone).
+v3.4: ЗВЁЗДНЫЙ (shell="star") — при попадании разрывается на 5 снарядов
+В ФОРМЕ ЗВЕЗДЫ (лучи через 72°): star_children() зовёт игра после гибели.
+Осколки слабее, живут недолго (life) и повторно не разрываются."""
 import math
 import pygame
 from settings import (BULLET_SPEED, BULLET_DAMAGE, BULLET_BOUNCES,
-                      VAMP_HEAL_RATIO, HE_SPLASH_RADIUS, HE_SPLASH_DAMAGE)
+                      VAMP_HEAL_RATIO, HE_SPLASH_RADIUS, HE_SPLASH_DAMAGE,
+                      STAR_SHARDS, STAR_SHARD_DAMAGE, STAR_SHARD_SPEED_MULT,
+                      STAR_SHARD_LIFE, STAR_SHARD_GRACE)
 
 ELEMENT_COLORS = {
     "fire":     (255, 110, 0),
@@ -28,7 +33,8 @@ ELEMENT_COLORS = {
 class Bullet:
     def __init__(self, x, y, angle, owner, damage=BULLET_DAMAGE, speed_mult=1.0,
                  element=None, bounces=None, big=False, he=False,
-                 shell="std", pierce=False):
+                 shell="std", pierce=False, star=False, life=None,
+                 no_hit_t=0.0):
         rad = math.radians(angle)
         self.x = float(x)
         self.y = float(y)
@@ -52,6 +58,14 @@ class Bullet:
         # v3.0: зажигательный — куда упасть огненной луже при гибели
         # (None — лужи не будет); game читает это поле после гибели снаряда
         self.zone = None
+        # v3.4: звёздный разрыв — только у ЦЕНТРАЛЬНОГО снаряда залпа
+        # (у дробовика осколки-звезда лишь у первой дробины, иначе артобстрел)
+        self.star_split = bool(star)
+        self._split_done = False
+        # v3.4: ограничение дальности осколков (None — летит до стены)
+        self.life = life
+        # v3.4: первые мгновения осколки не бьют танки (рождаются в цели)
+        self.no_hit_t = no_hit_t
         self.color = ELEMENT_COLORS.get(element, owner.color)
         if self.he:
             self.color = (255, 120, 50)   # разрывные видны своей оранжевой вспышкой
@@ -59,6 +73,8 @@ class Bullet:
             self.color = (110, 255, 235)  # бронебойный — ледяной циан
         elif shell == "fire":
             self.color = (255, 70, 40)    # зажигательный — алый пламень
+        elif shell == "star":
+            self.color = (255, 226, 90)   # v3.4: звёздный — золотая звезда
         self.big = big or speed_mult > 1.1   # тяжёлые снаряды рисуются крупнее
         self.prev = (self.x, self.y)  # точка в начале кадра (для шлейфа и отскока)
 
@@ -82,8 +98,37 @@ class Bullet:
                 t.take_damage(HE_SPLASH_DAMAGE, effects, sounds)
                 effects.float_text(t.x, t.y - 44, "ОСКОЛКИ", (255, 120, 50))
 
+    def star_children(self):
+        """v3.4: ЗВЁЗДНЫЙ СНАРЯД — 5 осколков ЗВЕЗДОЙ (лучи через 72°).
+        Игра вызывает ПОСЛЕ гибели снаряда (стена, танк, барьер, турель).
+        Осколки слабее и медленнее, живут STAR_SHARD_LIFE секунд,
+        повторно не разрываются и первые мгновения не бьют танки
+        (рождаются внутри цели)."""
+        if self._split_done:
+            return []
+        self._split_done = True
+        base = math.degrees(math.atan2(self.vy, self.vx))
+        out = []
+        for i in range(STAR_SHARDS):
+            a = base + i * 360.0 / STAR_SHARDS
+            rad = math.radians(a)
+            # рождаются чуть впереди точки попадания — вдоль своего луча
+            sx = self.x + math.cos(rad) * 8.0
+            sy = self.y + math.sin(rad) * 8.0
+            out.append(Bullet(sx, sy, a, self.owner,
+                              damage=STAR_SHARD_DAMAGE,
+                              speed_mult=STAR_SHARD_SPEED_MULT, bounces=1,
+                              life=STAR_SHARD_LIFE, no_hit_t=STAR_SHARD_GRACE))
+        return out
+
     def update(self, dt, arena, tanks, effects, sounds):
         self.age += dt
+        # v3.4: осколки звезды живут недолго — угасли, не долетев
+        if self.life is not None and self.age >= self.life:
+            effects.burst(self.x, self.y, self.color, 4, 90, 0.2, 2)
+            self.star_split = False   # угас вхолостую — звезды не будет
+            self.dead = True
+            return
         self.prev = (self.x, self.y)
         steps = 3  # подшаги, чтобы не проскочить препятствие за кадр
         for _ in range(steps):
@@ -127,6 +172,8 @@ class Bullet:
                     continue
                 if t is self.owner and self.age < 0.25:
                     continue  # даём вылететь из своего ствола
+                if self.age < self.no_hit_t:
+                    continue  # v3.4: осколки звезды рождаются в цели — импа не бьём
                 # КОМАНДНЫЕ РЕЖИМЫ (v2.2): своих не бьём — снаряд пролетает
                 # сквозь союзника (в FFA у каждого танка своя команда)
                 if (t is not self.owner

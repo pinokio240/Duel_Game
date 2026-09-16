@@ -143,7 +143,8 @@ out3 = "/home/z/my-project/tool-results/menu.png"
 pygame.image.save(g.screen, out3)
 print("menu.png:", out3)
 
-# ----- кадр v3.3 «КРЕПОСТЬ»: оборона ВНУТРИ здания штурмовой карты -----
+# ----- кадр v3.3 «КРЕПОСТЬ» + v3.4 «КОМАНДИР»: оборона внутри здания,
+# над союзниками значки ПРИКАЗОВ, у игрока ЗВЁЗДНЫЙ снаряд -----
 # этот кадр становится главным screenshot.png: здание из прочных стен,
 # точка захвата внутри, защитники с комплектом, атака снаружи
 from arena import ASSAULT_MAPS
@@ -163,6 +164,14 @@ g._pick_assault_map = lambda: ASSAULT_MAPS[0]      # «ДОМ» — стабил
 g._reset_round()
 g.state = "fight"
 g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+# v3.4 постановка: игрок со ЗВЁЗДНЫМ снарядом, приказы союзникам —
+# двое ДЕРЖАТ позиции, один «ЗА МНОЙ» (значки над танками)
+g.player.shell_type = "star"
+_defenders = [t for t in g.tanks
+              if t is not g.player
+              and g.tank_team.get(t) == g.assault_def_team]
+for i, b in enumerate(_defenders):
+    b.order = "hold" if i % 3 != 2 else "follow"
 for _ in range(420):              # 7 секунд: форт растёт, бой закипает
     g.update(1 / 60.0)
 g.player.x, g.player.y = g.cap_xy[0] + 120, g.cap_xy[1] + 150
@@ -172,5 +181,37 @@ g.draw()
 pygame.image.save(g.screen, os.path.join(ROOT, "screenshot.png"))
 out4 = "/home/z/my-project/tool-results/fort.png"
 pygame.image.save(g.screen, out4)
-print("screenshot.png (КРЕПОСТЬ) + fort.png:", out4)
+print("screenshot.png (КРЕПОСТЬ + КОМАНДИР) + fort.png:", out4)
+
+# ----- кадр v3.4: КОМАНДНЫЙ бой с ВРАЖЕСКИМ КОМАНДИРОМ (★) -----
+# 4на4: у врагов звезда командира и приказы «ДЕРЖАТ», у союзников тоже
+g.mode = 9
+g.score = [0, 0]
+g.bot_builds = [("light", "compact", "rapidgun", "sprinter", "electric"),
+                ("sport", "light", "shotgun", "none", "earth"),
+                ("heavy", "armored", "howitzer", "turtle", "poison"),
+                ("medium", "medium", "twin", "gunner", "water"),
+                ("light", "light", "long", "none", "none"),
+                ("heavy", "armored", "standard", "turtle", "fire"),
+                ("sport", "compact", "shotgun", "sprinter", "vamp")]
+g._reset_round()
+g.state = "fight"
+g._fake_keys = type("K", (), {"__getitem__": staticmethod(lambda k: 0)})()
+_allies = [t for t in g.tanks if t is not g.player
+           and g.tank_team.get(t) == 0]
+_foes = [t for t in g.tanks if g.tank_team.get(t) == 1]
+for i, b in enumerate(_allies):
+    b.order = "hold" if i % 2 == 0 else "follow"
+for i, b in enumerate(_foes):
+    if i > 0:
+        b.order = "hold"
+        b.order_t = 10.0
+for _ in range(180):
+    g.update(1 / 60.0)
+g._cam_snap()
+g.update(1 / 60.0)
+g.draw()
+out5 = "/home/z/my-project/tool-results/commander.png"
+pygame.image.save(g.screen, out5)
+print("commander.png:", out5)
 pygame.quit()

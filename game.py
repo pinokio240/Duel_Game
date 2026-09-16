@@ -30,6 +30,11 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       ASSAULT_MODES, ASSAULT_POINT_R, ASSAULT_CAPTURE_T,
                       ASSAULT_HOLD_T, ASSAULT_KIT_WALLS, ASSAULT_KIT_TURRETS,
                       ASSAULT_KIT_MINES,
+                      STAR_SHARDS, STAR_SHARD_DAMAGE, STAR_SHARD_LIFE,
+                      STAR_SHARD_SPEED_MULT,
+                      SHELL_STAR_DAMAGE_MULT,
+                      CMD_PERIOD_MIN, CMD_PERIOD_MAX, CMD_HOLD_MIN,
+                      CMD_HOLD_MAX, CMD_REACT_T,
                       HE_SPLASH_DAMAGE, HE_SPLASH_RADIUS,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
@@ -43,6 +48,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       DIFF_PRESETS, BOT_DIFFICULTY)
 from arena import (Arena, LAYOUTS, WALL_T, ASSAULT_MAPS, EMPTY_VARIANT,
                    load_custom_maps, save_custom_map,
+                   load_custom_battle_maps, save_custom_battle_map,
                    EDITOR_COLS, EDITOR_ROWS, EDITOR_CELL)
 from tank import Tank
 from bot import BotAI, random_build
@@ -385,9 +391,17 @@ class Game:
         self._assault_build = None    # сегменты казённых стен карты
         self._assault_name = ""       # имя штурмовой карты для HUD
         # v3.3: РЕДАКТОР КАРТ — сетка 27×48 символов и текущий инструмент
-        self.ed_grid = None           # лениво: создаём при первом входе
+        # v3.4: ДВА типа своих карт — «assault» (ШТУРМ) и «battle» (FFA и
+        # командные): у каждого своя сетка, сохранились между визитами
+        self.ed_kind = "assault"
+        self.ed_grids = {"assault": None, "battle": None}
         self.ed_tool = "#"
         self.ed_msg = ""
+        # v3.4: КОМАНДИР — таймер приказов вражеского командира;
+        # своя БОЕВАЯ карта текущего раунда (None — встроенная раскладка)
+        self.cmd_t = 5.0
+        self._battle_custom = None
+        self.prefer_battle_map = None   # только для автотестов
         # v2.2: КОНСОЛЬ РАЗРАБОТЧИКА — открывается на Ё (`)
         self.con_open = False
         self.con_input = ""
@@ -444,6 +458,71 @@ class Game:
                 21: 2, 22: 4, 23: 6, 24: 8, 25: 10, 26: 12, 27: 14
                 }.get(self.mode, self.mode)
 
+    def _pick_battle_map(self):
+        """v3.4: карта для ОБЫЧНЫХ режимов — обычно случайная из
+        встроенных раскладок, но СВОИ БОЕВЫЕ карты редактора
+        (custom_battle_*.txt) играют наравне (с двойным весом)."""
+        if self.prefer_battle_map is not None:      # крючок автотестов
+            return self.prefer_battle_map
+        bmaps = load_custom_battle_maps()
+        if not bmaps:
+            return None
+        # вес каждой своей карты = 2 встроенные раскладки
+        if random.randrange(len(LAYOUTS) + 2 * len(bmaps)) >= len(LAYOUTS):
+            return random.choice(bmaps)
+        return None
+
+    def _pad_battle_slot(self, slots, taken):
+        """v3.4: дополнительный слот на БОЕВОЙ карте — свободное место
+        рядом с уже имеющимися слотами этой стороны."""
+        base = slots[-1] if slots else (self.arena.w / 2.0, self.arena.h / 2.0)
+        for _ in range(120):
+            a = random.uniform(0, 2 * math.pi)
+            d = random.uniform(60, 300)
+            nx, ny = base[0] + math.cos(a) * d, base[1] + math.sin(a) * d
+            if not (self.arena.wall_t + 60 < nx < self.arena.w - self.arena.wall_t - 60
+                    and self.arena.wall_t + 60 < ny < self.arena.h - self.arena.wall_t - 60):
+                continue
+            if self.arena.circle_collides(nx, ny, TANK_RADIUS + 12):
+                continue
+            if all(math.hypot(nx - tx, ny - ty) > 100 for tx, ty in taken):
+                return (nx, ny)
+        return self._free_spawn(base[0], base[1], taken)
+
+    def _custom_battle_spawns(self, n):
+        """v3.4: точки появления на СВОЕЙ БОЕВОЙ карте: в командах —
+        союзники на спавнах D, враги на спавнах A; в FFA все слоты
+        D и A — общий набор точек появления. Слотов не хватает —
+        добиваем свободными местами рядом."""
+        dsl, asl = (self._battle_custom["spawns_d"],
+                    self._battle_custom["spawns_a"])
+        if self.team_mode:
+            our = 2 if self.mode == 7 else n // 2
+            foes_n = n - our
+            ours = list(dsl[:our])
+            taken = list(ours)
+            while len(ours) < our:
+                p = self._pad_battle_slot(dsl, taken)
+                ours.append(p)
+                taken.append(p)
+            foes = list(asl[:foes_n])
+            taken = list(taken) + list(foes)
+            while len(foes) < foes_n:
+                p = self._pad_battle_slot(asl, taken)
+                foes.append(p)
+                taken.append(p)
+            ring = ours + foes
+        else:
+            all_slots = list(dsl) + list(asl)
+            ring = all_slots[:n]
+            while len(ring) < n:
+                p = self._pad_battle_slot(all_slots, ring)
+                ring.append(p)
+        out = []
+        for x, y in ring:
+            out.append(self._assault_spawn(x, y, out))
+        return out
+
     def _spawn_points(self, n):
         """Точки появления для n танков: 1вс1 — классика по краям, FFA —
         кольцо вокруг центра большого мира, КОМАНДЫ (v2.3) — двумя
@@ -453,6 +532,9 @@ class Game:
         (кольцо вокруг точки), атакующие — шеренгой снаружи. Своя
         сторона — первой: pts[0] всегда у игрока."""
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
+        if self._battle_custom is not None:
+            # v3.4: СВОЯ БОЕВАЯ карта — спавны с неё (FFA и командные)
+            return self._custom_battle_spawns(n)
         if n == 2 and self.mode not in ASSAULT_MODES:
             ring = [(cx - 520, cy), (cx + 520, cy)]
         elif self.mode in ASSAULT_MODES:
@@ -625,11 +707,20 @@ class Game:
         self.is_assault = self.mode in ASSAULT_MODES
         if self.is_assault:
             self._setup_assault_arena()
+            self._battle_custom = None      # v3.4: в ШТУРМЕ — штурмовые карты
         else:
-            self.arena = Arena(random.randrange(len(LAYOUTS)),
-                               shuffle=True,
-                               team=self.mode >= 6,
-                               army=self.mode in ARMY_MODES)
+            # v3.4: СВОИ БОЕВЫЕ карты редактора играют в FFA и командах
+            bmap = self._pick_battle_map()
+            self._battle_custom = bmap
+            if bmap is not None:
+                self.arena = Arena(EMPTY_VARIANT, shuffle=False, team=True)
+                self.arena.add_static(bmap["walls"])
+                self.arena.name = "%s [своя]" % bmap["name"]
+            else:
+                self.arena = Arena(random.randrange(len(LAYOUTS)),
+                                   shuffle=True,
+                                   team=self.mode >= 6,
+                                   army=self.mode in ARMY_MODES)
         cx, cy = self.arena.w / 2.0, self.arena.h / 2.0
         pts = self._spawn_points(self._tank_count())
         # v2.7: команды — ТОЛЬКО режимы 6-10 (большие FFA 11-15 — каждый сам за себя);
@@ -716,6 +807,14 @@ class Game:
         # враги — на них капают очки, они дохнут от кнопки и таймера v2.5
         self.foes = [t for t in self.tanks if t is not self.player
                      and self.tank_team[t] != 0]
+        # v3.4: ВРАЖЕСКИЙ КОМАНДИР — у команды ботов тоже есть командир
+        # (звезда ★): он приказывает своим держать рубежи и идти вперёд
+        # (в ШТУРМЕ роли и так расписаны, БОСС командовать не умеет)
+        if (self.team_mode and not self.is_assault and self.mode != 7):
+            enemy_bots = [t for t in self.bots if self.tank_team.get(t) == 1]
+            if enemy_bots:
+                enemy_bots[0].is_commander = True
+        self.cmd_t = random.uniform(4.0, 6.0)
         # счёт должен совпадать с режимом (FFA — на каждого танка,
         # команды — на две стороны): защита от смены режима без start_match
         need = 2 if self.team_mode else len(self.tanks)
@@ -760,6 +859,13 @@ class Game:
                                                  tier=tier,
                                                  team=self.assault_def_team))
                 self.arena.set_dynamic(self.barriers)
+        elif self._battle_custom is not None:
+            # v3.4: прочные стены с БОЕВОЙ карты — казённые барьеры без
+            # владельца: их можно ПРОЛОМАТЬ, чинить их некому
+            for x, y, ang, tier in self._battle_custom["segs"]:
+                self.barriers.append(Barrier(x, y, ang, None, tier=tier,
+                                             team=None))
+            self.arena.set_dynamic(self.barriers)
         self.spec_target = None          # v3.0: спектатор-камера с начала
         self._cam_snap()          # камера сразу на игрока
 
@@ -957,26 +1063,36 @@ class Game:
                 self.sounds.play("ric")
         elif self.state == "editor":
             # v3.3: РЕДАКТОР КАРТ — инструменты и сохранение
+            # v3.4: TAB — ТИП КАРТЫ: ШТУРМ (точка+спавны сторон) /
+            # БОЙ (спавны союзников и врагов — для FFA и командных)
+            tools = self._ed_tools()
             if k == pygame.K_ESCAPE:
                 self.state = "menu"
+            elif k == pygame.K_TAB:
+                self.ed_kind = "battle" if self.ed_kind == "assault" else "assault"
+                if self.ed_tool == "P":
+                    self.ed_tool = "#"     # точки захвата только в ШТУРМЕ
+                self.ed_msg = ""
+                self.sounds.play("ric")
             elif k in (pygame.K_1, pygame.K_KP1):
-                self.ed_tool = "#"      # стена (вечная)
+                self.ed_tool = tools[0][0]
             elif k in (pygame.K_2, pygame.K_KP2):
-                self.ed_tool = "S"      # прочная
+                self.ed_tool = tools[1][0]
             elif k in (pygame.K_3, pygame.K_KP3):
-                self.ed_tool = "H"      # очень прочная
+                self.ed_tool = tools[2][0]
             elif k in (pygame.K_4, pygame.K_KP4):
-                self.ed_tool = "U"      # невероятно прочная
-            elif k in (pygame.K_5, pygame.K_KP5):
-                self.ed_tool = "P"      # точка захвата
-            elif k in (pygame.K_6, pygame.K_KP6):
-                self.ed_tool = "D"      # спавн обороны
-            elif k in (pygame.K_7, pygame.K_KP7):
-                self.ed_tool = "A"      # спавн атаки
+                self.ed_tool = tools[3][0]
+            elif k in (pygame.K_5, pygame.K_KP5) and len(tools) > 5:
+                self.ed_tool = tools[4][0]
+            elif k in (pygame.K_6, pygame.K_KP6) and len(tools) > 6:
+                self.ed_tool = tools[5][0]
+            elif k in (pygame.K_7, pygame.K_KP7) and len(tools) > 7:
+                self.ed_tool = tools[6][0]
             elif k == pygame.K_e:
                 self.ed_tool = "."      # ластик
             elif k == pygame.K_c:
-                self.ed_grid = [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
+                self.ed_grids[self.ed_kind] = \
+                    [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
                 self.ed_msg = "Поле очищено — стройте заново"
             elif k == pygame.K_s:
                 self._ed_save()
@@ -1093,7 +1209,12 @@ class Game:
             elif k == pygame.K_q:
                 self._place_barrier(self.player)   # стена-бустер
             elif k == pygame.K_e:
-                self._place_mine(self.player)      # мина руками
+                # v3.4: КОМАНДИР — E приказывает ботам (Shift+E — всем);
+                # мина переехала на F
+                self._command_order(
+                    all_=bool(pygame.key.get_mods() & pygame.KMOD_SHIFT))
+            elif k == pygame.K_f:
+                self._place_mine(self.player)      # мина руками (была на E)
             elif k == pygame.K_r:
                 self._place_turret(self.player)    # v2.9: турель
             elif k == pygame.K_x:
@@ -1182,6 +1303,13 @@ class Game:
             self.sounds.play("ric")
         elif kind == "ed_tool":               # v3.3: инструмент редактора
             self.ed_tool = data
+            self.sounds.play("ric")
+        elif kind == "ed_kind":               # v3.4: тип карты ШТУРМ/БОЙ
+            if self.ed_kind != data:
+                self.ed_kind = data
+                if self.ed_tool == "P":
+                    self.ed_tool = "#"    # точка захвата только в ШТУРМЕ
+                self.ed_msg = ""
             self.sounds.play("ric")
         elif kind == "ed_board":              # v3.3: клетка поля редактора
             if pos is not None:
@@ -1471,6 +1599,17 @@ class Game:
         for b in self.bullets:
             if b.dead and b.zone:
                 self.fire_zones.append(FireZone(b.zone[0], b.zone[1], b.owner))
+        # v3.4: ЗВЁЗДНЫЙ СНАРЯД — при гибели (стена/танк/барьер/турель)
+        # рождает 5 осколков ЗВЕЗДОЙ (лучи через 72°)
+        shards = []
+        for b in self.bullets:
+            if b.dead and b.star_split:
+                self.effects.ring(b.x, b.y, (255, 226, 90), 56, 0.28)
+                self.effects.burst(b.x, b.y, (255, 226, 90), 10, 220, 0.3, 3)
+                shards.extend(b.star_children())
+                self.sounds.play("laser")
+        if shards:
+            self.bullets.extend(shards)
         self.bullets = [b for b in self.bullets if not b.dead]
 
         for br in self.barriers[:]:
@@ -1486,6 +1625,21 @@ class Game:
         # v3.2: РЕМОНТ СТЕН — держите H рядом со своей (командной) стеной;
         # боты чинят своим же механизмом из ИИ
         self._repair_step(self.player, bool(keys[pygame.K_h]), dt)
+        # v3.4: ВРАЖЕСКИЙ КОМАНДИР — периодически командует своими ботами:
+        # часть ДЕРЖИТ рубежи, остальные давят; отвечает и на приказы игрока
+        if (self.team_mode and not self.is_assault and self.mode != 7
+                and any(b.alive for b in self.foes)):
+            self.cmd_t -= dt
+            if self.cmd_t <= 0:
+                self._enemy_commander()
+                self.cmd_t = random.uniform(CMD_PERIOD_MIN, CMD_PERIOD_MAX)
+        # приказы с таймером (вражеские) истекают — бот снова свободен;
+        # приказы игрока (order_t = 0) вечны, пока их не сменили
+        for t in self.tanks:
+            if t.order_t > 0:
+                t.order_t = max(0.0, t.order_t - dt)
+                if t.order_t <= 0:
+                    t.order = None
         # v3.0: огненные лужи жгут чужих и гаснут по таймеру
         for fz in self.fire_zones:
             fz.step(dt, self)
@@ -1933,6 +2087,7 @@ class Game:
                             pad, (int(t.x + ox - pad.get_width() / 2),
                                   int(t.y + oy - pad.get_height() / 2)))
                     t.draw(self.world, ox, oy)
+                    self._draw_badge(t, ox, oy)   # v3.4: приказы и командир
             self.effects.draw(self.world, ox, oy)
             for s in self.smokes:
                 s.draw(self.world, ox, oy)
@@ -2057,10 +2212,11 @@ class Game:
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
-            "Q — стена (4 ярусов!)   E — мина   R — ТУРЕЛЬ   H — РЕМОНТ стен   X — ЭМИ   V — КРУГОВОЙ АД",
-            "НОВОЕ — КРЕПОСТЬ: в ШТУРМЕ оборона ДЕРЖИТ ЗДАНИЕ (точка внутри), атака штурмует его.",
-            "СТОРОНА НА ВЫБОР — ОБОРОНА или АТАКА (кнопка под режимами или G). РЕДАКТОР КАРТ:",
-            "стройте свою карту — она играет в ШТУРМЕ вместе с ДОМОМ, СКЛАДОМ и ФОРТОМ.",
+            "E — ПРИКАЗ боту (ДЕРЖИ / ЗА МНОЙ / СВОБОДНО; Shift+E — всей команде)   F — мина",
+            "Q — стена (4 ярусов!)   R — ТУРЕЛЬ   H — РЕМОНТ стен   X — ЭМИ   V — КРУГОВОЙ АД",
+            "НОВОЕ — КОМАНДИР: приказы ботам по E; у врагов ТОЖЕ командир (★) со своими приказами.",
+            "ЗВЁЗДНЫЙ снаряд — при попадании разрывается на 5 снарядов звездой. РЕДАКТОР КАРТ:",
+            "свои карты теперь для ЛЮБЫХ режимов — TAB переключает ШТУРМ/БОЙ (FFA и командные).",
         ]
         y = 290
         for s in lines:
@@ -2157,15 +2313,24 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.3 · КРЕПОСТЬ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.4 · КОМАНДИР", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
     # ================= выбор стороны и РЕДАКТОР КАРТ (v3.3) =================
-    ED_TOOLS = (("#", "СТЕНА"), ("S", "ПРОЧНАЯ"), ("H", "ОЧ.ПРОЧНАЯ"),
-                ("U", "НЕВЕРОЯТН."), ("P", "ТОЧКА"), ("D", "СПАВН ОБОРОНЫ"),
-                ("A", "СПАВН АТАКИ"), (".", "ЛАСТИК"))
+    ED_TOOLS_ASSAULT = (("#", "СТЕНА"), ("S", "ПРОЧНАЯ"), ("H", "ОЧ.ПРОЧНАЯ"),
+                        ("U", "НЕВЕРОЯТН."), ("P", "ТОЧКА"),
+                        ("D", "СПАВН ОБОРОНЫ"), ("A", "СПАВН АТАКИ"),
+                        (".", "ЛАСТИК"))
+    ED_TOOLS_BATTLE = (("#", "СТЕНА"), ("S", "ПРОЧНАЯ"), ("H", "ОЧ.ПРОЧНАЯ"),
+                       ("U", "НЕВЕРОЯТН."), ("D", "СПАВН СОЮЗНИКОВ"),
+                       ("A", "СПАВН ВРАГОВ"), (".", "ЛАСТИК"))
     ED_CELL = 19          # клетка редактора на экране (48*19=912, 27*19=513)
+
+    @property
+    def ed_grid(self):
+        """Сетка ТЕКУЩЕГО типа карты (v3.4: у ШТУРМА и БОЯ сетки свои)."""
+        return self.ed_grids[self.ed_kind]
 
     def _cycle_assault_side(self):
         """v3.3: G в меню — ОБОРОНА → АТАКА → СЛУЧАЙНО → ОБОРОНА…"""
@@ -2173,11 +2338,110 @@ class Game:
         self.assault_side = order[(order.index(self.assault_side) + 1) % 3]
         self.sounds.play("ric")
 
+    # ============ КОМАНДИР: приказы ботам (v3.4) ============
+
+    ORDER_LABEL = {"hold": ("ДЕРЖИ ПОЗИЦИЮ!", (255, 208, 0)),
+                   "follow": ("ЗА МНОЙ!", (120, 255, 220)),
+                   None: ("СВОБОДНО!", (160, 200, 255))}
+
+    def _command_order(self, all_=False):
+        """v3.4: E — ПРИКАЗ союзнику-боту: ДЕРЖАТЬ ПОЗИЦИЮ → ЗА МНОЙ →
+        СВОБОДНО (по кругу). Приказ получает бот, БЛИЖАЙШИЙ К ПРИЦЕЛУ
+        (курсору на арене); далеко от прицела подчинённых нет — приказ
+        уходит ближайшему к вам. Shift+E — приказ ВСЕМ союзникам разом.
+        В FFA подчинённых нет — там каждый сам за себя."""
+        if not self.player.alive:
+            return
+        allies = [b for b in self.bots
+                  if b.alive and self.tank_team.get(b) == 0]
+        if not allies:
+            self.effects.float_text(self.player.x, self.player.y - 64,
+                                    "НЕТ ПОДЧИНЁННЫХ (FFA)", (255, 90, 90))
+            self.sounds.play("ric")
+            return
+        if all_:
+            targets = allies          # Shift+E — всей команде разом
+        else:
+            wx = self._mouse[0] + self.cam[0]
+            wy = self._mouse[1] + self.cam[1]
+            near = min(allies, key=lambda b: (b.x - wx) ** 2 + (b.y - wy) ** 2)
+            if math.hypot(near.x - wx, near.y - wy) > 560:
+                # у прицела никого — приказ ближайшему к вам боту
+                near = min(allies, key=lambda b:
+                           (b.x - self.player.x) ** 2
+                           + (b.y - self.player.y) ** 2)
+            targets = [near]
+        for b in targets:
+            b.order = {"hold": "follow", "follow": None}.get(b.order, "hold")
+            if b.order == "hold":
+                b.order_xy = (b.x, b.y)
+                b.order_t = 0.0     # приказ игрока — пока не сменишь
+            txt, col = self.ORDER_LABEL[b.order]
+            self.effects.float_text(b.x, b.y - 58, txt, col)
+        self.sounds.play("laser")
+        # вражеский командир заметил манёвр — командует быстрее
+        self.cmd_t = min(self.cmd_t, CMD_REACT_T)
+
+    def _enemy_commander(self):
+        """v3.4: ВРАЖЕСКИЙ КОМАНДИР — у команды ботов СВОЙ командир
+        (звезда ★ над танком): он оставляет часть ботов ДЕРЖАТЬ рубежи
+        (на 8–12 секунд, потом снова свободны), остальных пускает вперёд.
+        Если чужаков стало заметно меньше — бросает ВСЕХ в атаку."""
+        alive = [b for b in self.foes if b.alive]
+        if len(alive) < 2:
+            return
+        ours = sum(1 for t in self.tanks
+                   if t.alive and self.tank_team.get(t) == 0)
+        if len(alive) <= ours // 2:
+            # проигрываем по живым — оборона не по чину, все вперёд
+            for b in alive:
+                if b.order is not None:
+                    b.order = None
+                    b.order_t = 0.0
+            lead = next((b for b in alive if b.is_commander), alive[0])
+            self.effects.float_text(lead.x, lead.y - 58, "ВСЕ В АТАКУ!",
+                                    (255, 120, 120))
+            return
+        free = [b for b in alive if b.order is None and not b.is_commander]
+        random.shuffle(free)
+        for b in free[:max(1, int(len(free) * 0.4))]:
+            b.order = "hold"
+            b.order_xy = (b.x, b.y)
+            b.order_t = random.uniform(CMD_HOLD_MIN, CMD_HOLD_MAX)
+            self.effects.float_text(b.x, b.y - 58, "ПРИКАЗ: ДЕРЖАТЬ",
+                                    (255, 150, 150))
+
+    def _draw_badge(self, t, ox, oy):
+        """v3.4: значки НАД танком — звезда КОМАНДИРА и текущий ПРИКАЗ
+        (ДЕРЖИТ / ЗА ТОБОЙ). Свои — золотым/цианом, вражьи приказы —
+        красноватым, чтобы видно, кто зарылся в оборону."""
+        lab, col = None, COL_GOLD
+        my = self.tank_team.get(t)
+        if t.order == "hold":
+            lab = "ДЕРЖИТ"
+            col = (255, 208, 0) if my == 0 else (255, 130, 130)
+        elif t.order == "follow":
+            lab, col = "ЗА ТОБОЙ", (120, 255, 220)
+        if getattr(t, "is_commander", False):
+            lab = "★ КОМАНДИР" if lab is None else "★ " + lab
+            col = (255, 208, 0) if my == 0 else (255, 130, 130)
+        if not lab:
+            return
+        img = get_font(13).render(lab, True, col)
+        self.world.blit(img, img.get_rect(
+            midbottom=(int(t.x + ox), int(t.y + oy - t.radius - 8))))
+
+    def _ed_tools(self):
+        """Палитра инструментов текущего типа карты (v3.4)."""
+        return (self.ED_TOOLS_ASSAULT if self.ed_kind == "assault"
+                else self.ED_TOOLS_BATTLE)
+
     def _ed_enter(self):
-        """Войти в редактор: сетка сохраняется между визитами, чтобы
-        карту можно было дорабатывать."""
-        if self.ed_grid is None:
-            self.ed_grid = [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
+        """Войти в редактор: сетки сохраняются между визитами (у каждого
+        типа карты своя), чтобы карту можно было дорабатывать."""
+        if self.ed_grids[self.ed_kind] is None:
+            self.ed_grids[self.ed_kind] = \
+                [["."] * EDITOR_COLS for _ in range(EDITOR_ROWS)]
             self.ed_msg = "Стройте карту! S — сохранить, ESC — выход в меню"
 
     def _ed_board_rect(self):
@@ -2188,7 +2452,8 @@ class Game:
         return pygame.Rect(x0, y0, EDITOR_COLS * cw, EDITOR_ROWS * cw), cw
 
     def _ed_click(self, pos, erase=False):
-        """Клик по полю: поставить текущий инструмент (ПКМ — стереть)."""
+        """Клик по полю: поставить текущий инструмент (ПКМ — стереть).
+        v3.4: точка захвата — только в ШТУРМЕ (в БОЕ её нет вовсе)."""
         if self.ed_grid is None:
             self._ed_enter()
         board, cw = self._ed_board_rect()
@@ -2206,41 +2471,73 @@ class Game:
         self.sounds.play("ric")
 
     def _ed_valid(self):
-        """Карта играбельна, если есть точка, спавн обороны и спавн атаки."""
+        """Карта играбельна. ШТУРМ: точка + спавны обеих сторон.
+        v3.4, БОЙ: спавны СОЮЗНИКОВ и ВРАГОВ (в FFA это просто точки
+        появления, но обе стороны нужны — игрок и хоть один чужак)."""
         joined = "".join("".join(row) for row in (self.ed_grid or []))
-        return "P" in joined and "D" in joined and "A" in joined
+        if self.ed_kind == "assault":
+            return "P" in joined and "D" in joined and "A" in joined
+        return "D" in joined and "A" in joined
 
     def _ed_save(self):
-        """Сохранить карту в maps/custom_N.txt — она сразу попадает
-        в ротацию ШТУРМА."""
+        """Сохранить карту: ШТУРМ — в maps/custom_N.txt (ротация ШТУРМА),
+        БОЙ — в maps/custom_battle_N.txt (FFA и КОМАНДНЫЕ режимы)."""
         if self.ed_grid is None:
             return
         if not self._ed_valid():
-            self.ed_msg = ("НУЖНЫ ТОЧКА (5), СПАВН ОБОРОНЫ (6) И СПАВН АТАКИ (7)!")
+            if self.ed_kind == "assault":
+                self.ed_msg = ("НУЖНЫ ТОЧКА (5), СПАВН ОБОРОНЫ (6) И СПАВН АТАКИ (7)!")
+            else:
+                self.ed_msg = "НУЖНЫ СПАВН СОЮЗНИКОВ (5) И СПАВН ВРАГОВ (6)!"
             self.sounds.play("ric")
             return
-        name = "Карта игрока %d" % (len(load_custom_maps()) + 1)
-        path = save_custom_map(name, self.ed_grid)
-        self.ed_msg = "СОХРАНЕНО: %s — карта уже в ШТУРМЕ!" % path
+        if self.ed_kind == "assault":
+            name = "Карта игрока %d" % (len(load_custom_maps()) + 1)
+            path = save_custom_map(name, self.ed_grid)
+            self.ed_msg = "СОХРАНЕНО: %s — карта уже в ШТУРМЕ!" % path
+        else:
+            name = "Арена игрока %d" % (len(load_custom_battle_maps()) + 1)
+            path = save_custom_battle_map(name, self.ed_grid)
+            self.ed_msg = "СОХРАНЕНО: %s — играет в FFA и КОМАНДНЫХ!" % path
         self.sounds.play("win")
 
     def _draw_editor(self):
         """v3.3: экран редактора карт — вся карта перед глазами,
-        инструменты внизу, сохранение на S."""
+        инструменты внизу, сохранение на S.
+        v3.4: вкладки ТИПА КАРТЫ — ШТУРМ и БОЙ (FFA и командные)."""
         self.screen.fill((10, 12, 26))
         img = get_font(30).render("РЕДАКТОР КАРТ", True, COL_TEXT)
-        self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 12)))
-        img = get_font(16, bold=False).render(
-            "карта играет в ШТУРМЕ: оборона держит точку, атака штурмует",
-            True, COL_DIM)
-        self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 56)))
-        img = get_font(15, bold=False).render(
-            "оставьте проходы для атаки — запертый форт никто не возьмёт",
-            True, (95, 105, 145))
-        self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 80)))
+        self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 10)))
+        # вкладки типа карты: ШТУРМ / БОЙ (клик или TAB)
+        for i, (kind, lbl) in enumerate((
+                ("assault", "ШТУРМ"),
+                ("battle", "БОЙ — FFA и КОМАНДНЫЕ"))):
+            cur = self.ed_kind == kind
+            r = pygame.Rect(0, 0, 130 if i == 0 else 250, 26)
+            r.midtop = (SCREEN_W / 2 - 200 + i * 400, 48)
+            pygame.draw.rect(self.screen,
+                             (46, 58, 104) if cur else (30, 40, 75), r,
+                             border_radius=7)
+            pygame.draw.rect(self.screen,
+                             COL_GOLD if cur else (70, 80, 120),
+                             r, 2 if cur else 1, border_radius=7)
+            img = get_font(14).render(lbl, True, COL_TEXT if cur else COL_DIM)
+            self.screen.blit(img, img.get_rect(center=r.center))
+            self._click_zones.append((r, "ed_kind", kind))
+        if self.ed_kind == "assault":
+            img = get_font(15, bold=False).render(
+                "оборона держит ТОЧКУ (в здании или где поставите), атака штурмует",
+                True, COL_DIM)
+            self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 82)))
+        else:
+            img = get_font(15, bold=False).render(
+                "карта для ВСЕХ обычных режимов: FFA, 2на2…10на10 — у союзников"
+                " спавны D, у врагов A", True, COL_DIM)
+            self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2, 82)))
         if self.ed_grid is None:
             self._ed_enter()
         board, cw = self._ed_board_rect()
+        tools = self._ed_tools()
         colors = {"#": (86, 96, 150), "S": (110, 200, 255),
                   "H": (255, 200, 80), "U": (255, 110, 200)}
         pygame.draw.rect(self.screen, (16, 20, 40), board)
@@ -2285,8 +2582,8 @@ class Game:
                                          cw, cw), 1)
         # палитра инструментов
         gap = 122
-        x0 = int(SCREEN_W / 2 - (len(self.ED_TOOLS) * gap - (gap - 112)) / 2)
-        for i, (ch, lbl) in enumerate(self.ED_TOOLS):
+        x0 = int(SCREEN_W / 2 - (len(tools) * gap - (gap - 112)) / 2)
+        for i, (ch, lbl) in enumerate(tools):
             r = pygame.Rect(0, 0, 112, 30)
             r.midtop = (x0 + i * gap, board.bottom + 14)
             cur = self.ed_tool == ch
@@ -2297,7 +2594,7 @@ class Game:
                              r, 2 if cur else 1, border_radius=7)
             img = get_font(14).render(lbl, True, COL_TEXT)
             self.screen.blit(img, img.get_rect(center=r.center))
-            hotkey = str(i + 1) if i < 7 else "E"
+            hotkey = str(i + 1) if i < len(tools) - 1 else "E"
             img2 = get_font(11, bold=False).render(hotkey, True, COL_DIM)
             self.screen.blit(img2, img2.get_rect(
                 bottomright=(r.right - 4, r.bottom - 2)))
@@ -2305,14 +2602,17 @@ class Game:
         # статус/подсказки
         msg = self.ed_msg
         if not msg and not self._ed_valid():
-            msg = "ДЛЯ ИГРЫ НУЖНЫ: ТОЧКА (5), СПАВН ОБОРОНЫ (6), СПАВН АТАКИ (7)"
+            if self.ed_kind == "assault":
+                msg = "ДЛЯ ИГРЫ НУЖНЫ: ТОЧКА (5), СПАВН ОБОРОНЫ (6), СПАВН АТАКИ (7)"
+            else:
+                msg = "ДЛЯ ИГРЫ НУЖНЫ: СПАВН СОЮЗНИКОВ (5) И СПАВН ВРАГОВ (6)"
         img = get_font(16, bold=False).render(
             msg, True, COL_GOLD if msg.startswith("СОХРАНЕНО") else COL_DIM)
         self.screen.blit(img, img.get_rect(midtop=(SCREEN_W / 2,
                                                    board.bottom + 50)))
         img = get_font(14, bold=False).render(
             "ЛКМ — ставить · ПКМ — стереть · 1-7/E — инструменты · "
-            "C — очистить · S — сохранить · ESC — выход в меню",
+            "TAB — тип карты (ШТУРМ/БОЙ) · C — очистить · S — сохранить · ESC — выход",
             True, (95, 105, 145))
         self.screen.blit(img, img.get_rect(midbottom=(SCREEN_W / 2,
                                                       SCREEN_H - 6)))
@@ -2508,7 +2808,8 @@ class Game:
                       % (preview.speed, preview.max_hp, ch["armor"],
                          round(BULLET_DAMAGE * wp["damage_mult"]
                                * el["damage_mult"] * preview.mods["damage_mult"])
-                         * {"he": 0.80, "ap": 1.30, "fire": 0.85}
+                         * {"he": 0.80, "ap": 1.30, "fire": 0.85,
+                            "star": SHELL_STAR_DAMAGE_MULT}
                          .get(SHELL_KEYS[self.sel_shell], 1.0),
                          preview.reload_time))
         if preview.mods["spread_deg"] > 0:
@@ -2642,6 +2943,11 @@ class Game:
         elif key == "fire":
             lines.append("лужа: %g с по %g урона/с, броня не спасает"
                          % (FIRE_ZONE_LIFE, FIRE_ZONE_DPS))
+        elif key == "star":
+            lines.append("звезда: %d осколка по %d урона, живут %g с"
+                         " (примерно %d px), разрыв при любом попадании"
+                         % (STAR_SHARDS, STAR_SHARD_DAMAGE, STAR_SHARD_LIFE,
+                            int(540 * STAR_SHARD_SPEED_MULT * STAR_SHARD_LIFE)))
         lines.append("тип заряжает каждый выстрел главного орудия")
         return sc["name"], sc["color"], lines
 
@@ -2974,6 +3280,13 @@ class Game:
     def _status_tags(self, t):
         """Статусы танка строкой (общие для HUD игрока и строк ботов)."""
         sfx = []
+        # v3.4: приказ командира и звезда командира стороны
+        if t.order == "hold":
+            sfx.append("ПРИКАЗ: ДЕРЖИТ ПОЗИЦИЮ")
+        elif t.order == "follow":
+            sfx.append("ПРИКАЗ: ЗА ТОБОЙ")
+        if getattr(t, "is_commander", False):
+            sfx.append("★ КОМАНДИР")
         if t.build_name:                       # v3.0: имя стартового билда
             sfx.append("БИЛД: %s" % t.build_name)
         if t.shell_type != "std":              # v3.0: тип снаряда
@@ -2985,7 +3298,7 @@ class Game:
         if t.element_key != "none":
             sfx.append("стихия: %s" % t.elem["name"])
         if t.mine_carried > 0:
-            sfx.append("МИНА x%d (E)" % t.mine_carried)
+            sfx.append("МИНА x%d (F)" % t.mine_carried)
         # v3.2: стены по ярусам — все ставятся по Q (сначала обычные)
         if t.wall_charges.get("std", 0) > 0:
             sfx.append("СТЕНА x%d (Q)" % t.wall_charges["std"])

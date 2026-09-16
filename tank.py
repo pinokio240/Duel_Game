@@ -20,6 +20,7 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       PU_MINE_CARRY, BARRIER_MAX,
                       TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP,
                       SHELL_TYPES, SHELL_AP_RELOAD_MULT,
+                      SHELL_STAR_DAMAGE_MULT,
                       WALL_TIER_ORDER, WALL_CARRY, WALL_BONUS_GIVE)
 from bullet import Bullet, ELEMENT_COLORS
 
@@ -124,6 +125,13 @@ class Tank:
         self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"
         # v3.0: имя стартового билда (для HUD-статусов) — заполнит игра
         self.build_name = None
+        # v3.4: ПРИКАЗ КОМАНДИРА — None (свободен) / "hold" (держать
+        # позицию) / "follow" (идти за командиром). order_t > 0 — приказ
+        # вражеского командира с таймером; приказы игрока постоянные (0).
+        self.order = None
+        self.order_xy = None       # где встал, когда получил «держать»
+        self.order_t = 0.0
+        self.is_commander = False  # v3.4: командир стороны (звезда ★)
         self._sprite = self._make_sprite()
         if self.scale != 1.0:
             self._sprite = pygame.transform.smoothscale(
@@ -327,7 +335,8 @@ class Tank:
         shell = self.shell_type
         sc = SHELL_TYPES.get(shell)
         if sc:
-            dmg *= {"he": 0.80, "ap": 1.30, "fire": 0.85}.get(shell, 1.0)
+            dmg *= {"he": 0.80, "ap": 1.30, "fire": 0.85,
+                    "star": SHELL_STAR_DAMAGE_MULT}.get(shell, 1.0)
             if shell == "ap":
                 spd *= 1.30
         # v2.9 РАЗРЫВНЫЕ: один заряд — один ВЫСТРЕЛ. Разрывным становится
@@ -353,7 +362,8 @@ class Tank:
                                   bounces=(0 if shell == "ap"
                                            else self.bullet_bounces),
                                   big=self.weapon.get("bigshot", False),
-                                  he=(he and i == 0), shell=shell))
+                                  he=(he and i == 0), shell=shell,
+                                  star=(shell == "star" and i == 0)))
         # обойма: пока есть второй снаряд — короткая пауза, потом полная перезарядка
         if self.mag_ammo > 1:
             self.mag_ammo -= 1

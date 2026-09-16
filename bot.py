@@ -197,6 +197,50 @@ class BotAI:
 
         self._use_items(game, dist, ang_to)
 
+        # v3.4: ПРИКАЗЫ КОМАНДИРА — «держи позицию» и «за мной» важнее
+        # собственного ИИ: движением управляет приказ, но стрелять и
+        # пользоваться предметами (мины/стены/турели/ремонт) бот не перестаёт.
+        order = getattr(t, "order", None)
+        if order in ("hold", "follow"):
+            # задавили в стену (или построили её вплотную) — приказ
+            # подождёт: сначала выбираемся, как и обычный ИИ
+            if (game.arena.circle_collides(t.x, t.y, t.radius * 0.9)
+                    or t._stuck > 0.4):
+                self.unstick_t = max(self.unstick_t, 0.5)
+                self.unstick_turn = random.choice((-1, 1))
+                t._stuck = 0.0
+            if self.unstick_t > 0:
+                self.unstick_t -= dt
+                t.control(dt, game.arena, -1, self.unstick_turn,
+                          tuple(game.tanks))
+                self._try_fire(dt, game, p, ang_to)
+                return
+        if order == "hold":
+            # стоим на месте, только доворачиваем ствол на цель
+            d = _ang_diff(ang_to, t.angle)
+            turn = 1 if d > 4 else (-1 if d < -4 else 0)
+            t.control(dt, game.arena, 0, turn, tuple(game.tanks))
+            self._try_fire(dt, game, p, ang_to)
+            return
+        if order == "follow":
+            cmd = getattr(game, "player", None)
+            if cmd is not None and cmd.alive and cmd is not t:
+                cdx, cdy = cmd.x - t.x, cmd.y - t.y
+                cd = math.hypot(cdx, cdy) + 1e-6
+                if cd > 250:
+                    dd = _ang_diff(math.degrees(math.atan2(cdy, cdx)), t.angle)
+                    turn = 1 if dd > 3 else (-1 if dd < -3 else 0)
+                    t.control(dt, game.arena, 1 if abs(dd) < 55 else 0,
+                              turn, tuple(game.tanks))
+                else:
+                    # у командира — разворачиваемся на врага и держим оборону
+                    dd = _ang_diff(ang_to, t.angle)
+                    turn = 1 if dd > 4 else (-1 if dd < -4 else 0)
+                    t.control(dt, game.arena, 0, turn, tuple(game.tanks))
+                self._try_fire(dt, game, p, ang_to)
+                return
+            # командир погиб — «за мной» потеряло смысл, воюем сами
+
         forward, turn = 0, 0
         desired = None
 

@@ -285,6 +285,9 @@ ASSAULT_MAPS = [
 # по 48 символов (клетка 81 px = ровно командная арена):
 #   .  пусто          #  стена (вечная)      S/H/U  прочные стены-барьеры
 #   P  точка захвата  D  спавн обороны       A      спавн атаки
+# v3.4: те же сетки с именем custom_battle_N.txt — карты для ВСЕХ
+# остальных режимов (FFA и командные): P не нужен, D — спавн союзников,
+# A — спавн врагов (в FFA те и другие — просто точки появления).
 
 _CUSTOM_TIER = {"S": "strong", "H": "heavy", "U": "ultra"}
 
@@ -348,14 +351,89 @@ def parse_custom_map(path):
 
 
 def load_custom_maps():
-    """Все свои карты из папки maps (custom_*.txt) — пригодные к бою.
+    """Все свои ШТУРМОВЫЕ карты из папки maps (custom_*.txt, но НЕ
+    custom_battle_* — те для обычных режимов) — пригодные к бою.
     Папки может не быть — это нормально, вернём пустой список."""
     if not os.path.isdir(MAPS_DIR):
         return []
     out = []
     for fn in sorted(os.listdir(MAPS_DIR)):
-        if fn.startswith("custom_") and fn.endswith(".txt"):
-            m = parse_custom_map(os.path.join(MAPS_DIR, fn))
+        if not (fn.startswith("custom_") and fn.endswith(".txt")):
+            continue
+        if fn.startswith("custom_battle_"):
+            continue      # v3.4: боевые карты — отдельная ротация
+        m = parse_custom_map(os.path.join(MAPS_DIR, fn))
+        if m is not None:
+            out.append(m)
+    return out
+
+
+# ================= СВОИ БОЕВЫЕ КАРТЫ (v3.4: редактор для ВСЕХ режимов) =================
+
+def custom_battle_path(idx):
+    return os.path.join(MAPS_DIR, "custom_battle_%d.txt" % idx)
+
+
+def save_custom_battle_map(name, grid):
+    """Сохранить БОЕВУЮ карту редактора (FFA и командные режимы):
+    ищем свободный номер custom_battle_N.txt. Возвращает путь файла."""
+    os.makedirs(MAPS_DIR, exist_ok=True)
+    idx = 1
+    while os.path.exists(custom_battle_path(idx)):
+        idx += 1
+    path = custom_battle_path(idx)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write((name or "Арена игрока") + "\n")
+        for row in grid:
+            f.write("".join(row) + "\n")
+    return path
+
+
+def parse_custom_battle_map(path):
+    """Разобрать БОЕВУЮ карту (для FFA и командных): стены, барьеры
+    и СПАВНЫ (D — союзники/игрок, A — враги; в FFA те и другие —
+    просто точки появления). Точки захвата здесь не нужны.
+    Возвращает dict или None, если карта неполноценна (нет D или A)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = [ln.rstrip("\n") for ln in f]
+    except OSError:
+        return None
+    lines = [ln for ln in lines if ln.strip() != ""]
+    if len(lines) < EDITOR_ROWS + 1:
+        return None
+    name = lines[0].strip()[:40] or "Арена игрока"
+    grid = lines[1:1 + EDITOR_ROWS]
+    walls, segs = [], []
+    spawns_d, spawns_a = [], []
+    for r, row in enumerate(grid):
+        for c, ch in enumerate(row[:EDITOR_COLS]):
+            wx, wy = c * EDITOR_CELL + EDITOR_CELL / 2.0, \
+                     r * EDITOR_CELL + EDITOR_CELL / 2.0
+            if ch == "#":
+                walls.append(pygame.Rect(c * EDITOR_CELL, r * EDITOR_CELL,
+                                         EDITOR_CELL, EDITOR_CELL))
+            elif ch in _CUSTOM_TIER:
+                segs.append((wx, wy, 0.0, _CUSTOM_TIER[ch]))
+            elif ch == "D":
+                spawns_d.append((wx, wy))
+            elif ch == "A":
+                spawns_a.append((wx, wy))
+    if not spawns_d or not spawns_a:
+        return None
+    return dict(name=name, custom=True, battle=True, walls=walls, segs=segs,
+                spawns_d=spawns_d, spawns_a=spawns_a)
+
+
+def load_custom_battle_maps():
+    """Все свои БОЕВЫЕ карты (custom_battle_*.txt) — для FFA и командных
+    режимов. Папки может не быть — это нормально."""
+    if not os.path.isdir(MAPS_DIR):
+        return []
+    out = []
+    for fn in sorted(os.listdir(MAPS_DIR)):
+        if fn.startswith("custom_battle_") and fn.endswith(".txt"):
+            m = parse_custom_battle_map(os.path.join(MAPS_DIR, fn))
             if m is not None:
                 out.append(m)
     return out
