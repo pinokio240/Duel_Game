@@ -364,10 +364,11 @@ class Game:
         # v3.0: СПЕКТАТОР — после смерти игрока камера следует за живым
         # танком; ←/→ (или A/D/Space) переключают, ЗА КЕМ смотреть
         self.spec_target = None
-        # v3.5: ОКНО ПРИКАЗОВ — открывается на E (Shift+E — сразу цель
-        # «вся команда»); в окне клавиши 1–5 отдают приказы
+        # v3.6: ОКНО ПРИКАЗОВ — открывается на E (Shift+E — сразу цель
+        # «вся команда»); в окне 1–8 — приказы, плитки/Tab — выбор бота
         self.orders_open = False
         self.orders_all = False
+        self.orders_pick = set()   # выбранные в окне боты (клик/Tab)
 
         self._fake_keys = None  # только для автотестов
         # мышь: кликабельные зоны текущего кадра и позиция курсора
@@ -414,6 +415,7 @@ class Game:
                           "предметы выдаются так: «Огонь Игрок», «Гаубица Бот», «Веер»"]
         self.con_hist = []
         self.con_hist_i = 0
+        self.con_scroll = 0        # v3.6: прокрутка истории (колесо/PgUp)
         self.con_place = None      # ждём клик, чтобы поставить бонус на карту
         self._con_blink = 0.0
         self._con_reg = self._con_build_registry()
@@ -758,6 +760,13 @@ class Game:
         # 2на2/3на3/4на4 — половина минус игрок
         n_allies = (1 if self.mode == 7 else n_tanks // 2 - 1) \
             if self.team_mode else 0
+        # v3.6: СВОЯ БАЗА — центр стартовой шеренги команды (для приказа
+        # «ОТСТУПАЙ»); в ШТУРМЕ обороны базой служит само здание
+        self.base0 = None
+        if self.team_mode:
+            ours = pts[:n_allies + 1]
+            self.base0 = (sum(p[0] for p in ours) / len(ours),
+                          sum(p[1] for p in ours) / len(ours))
         for i in range(n_tanks - 1):
             b = self.bot_builds[i % len(self.bot_builds)] if self.bot_builds \
                 else ("medium", "medium", "standard", "none", "none")
@@ -1014,6 +1023,7 @@ class Game:
             self.con_open = not self.con_open
             if self.con_open:
                 self.con_input = ""
+                self.con_scroll = 0     # v3.6: открыли — показываем низ
             return
         if self.con_open:
             self._con_key(e)      # пока консоль открыта — весь ввод ей
@@ -1202,12 +1212,25 @@ class Game:
                 self.state = self._table_from
         elif self.state == "fight":
             if self.orders_open and k in self.ORDERS_UI_KEYS:
-                # v3.5: ОКНО ПРИКАЗОВ перехватывает свои клавиши —
-                # Esc/E закрывают, T меняет цель, 1–5 отдают приказы
+                # v3.6: ОКНО ПРИКАЗОВ перехватывает свои клавиши —
+                # Esc/E закрывают, T — вся команда, Tab — следующий бот,
+                # 1–8 отдают приказы
                 if k in (pygame.K_ESCAPE, pygame.K_e):
                     self.orders_open = False
                 elif k == pygame.K_t:
                     self.orders_all = not self.orders_all
+                    if self.orders_all:
+                        self.orders_pick = set()
+                    self.sounds.play("ric")
+                elif k == pygame.K_TAB:
+                    allies = self._allies_alive()
+                    if allies:
+                        cur = (next(iter(self.orders_pick))
+                               if len(self.orders_pick) == 1
+                               else self._order_target())
+                        i = allies.index(cur) if cur in allies else -1
+                        self.orders_pick = {allies[(i + 1) % len(allies)]}
+                        self.orders_all = False
                     self.sounds.play("ric")
                 else:
                     self._command_order(self.ORDER_KEYMAP[k],
@@ -1317,8 +1340,28 @@ class Game:
             self.sounds.play("ric")
         elif kind == "ord_row":                # v3.5: клик по строке приказа
             self._command_order(data, all_=self.orders_all)
+        elif kind == "ord_bot":                # v3.6: клик по ПЛИТКЕ БОТА
+            if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                # Shift+клик — ДОБАВИТЬ в выбор (нескольким сразу)
+                if data in self.orders_pick:
+                    self.orders_pick.discard(data)
+                else:
+                    self.orders_pick.add(data)
+            else:
+                # обычный клик — выбрать ТОЛЬКО этого бота; повторный
+                # клик по нему снимает выбор (приказ уйдёт боту у прицела)
+                self.orders_pick = set() if self.orders_pick == {data} \
+                    else {data}
+            self.orders_all = False
+            self.sounds.play("ric")
+        elif kind == "ord_all":                # v3.6: плитка «ВСЯ КОМАНДА»
+            self.orders_all = True
+            self.orders_pick = set()
+            self.sounds.play("ric")
         elif kind == "ord_tgt":                # v3.5: сменить цель приказа
             self.orders_all = not self.orders_all
+            if self.orders_all:
+                self.orders_pick = set()
             self.sounds.play("ric")
         elif kind == "ord_close":              # v3.5: закрыть окно приказов
             self.orders_open = False
@@ -1668,6 +1711,11 @@ class Game:
                 t.order_t = max(0.0, t.order_t - dt)
                 if t.order_t <= 0:
                     t.order = None
+            # v3.6: цель приказа «ПО МОЕЙ ЦЕЛИ» умерла — приказ снят
+            if (t.order == "target"
+                    and (getattr(t, "order_tgt", None) is None
+                         or not t.order_tgt.alive)):
+                t.order = None
         # v3.0: огненные лужи жгут чужих и гаснут по таймеру
         for fz in self.fire_zones:
             fz.step(dt, self)
@@ -2263,11 +2311,10 @@ class Game:
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
-            "E — ОКНО ПРИКАЗОВ (1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 В АТАКУ · 4 К ТОЧКЕ · 5 СВОБОДНО; T — вся команда)",
-            "F — мина   Q — стена (4 ярусов!)   R — ТУРЕЛЬ   H — РЕМОНТ стен   X — ЭМИ   V — КРУГОВОЙ АД",
-            "НОВОЕ — КРУГОВОЙ АД стреляет ВЫБРАННЫМ снарядом (звёздный = 45 залпов = 225 осколков!).",
-            "НОВОЕ — ВРАЖЕСКИЙ КОМАНДИР (★) бросает своих В АТАКУ, а не только держит рубежи.",
-            "ЗВЁЗДНЫЙ снаряд рвётся на 5 звездой. РЕДАКТОР КАРТ — для ЛЮБЫХ режимов (TAB: ШТУРМ/БОЙ).",
+            "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
+            "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
+            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД выбранным снарядом (звёздный = 225 осколков)",
+            "Вражеский ★ КОМАНДИР приказывает своим. Консоль (Ё): «помощь» с переносом строк и прокруткой.", 
         ]
         y = 290
         for s in lines:
@@ -2364,7 +2411,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.5 · ГЕНЕРАЛ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.6 · ШТАБ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -2391,28 +2438,38 @@ class Game:
 
     # ============ КОМАНДИР: приказы ботам (v3.4/v3.5) ============
 
-    # v3.5: ПЯТЬ ПРИКАЗОВ — список для окна приказов (клавиши 1–5)
-    ORDER_LIST = ("hold", "follow", "attack", "point", "free")
+    # v3.6: ВОСЕМЬ ПРИКАЗОВ — список для окна приказов (клавиши 1–8)
+    ORDER_LIST = ("hold", "follow", "cover", "attack", "point",
+                  "retreat", "target", "free")
     ORDER_INFO = {
-        "hold":   ("ДЕРЖАТЬ ПОЗИЦИЮ", "встанет и отстреливается с места",
-                   (255, 208, 0)),
-        "follow": ("ЗА МНОЙ", "идёт за вами и прикрывает спину",
-                   (120, 255, 220)),
-        "attack": ("В АТАКУ", "сам давит ближайшего врага",
-                   (255, 120, 60)),
-        "point":  ("К ТОЧКЕ", "идёт к точке сбора и держит её",
-                   (120, 200, 255)),
-        "free":   ("СВОБОДНО", "воюет по собственному уму",
-                   (160, 200, 255)),
+        "hold":    ("ДЕРЖАТЬ ПОЗИЦИЮ", "встанет и отстреливается с места",
+                    (255, 208, 0)),
+        "follow":  ("ЗА МНОЙ", "идёт за вами и прикрывает спину",
+                    (120, 255, 220)),
+        "cover":   ("ПРИКРЫВАЙ", "жмётся к вам и бьёт тех, кто ближе к вам",
+                    (170, 255, 120)),
+        "attack":  ("В АТАКУ", "сам давит ближайшего врага",
+                    (255, 120, 60)),
+        "point":   ("К ТОЧКЕ", "идёт к точке сбора и держит её",
+                    (120, 200, 255)),
+        "retreat": ("ОТСТУПАЙ", "уходит к своей базе и обороняет её",
+                    (255, 170, 220)),
+        "target":  ("ПО МОЕЙ ЦЕЛИ", "фокус на враге, что стоит у прицела",
+                    (255, 95, 95)),
+        "free":    ("СВОБОДНО", "воюет по собственному уму",
+                    (160, 200, 255)),
     }
     ORDER_KEYMAP = {pygame.K_1: "hold", pygame.K_2: "follow",
-                    pygame.K_3: "attack", pygame.K_4: "point",
-                    pygame.K_5: "free", pygame.K_KP1: "hold",
-                    pygame.K_KP2: "follow", pygame.K_KP3: "attack",
-                    pygame.K_KP4: "point", pygame.K_KP5: "free"}
-    # v3.5: клавиши, которые открытое окно приказов перехватывает целиком
-    ORDERS_UI_KEYS = (pygame.K_ESCAPE, pygame.K_e, pygame.K_t) \
-        + tuple(ORDER_KEYMAP)
+                    pygame.K_3: "cover", pygame.K_4: "attack",
+                    pygame.K_5: "point", pygame.K_6: "retreat",
+                    pygame.K_7: "target", pygame.K_8: "free",
+                    pygame.K_KP1: "hold", pygame.K_KP2: "follow",
+                    pygame.K_KP3: "cover", pygame.K_KP4: "attack",
+                    pygame.K_KP5: "point", pygame.K_KP6: "retreat",
+                    pygame.K_KP7: "target", pygame.K_KP8: "free"}
+    # v3.6: клавиши, которые открытое окно приказов перехватывает целиком
+    ORDERS_UI_KEYS = (pygame.K_ESCAPE, pygame.K_e, pygame.K_t,
+                      pygame.K_TAB) + tuple(ORDER_KEYMAP)
 
     def _allies_alive(self):
         """Живые боты-союзники (в FFA список пуст — командовать некем)."""
@@ -2435,12 +2492,16 @@ class Game:
         return near
 
     def _command_open(self, all_=False):
-        """v3.5: E — ОТКРЫТЬ ОКНО ПРИКАЗОВ (Shift+E — сразу с целью
-        «ВСЯ КОМАНДА»). Мёртвый командовать не может."""
+        """v3.6: E — ОТКРЫТЬ ОКНО ПРИКАЗОВ (Shift+E — сразу с целью
+        «ВСЯ КОМАНДА»). По умолчанию выбран бот у прицела, в окне можно
+        тыкать в конкретные ПЛИТКИ ботов или идти Tab. Мёртвый
+        командовать не может."""
         if not self.player.alive:
             return
         self.orders_open = True
         self.orders_all = bool(all_)
+        tb = self._order_target()
+        self.orders_pick = set() if all_ else ({tb} if tb else set())
         self.sounds.play("ric")
 
     def _order_point(self):
@@ -2450,11 +2511,32 @@ class Game:
             return (float(self.cap_xy[0]), float(self.cap_xy[1]))
         return (self.arena.w / 2.0, self.arena.h / 2.0)
 
+    def _retreat_point(self):
+        """v3.6: СВОЯ БАЗА для приказа «ОТСТУПАЙ»: в ШТУРМЕ при обороне —
+        точка захвата (здание), иначе — центр своей стартовой шеренги
+        (base0, считается на старте раунда); без данных — низ карты."""
+        if self.is_assault and getattr(self, "assault_def_team", 0) == 0:
+            return (float(self.cap_xy[0]), float(self.cap_xy[1]))
+        if getattr(self, "base0", None):
+            return (float(self.base0[0]), float(self.base0[1]))
+        return (self.arena.w / 2.0, self.arena.h * 0.85)
+
+    def _aim_enemy(self):
+        """v3.6: ЧУЖАК, БЛИЖАЙШИЙ К ПРИЦЕЛУ — цель приказа «ПО МОЕЙ
+        ЦЕЛИ». В командах — вся чужая сторона, в FFA чужаки и так все."""
+        foes = [t for t in self.tanks
+                if t.alive and self.tank_team.get(t, -1) != 0]
+        if not foes:
+            return None
+        wx = self._mouse[0] + self.cam[0]
+        wy = self._mouse[1] + self.cam[1]
+        return min(foes, key=lambda t: (t.x - wx) ** 2 + (t.y - wy) ** 2)
+
     def _command_order(self, order, all_=False):
-        """v3.5: применить ПРИКАЗ (hold/follow/attack/point/free) боту у
-        прицела; all_=True — ВСЕЙ команде разом. Приказы игрока вечны,
-        пока их не сменишь (order_t = 0). В FFA подчинённых нет — там
-        каждый сам за себя."""
+        """v3.6: применить ПРИКАЗ (8 видов) выбранным в окне ботам
+        (orders_pick); пустой выбор — бот у прицела; all_=True — ВСЕЙ
+        команде разом. Приказы игрока вечны, пока их не сменишь
+        (order_t = 0). В FFA подчинённых нет — там каждый сам за себя."""
         if not self.player.alive:
             return
         allies = self._allies_alive()
@@ -2466,10 +2548,10 @@ class Game:
         if all_:
             targets = allies          # T / Shift+E — всей команде разом
         else:
-            target = self._order_target()
-            if target is None:
+            picked = [b for b in allies if b in self.orders_pick]
+            targets = picked or [self._order_target()]
+            if not targets or targets[0] is None:
                 return
-            targets = [target]
         for b in targets:
             if order == "free":
                 b.order = None
@@ -2481,8 +2563,19 @@ class Game:
                 b.order = "point"
                 b.order_xy = self._order_point()
                 b.order_t = 0.0
+            elif order == "retreat":     # v3.6: к своей базе
+                b.order = "retreat"
+                b.order_xy = self._retreat_point()
+                b.order_t = 0.0
+            elif order == "target":      # v3.6: фокус на чужаке у прицела
+                b.order = "target"
+                b.order_tgt = self._aim_enemy()
+                b.order_t = 0.0
             elif order == "attack":
                 b.order = "attack"
+                b.order_t = 0.0
+            elif order == "cover":       # v3.6: рядом с командиром
+                b.order = "cover"
                 b.order_t = 0.0
             else:                     # follow
                 b.order = "follow"
@@ -2550,6 +2643,15 @@ class Game:
         elif t.order == "point":
             lab, col = "К ТОЧКЕ", ((120, 200, 255) if friend
                                    else (255, 130, 130))
+        elif t.order == "cover":               # v3.6
+            lab, col = "ПРИКРЫВАЕТ", ((170, 255, 120) if friend
+                                      else (255, 130, 130))
+        elif t.order == "retreat":             # v3.6
+            lab, col = "ОТСТУПАЕТ", ((255, 170, 220) if friend
+                                     else (255, 130, 130))
+        elif t.order == "target":              # v3.6
+            lab, col = "НА ЦЕЛИ", ((255, 95, 95) if friend
+                                   else (255, 130, 130))
         if getattr(t, "is_commander", False):
             lab = "★ КОМАНДИР" if lab is None else "★ " + lab
             col = (255, 208, 0) if friend else (255, 130, 130)
@@ -2562,13 +2664,21 @@ class Game:
     # ============ ОКНО ПРИКАЗОВ (v3.5) ============
 
     def _draw_orders(self):
-        """v3.5: окно приказов командира — открывается на E (Shift+E —
-        сразу с целью «ВСЯ КОМАНДА»). Клавиши 1–5 или клик по строке
-        отдают приказ, T переключает цель (бот у прицела / вся команда),
-        E/Esc закрывает. Бой НЕ останавливается. В FFA подчинённых нет —
-        окно честно это пишет."""
+        """v3.6: окно приказов командира — открывается на E (Shift+E —
+        сразу с целью «ВСЯ КОМАНДА»). ВОСЕМЬ приказов — клавиши 1–8 или
+        клик по строке. КОГО ПРИКАЗЫВАЕМ: ПЛИТКИ БОТОВ (клик — выбрать
+        одного, Shift+клик — нескольких; Tab — следующий бот), плитка
+        «ВСЯ КОМАНДА» и T — всем разом. E/Esc закрывает. Бой НЕ
+        останавливается. В FFA подчинённых нет — окно честно пишет."""
         allies = self._allies_alive()
-        panel = pygame.Rect(0, 0, 596, 404)
+        # высота панели под число ботов (плитки — до 5 в ряд)
+        per_row, tw, th, gap = 5, 108, 32, 8
+        rows = 0
+        if allies:
+            rows = (len(allies) + 1 + per_row - 1) // per_row   # + «ВСЕ»
+        panel_h = 50 + (22 + rows * (th + gap) + 30 if allies else 0) \
+            + 8 * 46 + 38
+        panel = pygame.Rect(0, 0, 640, panel_h)
         panel.center = (SCREEN_W // 2, SCREEN_H // 2)
         dim = pygame.Surface((SCREEN_W, SCREEN_H), pygame.SRCALPHA)
         dim.fill((4, 6, 16, 135))
@@ -2587,7 +2697,7 @@ class Game:
         self.screen.blit(xi, xi.get_rect(center=xr.center))
         self._click_zones.append((xr, "ord_close", None))
 
-        y = panel.y + 52
+        y = panel.y + 50
         if not allies:
             img = get_font(17, bold=False).render(
                 "В FFA ПОДЧИНЁННЫХ НЕТ — командир работает в командных",
@@ -2599,33 +2709,64 @@ class Game:
             self.screen.blit(img, img.get_rect(
                 midtop=(panel.centerx, y + 24)))
         else:
-            # целевой бот / вся команда
+            # ---- КОГО ПРИКАЗЫВАЕМ: плитки ботов + «ВСЯ КОМАНДА» ----
+            img = get_font(13, bold=False).render(
+                "КОГО ПРИКАЗЫВАЕМ (клик — выбрать, Shift+клик — нескольких, Tab — дальше):",
+                True, COL_DIM)
+            self.screen.blit(img, (panel.x + 26, y))
+            y += 22
+            for idx, b in enumerate(allies + [None]):    # None = «ВСЕ»
+                r, c = divmod(idx, per_row)
+                rect = pygame.Rect(panel.x + 26 + c * (tw + gap),
+                                   y + r * (th + gap), tw, th)
+                if b is None:
+                    sel = self.orders_all
+                    label = "ВСЯ КОМАНДА"
+                    kind, data = "ord_all", None
+                else:
+                    sel = not self.orders_all and b in self.orders_pick
+                    label = (b.display_name or "СОЮЗНИК")[:12]
+                    kind, data = "ord_bot", b
+                hov = rect.collidepoint(self._mouse)
+                pygame.draw.rect(self.screen,
+                                 (52, 62, 110) if sel
+                                 else ((46, 58, 104) if hov
+                                       else (24, 30, 58)),
+                                 rect, border_radius=8)
+                pygame.draw.rect(self.screen,
+                                 COL_GOLD if sel
+                                 else ((90, 100, 150) if hov
+                                       else (52, 62, 104)),
+                                 rect, 2 if sel else 1, border_radius=8)
+                ti = get_font(14).render(label, True,
+                                         COL_GOLD if sel else COL_TEXT)
+                self.screen.blit(ti, ti.get_rect(center=rect.center))
+                self._click_zones.append((rect, kind, data))
+            y += rows * (th + gap) + 8
+            # сводка: кому уйдёт приказ
             if self.orders_all:
                 tgt = "ВСЯ КОМАНДА (%d)" % len(allies)
+            elif self.orders_pick:
+                names = [b.display_name or "СОЮЗНИК" for b in allies
+                         if b in self.orders_pick]
+                tgt = ", ".join(names[:3])
+                if len(names) > 3:
+                    tgt += " +ещё %d" % (len(names) - 3)
             else:
                 tb = self._order_target()
-                tgt = (tb.display_name or "СОЮЗНИК") if tb else "—"
-            img = get_font(18, bold=False).render(
-                "ЦЕЛЬ: %s" % tgt, True, COL_TEXT)
-            self.screen.blit(img, img.get_rect(midleft=(panel.x + 26, y)))
-            tr = pygame.Rect(panel.x + 26, y + 26, 252, 30)
-            hov = tr.collidepoint(self._mouse)
-            pygame.draw.rect(self.screen,
-                             (46, 58, 104) if hov else (30, 40, 75),
-                             tr, border_radius=8)
-            ti = get_font(16).render(
-                "[T] " + ("БОТ У ПРИЦЕЛА" if self.orders_all
-                          else "ВСЯ КОМАНДА"), True, COL_GOLD)
-            self.screen.blit(ti, ti.get_rect(center=tr.center))
-            self._click_zones.append((tr, "ord_tgt", None))
-        y += 72
-        # строки приказов: 1–5
+                tgt = ((tb.display_name or "СОЮЗНИК")
+                       + " (у прицела)") if tb else "—"
+            img = get_font(15, bold=False).render("ЦЕЛЬ: %s" % tgt,
+                                                  True, COL_TEXT)
+            self.screen.blit(img, (panel.x + 26, y))
+            y += 30
+        # строки приказов: 1–8
         for i, key in enumerate(self.ORDER_LIST):
             name, desc, col = self.ORDER_INFO[key]
             cnt = sum(1 for b in allies
                       if b.order == key
                       or (key == "free" and b.order is None))
-            row = pygame.Rect(panel.x + 18, y, panel.w - 36, 44)
+            row = pygame.Rect(panel.x + 18, y, panel.w - 36, 40)
             hov = row.collidepoint(self._mouse) and bool(allies)
             pygame.draw.rect(self.screen,
                              (34, 44, 84) if hov else (24, 30, 58),
@@ -2650,9 +2791,9 @@ class Game:
                                                        row.centery)))
             if allies:
                 self._click_zones.append((row, "ord_row", key))
-            y += 50
+            y += 46
         img = get_font(14, bold=False).render(
-            "1–5 — приказ   ·   T — сменить цель   ·   E / Esc — закрыть",
+            "1–8 — приказ · плитки/Tab — кому · T — вся команда · E/Esc — закрыть",
             True, COL_DIM)
         self.screen.blit(img, img.get_rect(midbottom=(panel.centerx,
                                                       panel.bottom - 10)))
@@ -3515,6 +3656,12 @@ class Game:
             sfx.append("ПРИКАЗ: В АТАКЕ")
         elif t.order == "point":               # v3.5
             sfx.append("ПРИКАЗ: К ТОЧКЕ")
+        elif t.order == "cover":               # v3.6
+            sfx.append("ПРИКАЗ: ПРИКРЫВАЕТ")
+        elif t.order == "retreat":             # v3.6
+            sfx.append("ПРИКАЗ: ОТСТУПАЕТ")
+        elif t.order == "target":              # v3.6
+            sfx.append("ПРИКАЗ: НА ЦЕЛИ")
         if getattr(t, "is_commander", False):
             sfx.append("★ КОМАНДИР")
         if t.build_name:                       # v3.0: имя стартового билда
@@ -3913,7 +4060,7 @@ class Game:
             cmd = self.con_input.strip()
             self.con_input = ""
             if cmd:
-                self.con_lines.append("> " + cmd)
+                self._con_say("> " + cmd)  # v3.6: тоже с переносом строк
                 self.con_hist.append(cmd)
                 self.con_hist_i = len(self.con_hist)
                 self._con_execute(cmd)
@@ -3930,12 +4077,40 @@ class Game:
                 self.con_hist_i = min(len(self.con_hist), self.con_hist_i + 1)
                 self.con_input = (self.con_hist[self.con_hist_i]
                                   if self.con_hist_i < len(self.con_hist) else "")
+        elif k == pygame.K_PAGEUP:         # v3.6: прокрутка истории
+            self._con_scroll(-3)
+        elif k == pygame.K_PAGEDOWN:
+            self._con_scroll(3)
         elif e.unicode and e.unicode.isprintable() and len(self.con_input) < 70:
             self.con_input += e.unicode
 
+    _CON_MAX_W = SCREEN_W - 24   # v3.6: ширина строки консоли
+
+    def _con_wrap(self, text):
+        """v3.6: длинные строки больше НЕ улетают за край консоли —
+        режем по словам, точно меряя ширину шрифтом."""
+        f = get_font(15, bold=False)
+        out, cur = [], ""
+        for w in text.split(" "):
+            trial = (cur + " " + w) if cur else w
+            if not cur or f.size(trial)[0] <= self._CON_MAX_W:
+                cur = trial
+            else:
+                out.append(cur)
+                cur = w
+        out.append(cur)
+        return out
+
     def _con_say(self, *lines):
-        self.con_lines.extend(lines)
-        del self.con_lines[:-60]
+        for ln in lines:
+            self.con_lines.extend(self._con_wrap(ln))
+        del self.con_lines[:-200]
+        self.con_scroll = 0          # свежий вывод — показываем низ
+
+    def _con_scroll(self, dy):
+        """v3.6: прокрутка истории консоли (колесо мыши, PgUp/PgDn):
+        dy < 0 — вверх, к старым строкам; dy > 0 — вниз, к свежим."""
+        self.con_scroll = max(0, self.con_scroll - dy)
 
     def _con_candidates(self):
         """Все слова, которые понимает консоль: команды, предметы, цели."""
@@ -4099,6 +4274,7 @@ class Game:
             return
         if parts[0] == "очистить":
             self.con_lines = []
+            self.con_scroll = 0
             return
         if parts[0] == "сброс":
             if self.state in ("intro", "fight", "round_end", "pause"):
@@ -4214,9 +4390,10 @@ class Game:
         self.screen.blit(img, r)
 
     def _draw_console(self):
-        """Консоль разработчика внизу экрана: история, строка ввода и
-        ПОДСКАЗКИ под ней — пишешь «Ту», она пишет «Турбо» (Tab — дополнить)."""
-        h = 252
+        """Консоль разработчика внизу экрана: история (v3.6 — с
+        ПЕРЕНОСОМ длинных строк и ПРОКРУТКОЙ), строка ввода и ПОДСКАЗКИ
+        под ней — пишешь «Ту», она пишет «Турбо» (Tab — дополнить)."""
+        h = 272
         panel = pygame.Surface((SCREEN_W, h), pygame.SRCALPHA)
         panel.fill((6, 8, 20, 232))
         self.screen.blit(panel, (0, SCREEN_H - h))
@@ -4224,11 +4401,23 @@ class Game:
                          (0, SCREEN_H - h), (SCREEN_W, SCREEN_H - h), 2)
         f = get_font(15, bold=False)
         y = SCREEN_H - h + 8
-        for ln in self.con_lines[-9:]:
+        vis = 10                                   # видно строк
+        n = len(self.con_lines)
+        sc = min(self.con_scroll, max(0, n - vis))  # не выше начала
+        if sc <= 0:
+            chunk = self.con_lines[-vis:]
+        else:
+            chunk = self.con_lines[-(vis + sc):-sc]
+        for ln in chunk:
             img = f.render(ln, True,
                            COL_P1 if ln.startswith(">") else (150, 160, 200))
             self.screen.blit(img, (10, y))
             y += 19
+        if sc > 0:      # подсказка: выше есть ещё строки
+            up = get_font(12, bold=False).render(
+                "↑ ещё %d стр. (колесо/PgUp)" % sc, True, (130, 140, 185))
+            self.screen.blit(up, (SCREEN_W - up.get_width() - 12,
+                                  SCREEN_H - h + 8))
         self._con_blink += 1 / 60.0
         cur = "_" if int(self._con_blink * 2) % 2 == 0 else " "
         img = get_font(19).render("> " + self.con_input + cur, True, COL_TEXT)
@@ -4243,7 +4432,7 @@ class Game:
                 self.screen.blit(img2, (36 + img.get_width(), SCREEN_H - 27))
         else:
             img = get_font(13, bold=False).render(
-                "Ё — закрыть · ↑/↓ — история · «помощь» — команды · «список» — предметы",
+                "Ё — закрыть · ↑/↓ — история · колесо/PgUp — прокрутка · «помощь» — команды",
                 True, (95, 105, 145))
             self.screen.blit(img, (10, SCREEN_H - 27))
 
@@ -4269,6 +4458,8 @@ class Game:
                 elif e.type == pygame.MOUSEBUTTONDOWN and e.button == 3 \
                         and self.state == "editor" and not self.con_open:
                     self._ed_click(e.pos, erase=True)   # ПКМ — стереть
+                elif e.type == pygame.MOUSEWHEEL and self.con_open:
+                    self._con_scroll(e.y * 2)    # v3.6: листаем историю
                 self.on_keydown(e)
             self.update(dt)
             self.draw()

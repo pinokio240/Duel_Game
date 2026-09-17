@@ -202,7 +202,8 @@ class BotAI:
         # пользоваться предметами (мины/стены/турели/ремонт) бот не перестаёт.
         # v3.5: к ним добавились «в атаку» и «к точке».
         order = getattr(t, "order", None)
-        if order in ("hold", "follow", "attack", "point"):
+        if order in ("hold", "follow", "attack", "point",
+                     "cover", "retreat", "target"):
             # задавили в стену (или построили её вплотную) — приказ
             # подождёт: сначала выбираемся, как и обычный ИИ
             if (game.arena.circle_collides(t.x, t.y, t.radius * 0.9)
@@ -241,6 +242,36 @@ class BotAI:
                 self._try_fire(dt, game, p, ang_to)
                 return
             # командир погиб — «за мной» потеряло смысл, воюем сами
+        if order == "cover":
+            # v3.6 «ПРИКРЫВАЙ»: жмём к командиру (до 330px) и первыми
+            # встречаем того, кто подобрался К НЕМУ ближе всех
+            cmd = getattr(game, "player", None)
+            if cmd is not None and cmd.alive and cmd is not t:
+                cdx, cdy = cmd.x - t.x, cmd.y - t.y
+                cd = math.hypot(cdx, cdy) + 1e-6
+                foes = [o for o in game.tanks if o.alive and o is not t
+                        and game.tank_team.get(o, o.team) != 0]
+                pt = None
+                if foes:
+                    pt = min(foes, key=lambda o:
+                             (o.x - cmd.x) ** 2 + (o.y - cmd.y) ** 2)
+                a2 = (math.degrees(math.atan2(pt.y - t.y, pt.x - t.x))
+                      if pt is not None else ang_to)
+                if cd > 330:
+                    # догоняем командира, разворачиваясь на угрозу
+                    dv = _ang_diff(math.degrees(math.atan2(cdy, cdx)),
+                                   t.angle)
+                    tv = 1 if dv > 3 else (-1 if dv < -3 else 0)
+                    t.control(dt, game.arena, 1 if abs(dv) < 55 else 0,
+                              tv, tuple(game.tanks))
+                else:
+                    # рядом — стоим и доворачиваем ствол на угрозу
+                    dv = _ang_diff(a2, t.angle)
+                    tv = 1 if dv > 4 else (-1 if dv < -4 else 0)
+                    t.control(dt, game.arena, 0, tv, tuple(game.tanks))
+                self._try_fire(dt, game, pt if pt is not None else p, a2)
+                return
+            # командира нет — прикрывать некого, воюем сами
         if order == "attack":
             # v3.5 «В АТАКУ»: давим на цель — идём к ней, даже если она
             # не видна (по курсу на неё), стреляем как обычно; у самого
@@ -269,6 +300,45 @@ class BotAI:
                 t.control(dt, game.arena, 0, tv, tuple(game.tanks))
             self._try_fire(dt, game, p, ang_to)
             return
+        if order == "retreat":
+            # v3.6 «ОТСТУПАЙ»: уходим к СВОЕЙ БАЗЕ (order_xy — центр
+            # стартовой шеренги, в ШТУРМЕ-обороне — здание) и держим её
+            px2, py2 = getattr(t, "order_xy", None) or game._retreat_point()
+            ddx, ddy = px2 - t.x, py2 - t.y
+            if math.hypot(ddx, ddy) > 200:
+                a2 = math.degrees(math.atan2(ddy, ddx))
+                dv = _ang_diff(a2, t.angle)
+                tv = 1 if dv > 3 else (-1 if dv < -3 else 0)
+                t.control(dt, game.arena, 1 if abs(dv) < 55 else 0, tv,
+                          tuple(game.tanks))
+            else:
+                dv = _ang_diff(ang_to, t.angle)
+                tv = 1 if dv > 4 else (-1 if dv < -4 else 0)
+                t.control(dt, game.arena, 0, tv, tuple(game.tanks))
+            self._try_fire(dt, game, p, ang_to)
+            return
+        if order == "target":
+            # v3.6 «ПО МОЕЙ ЦЕЛИ»: держим дистанцию 240–420 до указанного
+            # врага (order_tgt) и расстреливаем; убил — воюем сами (приказ
+            # снимется в _fight_step)
+            tg = getattr(t, "order_tgt", None)
+            if tg is not None and tg.alive:
+                ddx, ddy = tg.x - t.x, tg.y - t.y
+                dd = math.hypot(ddx, ddy) + 1e-6
+                a2 = math.degrees(math.atan2(ddy, ddx))
+                dv = _ang_diff(a2, t.angle)
+                if dd > 420:            # сближаемся
+                    tv = 1 if dv > 3 else (-1 if dv < -3 else 0)
+                    t.control(dt, game.arena, 1 if abs(dv) < 55 else 0,
+                              tv, tuple(game.tanks))
+                elif dd < 240:          # пятимся — не лезем на ствол
+                    tv = 1 if dv > 3 else (-1 if dv < -3 else 0)
+                    t.control(dt, game.arena, -1, tv, tuple(game.tanks))
+                else:                   # дистанция боя — стоим
+                    tv = 1 if dv > 4 else (-1 if dv < -4 else 0)
+                    t.control(dt, game.arena, 0, tv, tuple(game.tanks))
+                self._try_fire(dt, game, tg, a2)
+                return
 
         forward, turn = 0, 0
         desired = None

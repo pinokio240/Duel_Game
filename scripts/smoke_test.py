@@ -3488,9 +3488,12 @@ def test_v34_commander():
     check("E ОТКРЫВАЕТ окно приказов", g3.orders_open)
     g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_t))
     check("T в окне — цель «ВСЯ КОМАНДА»", g3.orders_all)
-    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_3))
-    check("клавиша 3 — В АТАКУ всей команде (окно не закрылось)",
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_4))
+    check("клавиша 4 — В АТАКУ всей команде (окно не закрылось)",
           g3.orders_open and all(b.order == "attack" for b in allies))
+    g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_8))
+    check("клавиша 8 — СВОБОДНО (снять приказы)",
+          all(b.order is None for b in allies))
     g3.draw()
     check("окно приказов рисуется без падений", True)
     g3.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_e))
@@ -3867,6 +3870,253 @@ def test_v35_general():
     check("рисование боя со звёздным залпом и приказами не падает", True)
 
 
+def test_v36_shtab():
+    """v3.6 «ШТАБ»: ВОСЕМЬ приказов (+ПРИКРЫВАЙ, +ОТСТУПАЙ, +ПО МОЕЙ
+    ЦЕЛИ) с настоящим ИИ, в окне приказов ВЫБОР БОТА — плитки (клик) и
+    Tab, консоль переносит длинные строки и листается колесом/PgUp."""
+    from game import Game
+    from effects import get_font
+    from settings import SCREEN_W
+    from arena import Arena, EMPTY_VARIANT
+    from bot import BotAI
+
+    # ----- каталог приказов: ВОСЕМЬ -----
+    check("восемь приказов в окне (было пять)",
+          len(Game.ORDER_LIST) == 8
+          and set(Game.ORDER_LIST) == {"hold", "follow", "cover", "attack",
+                                       "point", "retreat", "target", "free"})
+    check("у всех приказов имя, описание и цвет",
+          all(len(v) == 3 and v[0] and v[1] for v in Game.ORDER_INFO.values()))
+    check("клавиши: 3=ПРИКРЫВАЙ, 6=ОТСТУПАЙ, 7=ПО МОЕЙ ЦЕЛИ",
+          Game.ORDER_KEYMAP[pygame.K_3] == "cover"
+          and Game.ORDER_KEYMAP[pygame.K_6] == "retreat"
+          and Game.ORDER_KEYMAP[pygame.K_7] == "target")
+    check("Tab в списке клавиш окна приказов",
+          pygame.K_TAB in Game.ORDERS_UI_KEYS)
+
+    # ----- ВЫБОР БОТА в окне -----
+    g = Game()
+    g.mode = 9
+    g.start_match()
+    g.arena = Arena(EMPTY_VARIANT, team=True)
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    allies = [b for b in g.bots if g.tank_team.get(b) == 0]
+    g.player.x, g.player.y = 1200, 1600
+    allies[0].x, allies[0].y = 1600, 1600     # бот у прицела
+    allies[1].x, allies[1].y = 600, 600
+    g.cam = [0.0, 0.0]
+    g._mouse = (1600, 1600)
+    g._command_open()
+    check("окно открылось: по умолчанию выбран бот у прицела",
+          g.orders_open and g.orders_pick == {allies[0]})
+    g._handle_click("ord_bot", allies[1])
+    check("клик по ПЛИТКЕ выбирает конкретного бота",
+          g.orders_pick == {allies[1]} and not g.orders_all)
+    g._command_order("attack")
+    check("приказ уходит ВЫБРАННОМУ боту, а не боту у прицела",
+          allies[1].order == "attack" and allies[0].order is None)
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_TAB))
+    check("Tab — следующий бот в выборе",
+          g.orders_pick == {allies[2 % len(allies)]})
+    pygame.key.set_mods(pygame.KMOD_SHIFT)
+    g._handle_click("ord_bot", allies[0])
+    pygame.key.set_mods(0)
+    check("Shift+клик ДОБАВЛЯЕТ второго бота в выбор",
+          g.orders_pick == {allies[2], allies[0]})
+    g._command_order("hold")
+    check("приказ уходит ВСЕМ выбранным плитками",
+          allies[0].order == "hold" and allies[2].order == "hold")
+    g._handle_click("ord_all", None)
+    check("плитка «ВСЯ КОМАНДА» — всем и сразу",
+          g.orders_all and not g.orders_pick)
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_8))
+    check("8 — СВОБОДНО снимает приказы всей команды",
+          all(b.order is None for b in allies))
+    g._handle_click("ord_bot", allies[0])
+    check("клик по плитке после «ВСЕ» — снова выбор одного бота",
+          g.orders_pick == {allies[0]} and not g.orders_all)
+    g._handle_click("ord_bot", allies[0])
+    check("повторный клик по плитке снимает выбор",
+          g.orders_pick == set())
+    g.draw()
+    tiles = [z for z in g._click_zones if z[1] == "ord_bot"]
+    check("в окне плитка на КАЖДОГО союзника", len(tiles) == len(allies))
+    check("окно приказов v3.6 (плитки + 8 строк) рисуется", True)
+
+    # ----- ПРИКРЫВАЙ: бот жмётся к командиру -----
+    gc = Game()
+    gc.mode = 9
+    gc.start_match()
+    gc.arena = Arena(EMPTY_VARIANT, team=True)
+    gc.state = "fight"
+    gc._fake_keys = FakeKeys(())
+    gc.ais = []
+    a = next(b for b in gc.bots if gc.tank_team.get(b) == 0)
+    foe = next(b for b in gc.bots if gc.tank_team.get(b) != 0)
+    gc.player.x, gc.player.y = 1500, 1800
+    a.x, a.y = 1500, 500
+    foe.x, foe.y = 2600, 1000
+    foe.frozen_t = 99.0
+    foe.hp = foe.max_hp = 10 ** 9
+    a.order = "cover"
+    a.order_t = 0.0
+    ai = BotAI(a, 2)
+    ai.target = foe
+    d0 = math.hypot(a.x - gc.player.x, a.y - gc.player.y)
+    for _ in range(300):
+        ai.update(1 / 60.0, gc)
+    d1 = math.hypot(a.x - gc.player.x, a.y - gc.player.y)
+    check("бот с приказом ПРИКРЫВАЙ подтянулся к командиру",
+          d1 < d0 - 300, "d0=%.0f d1=%.0f" % (d0, d1))
+    check("HUD: ПРИКАЗ: ПРИКРЫВАЕТ",
+          "ПРИКАЗ: ПРИКРЫВАЕТ" in gc._status_tags(a))
+    a.order = "cover"                         # уже рядом — не разлетается
+    a.x, a.y = 1500, 1650
+    for _ in range(120):
+        ai.update(1 / 60.0, gc)
+    dn = math.hypot(a.x - gc.player.x, a.y - gc.player.y)
+    check("ПРИКРЫВАЙ: уже рядом с командиром — держится вблизи",
+          dn < 340, "dn=%.0f" % dn)
+
+    # ----- ОТСТУПАЙ: к своей базе -----
+    gr = Game()
+    gr.mode = 9
+    gr.start_match()
+    check("своя база (base0) посчитана в командном режиме",
+          gr.base0 is not None)
+    gr.arena = Arena(EMPTY_VARIANT, team=True)
+    gr.state = "fight"
+    gr._fake_keys = FakeKeys(())
+    gr.ais = []
+    a2 = next(b for b in gr.bots if gr.tank_team.get(b) == 0)
+    foe2 = next(b for b in gr.bots if gr.tank_team.get(b) != 0)
+    a2.x, a2.y = 1500, 900
+    foe2.x, foe2.y = 2600, 600
+    foe2.frozen_t = 99.0
+    foe2.hp = foe2.max_hp = 10 ** 9
+    bx, by = gr._retreat_point()
+    a2.order = "retreat"
+    a2.order_xy = (bx, by)
+    a2.order_t = 0.0
+    ai2 = BotAI(a2, 2)
+    ai2.target = foe2
+    b0 = math.hypot(a2.x - bx, a2.y - by)
+    for _ in range(300):
+        ai2.update(1 / 60.0, gr)
+    b1 = math.hypot(a2.x - bx, a2.y - by)
+    check("бот с приказом ОТСТУПАЙ ушёл к своей базе",
+          b1 < b0 - 200, "b0=%.0f b1=%.0f" % (b0, b1))
+    check("HUD: ПРИКАЗ: ОТСТУПАЕТ",
+          "ПРИКАЗ: ОТСТУПАЕТ" in gr._status_tags(a2))
+    gs = Game()                    # ШТУРМ: база зависит от стороны
+    gs.mode = 22
+    gs.assault_side = "def"
+    gs.start_match()
+    rp = gs._retreat_point()
+    if gs.assault_def_team == 0:
+        check("ШТУРМ-оборона: ОТСТУПАЙ ведёт в здание (к точке)",
+              math.hypot(rp[0] - gs.cap_xy[0], rp[1] - gs.cap_xy[1]) < 1)
+    else:
+        check("ШТУРМ-атака: ОТСТУПАЙ ведёт к своему старту",
+              gs.base0 is not None
+              and math.hypot(rp[0] - gs.base0[0], rp[1] - gs.base0[1]) < 1)
+
+    # ----- ПО МОЕЙ ЦЕЛИ: фокус на чужаке у прицела -----
+    gt = Game()
+    gt.mode = 9
+    gt.start_match()
+    gt.arena = Arena(EMPTY_VARIANT, team=True)
+    gt.state = "fight"
+    gt._fake_keys = FakeKeys(())
+    gt.ais = []
+    foes = [b for b in gt.bots if gt.tank_team.get(b) != 0]
+    foeA, foeB = foes[0], foes[1]
+    gt.player.x, gt.player.y = 1500, 1800
+    foeA.x, foeA.y = 2200, 1600
+    foeB.x, foeB.y = 900, 700
+    foeB.frozen_t = 99.0
+    gt.cam = [0.0, 0.0]
+    gt._mouse = (2200, 1600)                   # прицел на foeA
+    check("ПО МОЕЙ ЦЕЛИ: чужак у прицела выбран",
+          gt._aim_enemy() is foeA)
+    a3 = next(b for b in gt.bots if gt.tank_team.get(b) == 0)
+    a3.x, a3.y = 2000, 1500    # ближе всех к прицелу — приказ уйдёт ему
+    gt._command_order("target")
+    check("приказ ПО МОЕЙ ЦЕЛИ записал боту цель",
+          a3.order == "target" and a3.order_tgt is foeA)
+    foeA.frozen_t = 99.0
+    foeA.hp = foeA.max_hp = 10 ** 9
+    ai3 = BotAI(a3, 2)
+    ai3.target = foeA
+    for _ in range(240):
+        ai3.update(1 / 60.0, gt)
+    d1 = math.hypot(a3.x - foeA.x, a3.y - foeA.y)
+    check("бот ПО МОЕЙ ЦЕЛИ держит дистанцию боя 240–430",
+          240 <= d1 <= 430, "d1=%.0f" % d1)
+    check("HUD: ПРИКАЗ: НА ЦЕЛИ",
+          "ПРИКАЗ: НА ЦЕЛИ" in gt._status_tags(a3))
+    foeA._die(gt.effects, gt.sounds)
+    gt._fight_step(0.05)
+    check("цель умерла — приказ ПО МОЕЙ ЦЕЛИ снялся сам",
+          a3.order is None)
+
+    # ----- живой бой со всеми новыми приказами -----
+    gl = Game()
+    gl.mode = 16               # 6на6
+    gl.start_match()
+    gl.state = "fight"
+    gl._fake_keys = FakeKeys(())
+    al = [b for b in gl.bots if gl.tank_team.get(b) == 0]
+    cycle = ("cover", "retreat", "target", "point", "hold")
+    for i, b in enumerate(al):
+        b.order = cycle[i % len(cycle)]
+        if b.order == "target":
+            b.order_tgt = next((f for f in gl.bots
+                                if gl.tank_team.get(f) != 0), None)
+        b.order_t = 0.0
+    gl._command_open()
+    for _ in range(240):
+        gl._fight_step(1 / 60.0)
+    gl.draw()
+    check("6на6 со всеми новыми приказами и открытым окном: 4с без падений",
+          gl.state in ("fight", "round_end"))
+
+    # ----- КОНСОЛЬ: перенос строк и прокрутка -----
+    g7 = Game()
+    g7.mode = 2
+    g7.start_match()
+    g7.state = "fight"
+    g7._fake_keys = FakeKeys(())
+    f = get_font(15, bold=False)
+    g7._con_say("ДЛИННАЯ: " + " ".join(["слово"] * 80))
+    check("длинные строки консоли ПЕРЕНОСЯТСЯ по ширине панели",
+          all(f.size(ln)[0] <= SCREEN_W - 24 for ln in g7.con_lines))
+    n_before = len(g7.con_lines)
+    g7._con_execute("помощь")
+    check("«помощь» больше НЕ уходит за рамки — всё по ширине",
+          all(f.size(ln)[0] <= SCREEN_W - 24 for ln in g7.con_lines)
+          and len(g7.con_lines) > n_before)
+    check("«помощь» длиннее видимого окна — есть что листать",
+          len(g7.con_lines) > 10)
+    g7._con_execute("список")
+    check("«список» тоже переносится по ширине",
+          all(f.size(ln)[0] <= SCREEN_W - 24 for ln in g7.con_lines))
+    g7.con_scroll = 0
+    g7._con_scroll(-5)
+    check("колесо/PgUp листает историю вверх", g7.con_scroll == 5)
+    g7._con_scroll(9)
+    check("листать вниз ниже нуля нельзя", g7.con_scroll == 0)
+    g7._con_scroll(-3)
+    g7._con_say("свежая строка")
+    check("новый вывод возвращает прокрутку к низу", g7.con_scroll == 0)
+    g7.draw()
+    check("консоль рисуется с прокруткой без падений", True)
+    g7._con_key(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_PAGEUP))
+    check("PgUp в консоли тоже листает", g7.con_scroll == 3)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -3901,6 +4151,7 @@ if __name__ == "__main__":
     test_v33_fortress()
     test_v34_commander()
     test_v35_general()
+    test_v36_shtab()
     test_bigmap()
     test_points()
     test_score_table()
