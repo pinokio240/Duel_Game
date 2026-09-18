@@ -39,7 +39,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
                       KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_WAVE_CD,
-                      KAMI_SPREAD_DEG, KAMI_DAMAGE_MULT,
+                      KAMI_DAMAGE_MULT,
                       SHELL_STAR_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
@@ -2132,8 +2132,8 @@ class Game:
     def _fire_kamikaze(self, t):
         """v3.9: КАМИКАДЗЕ (B, ТОЛЬКО билд «Камикадзе», БОТАМ не достаётся):
         одноразовый шквал смертника — KAMI_WAVES волны по KAMI_WAVE_SHELLS
-        снарядов ВЕЕРОМ по курсу (сектор KAMI_SPREAD_DEG), между волнами
-        KAMI_WAVE_CD сек — в них можно рулить и доворачивать на цель.
+        снарядов ПОЛНЫМ КРУГОМ вокруг танка (v3.9.1, равномерно на 360° —
+        «вокруг своей оси, а не конусом»), между волнами KAMI_WAVE_CD сек.
         Урон снаряда x1.30, СТИХИЯ из ангара заряжает волны как обычный
         выстрел (v3.8). ПОСЛЕ ТРЕТЬЕЙ ВОЛНЫ танк гибнет — это суть билда.
         Волны летят даже если вас успели убить? НЕТ: шквал живёт, пока
@@ -2150,10 +2150,12 @@ class Game:
         return True
 
     def _kami_wave(self, t):
-        """v3.9: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов веером
-        по текущему курсу танка. Урон/скорость — как у обычного выстрела
-        с бонусом смертника x1.30 (стихия, моды проклятий/облегчений);
-        эффект — случайная из выбранных стихий (микс из консоли)."""
+        """v3.9.1: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов ПОЛНЫМ
+        КРУГОМ вокруг танка — равномерно через 360/N градусов, старт от
+        текущего курса (курс задаёт лишь точку отсчёта круга). Урон/
+        скорость — как у обычного выстрела с бонусом смертника x1.30
+        (стихия, моды проклятий/облегчений); эффект — случайная из
+        выбранных стихий (микс из консоли)."""
         dmg = (BULLET_DAMAGE * KAMI_DAMAGE_MULT
                * t.elem["damage_mult"] * t.mods["damage_mult"])
         spd = (t.elem["speed_mult"] * t.mods["bullet_speed_mult"])
@@ -2161,8 +2163,7 @@ class Game:
         dmg = round(dmg)
         off = t.radius + 14.0
         for i in range(KAMI_WAVE_SHELLS):
-            a = t.angle - KAMI_SPREAD_DEG / 2.0 + (
-                KAMI_SPREAD_DEG * i / (KAMI_WAVE_SHELLS - 1))
+            a = t.angle + 360.0 * i / KAMI_WAVE_SHELLS
             rad = math.radians(a)
             self.bullets.append(Bullet(
                 t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
@@ -2541,7 +2542,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.9 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.9.1 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 

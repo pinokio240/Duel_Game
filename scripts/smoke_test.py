@@ -4503,8 +4503,10 @@ def test_v38_element_nova():
 
 
 def test_v39_kamikaze_control():
-    """v3.9 «ВТОРАЯ ЖИЗНЬ»: КАМИКАДЗЕ (B, билд) — 3 волны по 25 снарядов
-    веером по курсу, после третьей волны танк ГИБНЕТ (просьба игрока:
+    """v3.9 «ВТОРАЯ ЖИЗНЬ» + фикс v3.9.1: КАМИКАДЗЕ (B, билд) — 3 волны
+    по 25 снарядов ПОЛНЫМ КРУГОМ вокруг танка (репорт: «вокруг своей оси
+    (ну по кругу) а не конусом» — раньше был веер в секторе 100°), после
+    третьей волны танк ГИБНЕТ (просьба игрока:
     «добавьте камикадзе... выстреливает 3 волны по 25 снарядов но после
     этой атаки ты умираешь»); И КОНТРОЛЬ НАД БОТОМ после своей смерти
     (Enter в спектаторе) — тело становится вашим, ИИ выключается, в
@@ -4512,7 +4514,7 @@ def test_v39_kamikaze_control():
     import math
     from game import Game
     from settings import (BULLET_DAMAGE, KAMI_WAVES, KAMI_WAVE_SHELLS,
-                          KAMI_WAVE_CD, KAMI_SPREAD_DEG, KAMI_DAMAGE_MULT,
+                          KAMI_WAVE_CD, KAMI_DAMAGE_MULT,
                           ELEMENTS, BUILD_KEYS)
     from arena import Arena, EMPTY_VARIANT
     from tank import Tank
@@ -4554,10 +4556,17 @@ def test_v39_kamikaze_control():
     check("первая волна: %d снарядов, осталось %d волны"
           % (KAMI_WAVE_SHELLS, KAMI_WAVES - 1),
           len(g.bullets) == KAMI_WAVE_SHELLS and p.kami_waves == 2)
-    check("веер в секторе %g° по курсу" % KAMI_SPREAD_DEG,
-          all(abs(((math.degrees(math.atan2(b.vy, b.vx))
-                    - p.angle + 180) % 360) - 180) <= KAMI_SPREAD_DEG / 2 + 0.1
-              for b in g.bullets))
+    angs = sorted((math.degrees(math.atan2(b.vy, b.vx)) - p.angle) % 360
+                  for b in g.bullets)
+    gaps = [(angs[(i + 1) % len(angs)] - angs[i]) % 360
+            for i in range(len(angs))]
+    step = 360.0 / KAMI_WAVE_SHELLS
+    check("волна — ПОЛНЫЙ КРУГ 360°: %d снарядов равномерно через %g°"
+          % (KAMI_WAVE_SHELLS, step),
+          len(angs) == KAMI_WAVE_SHELLS
+          and max(gaps) - min(gaps) < 1e-4
+          and abs(gaps[0] - step) < 1e-4
+          and (angs[-1] - angs[0]) > 300)
     expected = round(BULLET_DAMAGE * KAMI_DAMAGE_MULT
                      * ELEMENTS["none"]["damage_mult"])
     check("урон волны x1.30 x калибр нейтральной (%d)" % expected,
