@@ -2028,10 +2028,14 @@ class Game:
         БРОНЕБОЙНЫЙ пробивает броню без рикошетов и летит злее,
         ЗАЖИГАТЕЛЬНЫЙ оставляет 45 огненных луж, ЗВЁЗДНЫЙ рвётся на 5
         осколков ЗВЕЗДОЙ — итого 45 снарядов = 225 осколков. Бонус
-        кругового ада x1.10 поверх типа снаряда. Заряд всего один и
-        тратится целиком: второй раз до следующего раунда не выстрелит.
-        Снаряды рождаются за габаритом танка — владельца не задевают,
-        союзников не бьют (командные проверки снарядов общие)."""
+        кругового ада x1.10 поверх типа снаряда. v3.8: залп наследует и
+        СТИХИЮ из ангара — урон/скорость по ОСНОВНОЙ стихии, эффект
+        каждому снаряду — случайная из выбранных (микс из консоли);
+        зажигательный снаряд всегда огненный, нейтральная не двойнит
+        бонус. Заряд всего один и тратится целиком: второй раз до
+        следующего раунда не выстрелит. Снаряды рождаются за габаритом
+        танка — владельца не задевают, союзников не бьют (командные
+        проверки снарядов общие)."""
         if t is None or not t.alive or t.nova_charges <= 0:
             return False
         t.nova_charges -= 1
@@ -2047,15 +2051,33 @@ class Game:
             dmg *= 0.85
         elif shell == "star":
             dmg *= SHELL_STAR_DAMAGE_MULT
+        # v3.8: СТИХИЯ ИЗ АНГАРА заряжает залп — как обычный выстрел:
+        # урон/скорость по ОСНОВНОЙ стихии (element_key), эффект каждому
+        # снаряду — случайная из выбранных (микс стихий из консоли).
+        # Зажигательный снаряд ВСЕГДА огненный (это его суть), цена
+        # основной стихии честно остаётся в уроне. Нейтральная — не
+        # стихия, а калибр ствола: двойного бонуса с x1.10 билда нет.
+        base_key = getattr(t, "element_key", "none")
+        if base_key != "none":
+            base_el = ELEMENTS.get(base_key, ELEMENTS["none"])
+            dmg *= base_el["damage_mult"]
+            spd *= base_el["speed_mult"]
+        ek = [k for k in getattr(t, "element_keys", []) if k in ELEMENTS]
         dmg = round(dmg)
         off = t.radius + 6.0
         for i in range(NOVA_SHELLS):
             ang = 360.0 * i / NOVA_SHELLS
             rad = math.radians(ang)
+            if shell == "fire":
+                elem = "fire"                # зажигательный — всегда огонь
+            elif ek:
+                elem = random.choice(ek)     # микс: каждому своя
+            else:
+                elem = None
             self.bullets.append(Bullet(
                 t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
                 ang, t, damage=dmg, speed_mult=spd,
-                element=("fire" if shell == "fire" else None),
+                element=elem,
                 bounces=(0 if shell == "ap" else None),
                 shell=shell, he=(shell == "he"),
                 star=(shell == "star")))
@@ -2320,7 +2342,7 @@ class Game:
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
             "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
             "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
-            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД выбранным снарядом (звёздный = 225 осколков)",
+            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД выбранным снарядом И СТИХИЕЙ (звёздный = 225 осколков)",
             "Вражеский ★ КОМАНДИР приказывает своим. Консоль (Ё): «помощь» с переносом строк и прокруткой.", 
         ]
         y = 290
@@ -2418,7 +2440,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.7 · БАСТИОН", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.8 · СТИХИЯ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -3716,11 +3738,18 @@ class Game:
         if t.he_shots > 0:
             sfx.append("РАЗРЫВНЫЕ x%d" % t.he_shots)
         if t.nova_charges > 0:                 # v3.1: «Круговой ад»
-            # v3.5: в залпе летит ВЫБРАННЫЙ тип снаряда — показываем какой
-            sfx.append("КРУГОВОЙ АД x%d (V)%s" % (
-                t.nova_charges,
-                "" if t.shell_type == "std"
-                else " · " + SHELL_TYPES[t.shell_type]["name"]))
+            # v3.5: тип снаряда в залпе; v3.8: и СТИХИЯ (зажигательный — ОГОНЬ:
+            # он всегда огненный, стихии игрока в его залпе не летят)
+            sh_part = "" if t.shell_type == "std" \
+                else " · " + SHELL_TYPES[t.shell_type]["name"]
+            if t.shell_type == "fire":
+                el_part = " · " + ELEMENTS["fire"]["name"]
+            else:
+                names = [ELEMENTS[k]["name"] for k
+                         in getattr(t, "element_keys", []) if k in ELEMENTS]
+                el_part = (" · " + "+".join(names)) if names else ""
+            sfx.append("КРУГОВОЙ АД x%d (V)%s%s" % (
+                t.nova_charges, sh_part, el_part))
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером

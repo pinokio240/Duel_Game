@@ -4327,7 +4327,159 @@ def test_v37_bastion():
     gm = Game()
     gm.state = "menu"
     gm.draw()
-    check("меню v3.7 · БАСТИОН рисуется", True)
+    check("меню v3.8 · СТИХИЯ рисуется", True)
+
+
+def test_v38_element_nova():
+    """v3.8 «СТИХИЯ»: КРУГОВОЙ АД наследует СТИХИЮ из ангара — по репорту
+    игрока «почему у кругового ада не берется стихия? тот же вампиризм
+    например». Урон/скорость по ОСНОВНОЙ стихии, эффект каждому снаряду —
+    случайная из выбранных (микс), зажигательный снаряд всегда огненный
+    (цена основной стихии в уроне остаётся), нейтральная бонус не двойнит.
+    Вампиризм залпа лечит владельца при попадании. HUD-тег показывает стихию."""
+    import math
+    from game import Game
+    from settings import (NOVA_SHELLS, NOVA_DAMAGE_MULT, BULLET_DAMAGE,
+                          BULLET_SPEED, ELEMENTS, VAMP_HEAL_RATIO)
+    from arena import Arena, EMPTY_VARIANT
+    from tank import Tank
+    from bullet import Bullet
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    def fresh():
+        g = Game()
+        g.mode = 2
+        g.start_match()
+        g.arena = Arena(EMPTY_VARIANT)
+        g.state = "fight"
+        g._fake_keys = FakeKeys(())
+        g.ais = []
+        g.bullets = []
+        P = g.player
+        P.nova_charges = 1
+        P.x, P.y = 900, 600
+        return g, P
+
+    # ----- ВАМПИРИЗМ: стихия из ангара летит в залпе ----- 
+    g, P = fresh()
+    P.element_key = "vamp"
+    P.element_keys = ["vamp"]
+    P.elem = ELEMENTS["vamp"]
+    check("НОВА с вампиризмом стреляет", g._fire_nova(P))
+    vm = round(BULLET_DAMAGE * NOVA_DAMAGE_MULT * 0.65)
+    check("все %d снарядов залпа — вампирные" % NOVA_SHELLS,
+          all(b.element == "vamp" for b in g.bullets))
+    check("урон залпа x1.10 x0.65 по стихии (цена вампиризма честная)",
+          all(b.damage == vm for b in g.bullets),
+          "(dmg %s vs %s)" % (g.bullets[0].damage, vm))
+    check("скорость вампирного залпа — обычная x1.0",
+          all(abs(math.hypot(b.vx, b.vy) - BULLET_SPEED) < 1.0
+              for b in g.bullets))
+
+    # ----- вампиризм ЛЕЧИТ при попадании залпа (реальный снаряд из новы) -----
+    g, P = fresh()
+    P.element_key = "vamp"
+    P.element_keys = ["vamp"]
+    P.elem = ELEMENTS["vamp"]
+    P.hp = 40
+    foe = Tank(300, 540, 0, "medium", "medium", (255, 46, 122))
+    g.tanks.append(foe)
+    g._fire_nova(P)
+    # прямое попадание первого залпового снаряда во врага
+    b0 = g.bullets[0]
+    b0.x, b0.y = foe.x, foe.y
+    b0.age = 1.0
+    b0.update(1 / 60.0, g.arena.walls_only(), tuple(g.tanks), fx, snd)
+    heal = int(round(b0.damage * VAMP_HEAL_RATIO))
+    check("вампирный залп ЛЕЧИТ владельца при попадании (+%d HP)" % heal,
+          P.hp == 40 + heal, "(hp %d)" % P.hp)
+
+    # ----- МИКС стихий (консоль): каждому снаряду случайная из выбранных -----
+    g, P = fresh()
+    P.element_key = "fire"                 # основная — первая выбранная
+    P.element_keys = ["fire", "ice"]
+    P.elem = ELEMENTS["fire"]
+    g._fire_nova(P)
+    kinds = {b.element for b in g.bullets}
+    check("микс: эффекты только из выбранных (огонь+лёд)",
+          kinds == {"fire", "ice"}, "(получилось %s)" % kinds)
+    fm = round(BULLET_DAMAGE * NOVA_DAMAGE_MULT * 0.75)
+    check("урон микса по ОСНОВНОЙ стихии (огонь x0.75)",
+          all(b.damage == fm for b in g.bullets))
+
+    # ----- ВОЗДУХ: залп летит быстрее (speed_mult стихии) -----
+    g, P = fresh()
+    P.element_key = "air"
+    P.element_keys = ["air"]
+    P.elem = ELEMENTS["air"]
+    g._fire_nova(P)
+    check("воздушный залп летит x1.2 быстрее",
+          all(abs(math.hypot(b.vx, b.vy) - BULLET_SPEED * 1.2) < 1.0
+              for b in g.bullets))
+
+    # ----- ЗАЖИГАТЕЛЬНЫЙ СНАРЯД + вампиризм: всегда огонь, цена стихии в уроне -----
+    g, P = fresh()
+    P.element_key = "vamp"
+    P.element_keys = ["vamp"]
+    P.elem = ELEMENTS["vamp"]
+    P.shell_type = "fire"
+    g._fire_nova(P)
+    ffm = round(BULLET_DAMAGE * NOVA_DAMAGE_MULT * 0.85 * 0.65)
+    check("зажигательный залп ВСЕГДА огненный (его суть), даже с вампиром",
+          all(b.element == "fire" and b.shell == "fire" for b in g.bullets))
+    check("цена основной стихии (вампира) осталась в уроне x0.85x0.65",
+          all(b.damage == ffm for b in g.bullets),
+          "(dmg %s vs %s)" % (g.bullets[0].damage, ffm))
+
+    # ----- НЕЙТРАЛЬНАЯ — не стихия: бонус билда не двойнится -----
+    g, P = fresh()
+    P.element_keys = []                     # стихий нет
+    P.element_key = "none"
+    P.elem = ELEMENTS["none"]
+    g._fire_nova(P)
+    check("нейтральная: урон ровно x1.10 (не x1.21)",
+          all(b.damage == round(BULLET_DAMAGE * NOVA_DAMAGE_MULT)
+              and b.element is None for b in g.bullets))
+
+    # ----- HUD-тег показывает стихию залпа -----
+    P.nova_charges = 1
+    P.element_key = "vamp"
+    P.element_keys = ["vamp"]
+    P.elem = ELEMENTS["vamp"]
+    P.shell_type = "std"
+    tags = g._status_tags(P)
+    check("HUD: КРУГОВОЙ АД · Вампиризм",
+          any("КРУГОВОЙ АД" in s and "Вампиризм" in s for s in tags))
+    P.nova_charges = 1
+    P.element_keys = ["fire", "ice"]
+    P.element_key = "fire"
+    P.elem = ELEMENTS["fire"]
+    P.shell_type = "star"
+    tags = g._status_tags(P)
+    check("HUD: КРУГОВОЙ АД · ЗВЁЗДНЫЙ · микс стихий через +",
+          any("КРУГОВОЙ АД" in s and "ЗВЁЗДНЫЙ" in s
+              and "Огонь+Лёд" in s for s in tags))
+    P.nova_charges = 1
+    P.shell_type = "fire"                  # зажигательный: в HUD честный ОГОНЬ
+    tags = g._status_tags(P)
+    check("HUD: зажигательный залп показывает Огонь (не вампиризм)",
+          any("КРУГОВОЙ АД" in s and "· Огонь" in s
+              and "Вампиризм" not in s for s in tags))
+    # меню рисуется
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("меню v3.8 рисуется с подсказкой «И СТИХИЕЙ»", True)
 
 
 if __name__ == "__main__":
@@ -4366,6 +4518,7 @@ if __name__ == "__main__":
     test_v35_general()
     test_v36_shtab()
     test_v37_bastion()
+    test_v38_element_nova()
     test_bigmap()
     test_points()
     test_score_table()
