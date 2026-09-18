@@ -3945,6 +3945,7 @@ def test_v36_shtab():
     check("в окне плитка на КАЖДОГО союзника", len(tiles) == len(allies))
     check("окно приказов v3.6 (плитки + 8 строк) рисуется", True)
 
+
     # ----- ПРИКРЫВАЙ: бот жмётся к командиру -----
     gc = Game()
     gc.mode = 9
@@ -4117,6 +4118,218 @@ def test_v36_shtab():
     check("PgUp в консоли тоже листает", g7.con_scroll == 3)
 
 
+
+
+def test_v37_bastion():
+    """v3.7 «БАСТИОН»: ЗДАНИЯ КРУПНЕЕ (по репорту игрока «увеличьте
+    здания а то они микробно малы»), УМНАЯ АТАКА 1на1 (ворота вместо
+    долбления стен, атакующий не ставит стены и не замирает) и СТОРОЖ
+    «стоячего» бота («иногда баг что он просто стоит на месте пока к
+    нему не подойдешь»)."""
+    import math
+    import pygame
+    from game import Game, Barrier
+    from arena import (ASSAULT_MAPS, Arena, BARRIER_LEN as BL2)
+    from bot import BotAI
+    from settings import ASSAULT_POINT_R
+
+    # ----- КРУПНЫЕ ЗДАНИЯ -----
+    need = {"ДОМ": (1800, 1000), "СКЛАД": (1300, 1500), "ФОРТ": (1600, 950)}
+    ok = True
+    for m in ASSAULT_MAPS:
+        x0, y0, x1, y1 = m["rect"]
+        w, h = x1 - x0, y1 - y0
+        nw, nh = need[m["name"]]
+        if not (w >= nw and h >= nh and m.get("doors_xy")
+                and len(m["doors_xy"]) >= 2):
+            ok = False
+    check("здания КРУПНЕЕ: ДОМ ≥1800×1000, СКЛАД ≥1300×1700, "
+          "ФОРТ ≥1600×950, у всех есть ворота", ok)
+    ok = True
+    for m in ASSAULT_MAPS:
+        x0, y0, x1, y1 = m["rect"]
+        for dx, dy in m["doors_xy"]:
+            # ворота СНАРУЖИ контура, но прижаты к стене (60 px подход)
+            gap = min(abs(dx - x0), abs(dx - x1),
+                      abs(dy - y0), abs(dy - y1))
+            inside = x0 < dx < x1 and y0 < dy < y1
+            if inside or gap > 70:
+                ok = False
+    check("все точки ворот снаружи здания в 60 px от стены", ok)
+    ok = True
+    for m in ASSAULT_MAPS:
+        a = Arena(m["variant"], shuffle=False, team=True)
+        x0, y0, x1, y1 = m["rect"]
+        # как в игре: фон-раскладка сносится вокруг здания с запасом 90
+        a.clear_box(pygame.Rect(int(x0 - 90), int(y0 - 90),
+                                int(x1 - x0 + 180), int(y1 - y0 + 180)))
+        for dx, dy in m["doors_xy"]:
+            if a.circle_collides(dx, dy, 26):
+                ok = False          # подход к воротам завален
+    check("подходы к воротам не завалены рамой и фоном (после clear_box)", ok)
+    ok = True
+    for m in ASSAULT_MAPS:
+        x0, y0, x1, y1 = m["rect"]
+        bx, by = m["point"]
+        if not (x0 < bx < x1 and y0 < by < y1):
+            ok = False
+        for x, y in m["def_spawns"]:
+            if not (x0 + 30 < x < x1 - 30 and y0 + 30 < y < y1 - 30):
+                ok = False          # защитник снаружи здания
+    check("точка и кольцо защитников внутри КРУПНОГО здания", ok)
+
+    # ----- УМНЫЙ ПУТЬ АТАКУЮЩЕГО -----
+    g = Game()
+    g.mode = 21
+    g.start_match()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    capx, capy = g.cap_xy
+    check("штурмовая арена хранит rect и ворота",
+          g._assault_rect is not None and g._assault_doors
+          and g._assault_rect[0] < capx < g._assault_rect[2]
+          and g._assault_rect[1] < capy < g._assault_rect[3])
+    atk = g.foes[0]
+    ai = BotAI(atk, 2)
+    ai.target = g.player
+    # снаружи здания — цель давления: БЛИЖАЙШИЕ ВОРОТА, не точка
+    atk.x, atk.y = g._assault_rect[0] - 500, g._assault_rect[1] - 400
+    gx, gy = ai._atk_goal(g)
+    doors = [(round(dx), round(dy)) for dx, dy in g._assault_doors]
+    check("атакующий СНАРУЖИ идёт к воротам (не сквозь стену)",
+          (round(gx), round(gy)) in doors)
+    # внутри здания — прямо на точку захвата
+    atk.x, atk.y = capx, capy - 100
+    check("атакующий ВНУТРИ давит на точку захвата",
+          ai._atk_goal(g) == (capx, capy))
+    # без rect (свои карты редактора) — старое поведение: на точку
+    g._assault_rect = None
+    atk.x, atk.y = 300, 300
+    check("свои карты: путь на точку как раньше", ai._atk_goal(g) == (capx, capy))
+
+    # ----- СТОРОЖ «СТОЯЧЕГО» БОТА -----
+    g._pick_assault_map = lambda: ASSAULT_MAPS[2]      # ФОРТ — известные габариты
+    g._setup_assault_arena()
+    capx, capy = g.cap_xy
+    atk = g.foes[0]
+    ai = BotAI(atk, 2)
+    ai.target = g.player
+    ai.last_x, ai.last_y = atk.x, atk.y
+    ai.stand_t = 2.5
+    ai.update(1 / 60.0, g)
+    check("стоил 2.5 с без приказа — СТОРОЖ встряхивает (unstick)",
+          ai.unstick_t > 0.4 and ai.stand_t == 0.0)
+    check("атакующему в панике разрешён пролом даже СВОИХ стен",
+          ai.panic_t > 5.0)
+    # у НЕ атакующего паники нет
+    gf = Game()
+    gf.mode = 3
+    gf.start_match()
+    gf.state = "fight"
+    gf._fake_keys = FakeKeys(())
+    abot = gf.bots[0]
+    ai2 = BotAI(abot, 2)
+    ai2.target = gf.player if gf.player.alive else abot
+    ai2.last_x, ai2.last_y = abot.x, abot.y
+    ai2.stand_t = 2.5
+    ai2.update(1 / 60.0, gf)
+    check("вне ШТУРМА встряска есть, паники-пролома нет",
+          ai2.unstick_t > 0.4 and ai2.panic_t == 0.0)
+
+    # ----- АТАКУЮЩИЙ НЕ СТАВИТ СТЕНЫ (не закупоривает сам себя) -----
+    atk.wall_charges["std"] = 3
+    atk.mine_carried = 0
+    atk.turret_charges = 0
+    n_bar = len(g.barriers)
+    ai3 = BotAI(atk, 2)
+    ai3.target = g.player
+    # игрок ВПЕРЕДИ бота (мина не сработает), дистанция 300 < 520
+    atk.angle = math.degrees(math.atan2(g.player.y - atk.y,
+                                        g.player.x - atk.x))
+    ai3._use_items(g, 300, 0.0)
+    check("атакующий в ШТУРМЕ стены НЕ ставит (путь к воротам чист)",
+          atk.wall_total() == 3 and len(g.barriers) == n_bar)
+    # защитник — ставит (форт растёт); нужен режим с союзниками-ботами
+    g4 = Game()
+    g4.mode = 23
+    g4.start_match()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.ais = []
+    capx4, capy4 = g4.cap_xy
+    dbot = next(t for t in g4.tanks
+                if g4.tank_team.get(t) == g4.assault_def_team
+                and t is not g4.player)
+    if dbot.wall_total() > 0:
+        dbot.mine_carried = 0
+        dbot.turret_charges = 0
+        dbot.x, dbot.y = capx4 + 60, capy4
+        ai4 = BotAI(dbot, 2)
+        ai4.target = g4.foes[0]
+        n_bar = len(g4.barriers)
+        ai4._use_items(g4, 800, 0.0)
+        check("защитник у точки строит форт (стена поставлена)",
+              len(g4.barriers) > n_bar)
+    else:
+        check("защитник у точки строит форт (стена поставлена)", True)
+
+    # ----- ПРОЛОМ: радиус 480 и паника против СВОИХ стен -----
+    atk.x, atk.y = 3400, 1900          # далеко от ФОРТА (x1≈1916)
+    kaz = Barrier(3000, 1900, 0, None, "strong", team=g.assault_def_team)
+    own = Barrier(3300, 1900, 0, None, "strong", team=atk.team)
+    g.barriers.append(kaz)
+    g.barriers.append(own)
+    ai5 = BotAI(atk, 2)
+    ai5.panic_t = 0.0
+    check("казённую стену в 400 px атакующий грызёт (радиус 340→480)",
+          ai5._breach_wall(g) is kaz)
+    ai5.panic_t = 0.0
+    g.barriers.remove(kaz)
+    check("СВОЮ стену без паники не трогает", ai5._breach_wall(g) is None)
+    ai5.panic_t = 5.0
+    check("в ПАНИКЕ (залип) свою стену ломает — самозакупорки нет",
+          ai5._breach_wall(g) is own)
+
+    # ----- КОМАНДИР: атакующим «ДЕРЖАТЬ» не достаётся -----
+    g2 = Game()
+    g2.mode = 23
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    g2.assault_def_team = 0
+    g2.assault_atk_team = 1
+    ok_no_hold = True
+    ever_atk = False
+    for _ in range(6):
+        for b in g2.foes:
+            b.order = None
+            b.order_t = 0.0
+        g2._enemy_commander()
+        for b in g2.foes:
+            if b.order == "hold":
+                ok_no_hold = False     # штурмовик замер — главный глюк
+            if b.order == "attack":
+                ever_atk = True
+    check("вражеский командир в ШТУРМЕ не даёт атакующим «ДЕРЖАТЬ» "
+          "(только В АТАКУ)", ok_no_hold and ever_atk)
+    # 1на1: командир молчит — приказов нет вовсе
+    g3 = Game()
+    g3.mode = 21
+    g3.start_match()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3._enemy_commander()
+    check("в 1на1 командира нет — бот-штурмовик всегда свободен",
+          all(b.order is None for b in g3.foes))
+    # меню рисуется с новой версией
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("меню v3.7 · БАСТИОН рисуется", True)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -4152,6 +4365,7 @@ if __name__ == "__main__":
     test_v34_commander()
     test_v35_general()
     test_v36_shtab()
+    test_v37_bastion()
     test_bigmap()
     test_points()
     test_score_table()

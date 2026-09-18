@@ -59,6 +59,13 @@ class BotAI:
         self.invisible_t = 0.0  # v3.3: как долго цель прячется в тени
         # v2.1: цель (в 1на1 — игрок, в FFA — ближайший чужой танк)
         self.target = None
+        # v3.7 «БАСТИОН»: сторож против «стоячего» бота — если танк НЕ
+        # СДВИНУЛСЯ дольше пары секунд (без приказа и без заморозки),
+        # встряхиваем его: отход + паника (можно ломать даже СВОИ стены)
+        self.last_x = tank.x
+        self.last_y = tank.y
+        self.stand_t = 0.0      # сколько подряд стоим на месте
+        self.panic_t = 0.0      # сколько ещё разрешён пролом своих стен
 
     # ---------- помощники ----------
 
@@ -190,6 +197,7 @@ class BotAI:
         self.turret_cd = max(0.0, self.turret_cd - dt)
         self.emp_cd = max(0.0, self.emp_cd - dt)
         self.pu_t = max(0.0, self.pu_t - dt)
+        self.panic_t = max(0.0, self.panic_t - dt)
 
         dx, dy = p.x - t.x, p.y - t.y
         dist = math.hypot(dx, dy)
@@ -376,10 +384,16 @@ class BotAI:
                         desired = math.degrees(math.atan2(capy - t.y,
                                                           capx - t.x))
                     elif (t.team == getattr(game, "assault_atk_team", 1)
-                          and not self._visible(game, p.x, p.y)
-                          and dp > ASSAULT_POINT_R * 1.5):
-                        desired = math.degrees(math.atan2(capy - t.y,
-                                                          capx - t.x))
+                          and dp > ASSAULT_POINT_R * 1.5
+                          and (not self._visible(game, p.x, p.y)
+                               or dist > 640
+                               or not self._path_clear(game, p.x, p.y))):
+                        # v3.7: умный путь — снаружи к БЛИЖАЙШИМ ВОРОТАМ,
+                        # внутри — прямо на точку; давим и при далёкой
+                        # видимой цели и когда прямой путь закрыт
+                        gx, gy = self._atk_goal(game)
+                        desired = math.degrees(math.atan2(gy - t.y,
+                                                          gx - t.x))
 
             if desired is not None:
                 d = _ang_diff(desired, t.angle)
@@ -391,6 +405,27 @@ class BotAI:
                 self.unstick_t = random.uniform(0.4, 0.7)
                 self.unstick_turn = random.choice((-1, 1))
                 t._stuck = 0.0
+                if self._is_atk(game):
+                    self.panic_t = max(self.panic_t, 5.0)  # v3.7: можно ломать и СВОИ стены
+
+        # v3.7: СТОРОЖ «СТОЯЧЕГО» БОТА — реальный стояк без приказа:
+        # осцилляции у угла (поворот на месте) сбрасывают _stuck, а тут
+        # смотрим на СДВИГ позиции: не сдвинулся — встряска + паника
+        if (math.hypot(t.x - self.last_x, t.y - self.last_y) < 1.0
+                and t.frozen_t <= 0 and order is None):
+            self.stand_t += dt
+            if self.stand_t > 2.4:
+                self.stand_t = 0.0
+                self.unstick_t = max(self.unstick_t,
+                                     random.uniform(0.6, 0.9))
+                self.unstick_turn = random.choice((-1, 1))
+                self.orbit = random.choice((-1, 1))
+                self.orbit_t = random.uniform(1.2, 2.0)
+                if self._is_atk(game):
+                    self.panic_t = max(self.panic_t, 6.0)
+        else:
+            self.stand_t = 0.0
+        self.last_x, self.last_y = t.x, t.y
 
         t.control(dt, game.arena, forward, turn, tuple(game.tanks))
         self._try_fire(dt, game, p, ang_to)
@@ -401,6 +436,36 @@ class BotAI:
             self._breach_fire(game, p)
 
     # ---------- куда едем ----------
+
+    def _is_atk(self, game):
+        """v3.7: этот бот — АТАКУЮЩИЙ в ШТУРМЕ (для дверного пути,
+        запрета своих стен и паники-пролома)."""
+        return (getattr(game, "is_assault", False)
+                and getattr(self.t, "team", None)
+                == getattr(game, "assault_atk_team", 1))
+
+    def _atk_goal(self, game):
+        """v3.7: цель давления атакующего — СНАЧАЛА БЛИЖАЙШИЕ ВОРОТА
+        (если бот ещё снаружи здания), потом точка захвата. Больше не
+        долбим стену наугад там, где рядом есть открытые ворота."""
+        t = self.t
+        capx, capy = game.cap_xy
+        rect = getattr(game, "_assault_rect", None)
+        if not rect:
+            return (capx, capy)
+        x0, y0, x1, y1 = rect
+        if x0 < t.x < x1 and y0 < t.y < y1:
+            return (capx, capy)          # уже внутри — давим на точку
+        doors = getattr(game, "_assault_doors", None)
+        if not doors:
+            return (capx, capy)
+        best, best_s = None, 1e18
+        for dx, dy in doors:
+            s = ((t.x - dx) ** 2 + (t.y - dy) ** 2
+                 + 0.5 * ((capx - dx) ** 2 + (capy - dy) ** 2))
+            if s < best_s:
+                best_s, best = s, (dx, dy)
+        return best or (capx, capy)
 
     def _use_items(self, game, dist, ang_to=None):
         """Ручные бустеры: мины под догоняющего, стены между собой и целью.
@@ -444,8 +509,11 @@ class BotAI:
                 if game._place_mine(t):
                     self.drop_cd = 2.0
         # стена: игрок близко — строим поперёк линии огня (любой ярус,
-        # _place_barrier сама возьмёт самую обычную из имеющихся)
-        if (t.wall_total() > 0 and self.wall_cd <= 0 and dist < 520):
+        # _place_barrier сама возьмёт самую обычную из имеющихся).
+        # v3.7: АТАКУЮЩИЙ в ШТУРМЕ СТЕН НЕ СТАВИТ — иначе грохает себе
+        # путь к воротам и закупоривает сам себя
+        if (t.wall_total() > 0 and self.wall_cd <= 0 and dist < 520
+                and not self._is_atk(game)):
             if game._place_barrier(t, math.degrees(math.atan2(p.y - t.y, p.x - t.x))):
                 self.wall_cd = 3.5
         # v2.9: турель — цель держит дистанцию, ставим станок подальше от себя:
@@ -525,13 +593,18 @@ class BotAI:
     # ---------- стрельба ----------
 
     def _breach_wall(self, game):
-        """v3.3: ближайшая НЕ СВОЯ стена-барьер в радиусе 340 px —
-        чужая казённая стена здания или личная стена врага."""
+        """v3.3: ближайшая НЕ СВОЯ стена-барьер в радиусе 480 px —
+        чужая казённая стена здания или личная стена врага.
+        v3.7: радиус 340→480 (грызем раньше) и в ПАНИКЕ (залип у стен)
+        атакующий крушит даже СОБСТВЕННЫЕ стены — самозакупорка больше
+        не смертный приговор."""
         t = self.t
-        best, best_d = None, 340.0
+        best, best_d = None, 480.0
+        panic = (self.panic_t > 0 and self._is_atk(game))
         for br in getattr(game, "barriers", []):
-            if getattr(br, "team", None) == t.team:
-                continue          # свои не крушим
+            if (getattr(br, "team", None) == t.team
+                    and not panic):
+                continue          # свои не крушим (кроме паники атакующего)
             d = br._dist(t.x, t.y)
             if d < best_d:
                 best, best_d = br, d
@@ -549,7 +622,7 @@ class BotAI:
         if br is None:
             return
         aim = math.degrees(math.atan2(br.y - t.y, br.x - t.x))
-        if abs(_ang_diff(aim, t.angle)) < 10:
+        if abs(_ang_diff(aim, t.angle)) < 14:   # v3.7: было 10 — грызём увереннее
             game.fire_weapon(t)
             self.fire_delay = random.uniform(self.preset["fire_min"],
                                              max(0.35, self.preset["fire_max"]))

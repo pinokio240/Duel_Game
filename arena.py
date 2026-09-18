@@ -201,10 +201,14 @@ def _assault_map(name, variant, bx, by, cols, rows, doors, inners,
     doors: [(сторона, доля вдоль стороны, ширина в сегментах)].
     inners: [("h"|"v", смещение в сегментах от левого/верхнего края,
     от, до, доля двери, ширина двери)]. atk_side — где появляются
-    атакующие (противоположная зданию сторона)."""
+    атакующие (противоположная зданию сторона).
+    v3.7: КРУПНЕЕ ЗДАНИЯ и в словаре карты — rect (x0, y0, x1, y1) и
+    doors_xy (мировые точки подхода к воротам): ИИ атаки больше не
+    прогрызает стены наугад, а идёт к ближайшим воротам."""
     hw, hh = cols * BARRIER_LEN / 2.0, rows * BARRIER_LEN / 2.0
     x0, y0 = bx - hw, by - hh
     segs = []
+    doors_xy = []
     for side, n, sx, sy, ux, uy in (
             ("N", cols, x0 + BARRIER_LEN / 2, y0, 1, 0),
             ("S", cols, x0 + BARRIER_LEN / 2,
@@ -217,6 +221,32 @@ def _assault_map(name, variant, bx, by, cols, rows, doors, inners,
             if dside == side:
                 skip |= set(_door_skips(n, frac, units))
         segs += _wall_run(sx, sy, ux, uy, n, ASSAULT_BUILD_OUT_TIER, skip)
+        # v3.7: мировая точка подхода к воротам (60 px снаружи стены).
+        # ЛОЖНЫЕ двери не учитываем: подход, попавший в рамочную стену
+        # арены (СКЛАД в v3.3 стоял впритык к раме — калитки вели в
+        # бетон), бот обходит стороной
+        for dside, frac, units in doors:
+            if dside != side:
+                continue
+            sk = _door_skips(n, frac, units)
+            if not sk:
+                continue
+            mid = (min(sk) + max(sk) + 1) / 2.0      # в сегментах от края
+            pt = None
+            if side == "N":
+                pt = (x0 + mid * BARRIER_LEN, y0 - 60)
+            elif side == "S":
+                pt = (x0 + mid * BARRIER_LEN,
+                      y0 + rows * BARRIER_LEN + 60)
+            elif side == "W":
+                pt = (x0 - 60, y0 + mid * BARRIER_LEN)
+            else:
+                pt = (x0 + cols * BARRIER_LEN + 60,
+                      y0 + mid * BARRIER_LEN)
+            lo, hi = WALL_TS + 40, TEAM_ARENA_H - WALL_TS - 40
+            lox, hix = WALL_TS + 40, TEAM_ARENA_W - WALL_TS - 40
+            if lo <= pt[1] <= hi and lox <= pt[0] <= hix:
+                doors_xy.append(pt)
     for kind, off, a, b, dfrac, dunits in inners:
         if kind == "h":
             segs += _wall_run(x0 + a * BARRIER_LEN + BARRIER_LEN / 2,
@@ -251,31 +281,37 @@ def _assault_map(name, variant, bx, by, cols, rows, doors, inners,
             atk_spawns.append((TEAM_ARENA_W - 420, s))
     return dict(name=name, variant=variant, segs=segs, point=(bx, by),
                 hw=hw, hh=hh, def_spawns=def_spawns,
-                atk_spawns=atk_spawns)
+                atk_spawns=atk_spawns, rect=(x0, y0,
+                                             x0 + cols * BARRIER_LEN,
+                                             y0 + rows * BARRIER_LEN),
+                doors_xy=doors_xy)
 
 
 ASSAULT_MAPS = [
-    # «ДОМ»: жилье на севере карты; главный вход с юга (широкие ворота),
-    # боковые двери с запада и востока; внутри — зал с двумя галереями
-    _assault_map("ДОМ", 15, 1944, 760, 18, 10,
-                 doors=(("S", 0.5, 3), ("W", 0.5, 2), ("E", 0.35, 2)),
-                 inners=(("h", 2, 2, 16, 0.5, 2),
-                         ("h", 8, 2, 16, 0.5, 2)),
+    # «ДОМ»: огромное жилье на севере карты (24×14 сегментов = 1824×1064);
+    # главные широкие ворота с юга, боковые двери с запада и востока;
+    # внутри — парадный зал с двумя галереями-перегородками
+    _assault_map("ДОМ", 15, 1944, 760, 24, 14,
+                 doors=(("S", 0.5, 4), ("W", 0.5, 2), ("E", 0.35, 2)),
+                 inners=(("h", 3, 2, 22, 0.5, 2),
+                         ("h", 11, 2, 22, 0.5, 2)),
                  atk_side="S"),
-    # «СКЛАД»: длинное хранилище у восточной стены; ворота с запада (двое),
-    # калитки с севера и юга; внутри — ряды стеллажей-перегородок
-    _assault_map("СКЛАД", 12, 3054, 1094, 14, 18,
+    # «СКЛАД»: гигантское хранилище у восточной стены (18×20 = 1368×1520);
+    # ворота с запада (двое), калитки с севера и юга (теперь НЕ упираются
+    # в раму арены); внутри — ряды стеллажей-перегородок
+    _assault_map("СКЛАД", 12, 3054, 1094, 18, 20,
                  doors=(("W", 0.3, 2), ("W", 0.75, 2),
                         ("N", 0.5, 2), ("S", 0.5, 2)),
-                 inners=(("v", 2, 2, 16, 0.5, 2),
-                         ("v", 12, 2, 16, 0.5, 2)),
+                 inners=(("v", 4, 2, 18, 0.5, 2),
+                         ("v", 14, 2, 18, 0.5, 2)),
                  atk_side="W"),
-    # «ФОРТ»: крепость в северо-западном углу; ворота с юга и калитка
-    # с востока; внутри — казарма-перегородка и колонный зал
-    _assault_map("ФОРТ", 10, 910, 644, 16, 9,
+    # «ФОРТ»: крупная крепость в северо-западном углу (22×13 = 1672×988);
+    # ворота с юга и калитка с востока; внутри — казарма-перегородка
+    # и колонный зал
+    _assault_map("ФОРТ", 10, 1080, 720, 22, 13,
                  doors=(("S", 0.4, 3), ("E", 0.6, 2)),
-                 inners=(("h", 3, 2, 14, 0.5, 2),
-                         ("v", 4, 2, 6, 0.5, 0)),
+                 inners=(("h", 3, 2, 20, 0.5, 2),
+                         ("v", 6, 2, 9, 0.5, 0)),
                  atk_side="S"),
 ]
 

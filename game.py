@@ -352,6 +352,9 @@ class Game:
         # v3.2: ШТУРМ — точка захвата, прогресс и таймер обороны
         self.is_assault = False
         self.cap_xy = (0.0, 0.0)
+        # v3.7: габариты здания и точки ворот — для умного пути ИИ атаки
+        self._assault_rect = None
+        self._assault_doors = None
         self.cap_progress = 0.0         # 0..ASSAULT_CAPTURE_T — на сколько захватили
         self.cap_hold = ASSAULT_HOLD_T  # сколько обороне ещё держаться
         self._repair_fx = 0.0           # троттлер искр ремонта стен
@@ -659,6 +662,10 @@ class Game:
                 int(amap["hw"] * 2 + 180), int(amap["hh"] * 2 + 180)))
             self.arena.name = "%s [штурм]" % amap["name"]
         self.cap_xy = (float(amap["point"][0]), float(amap["point"][1]))
+        # v3.7: прямоугольник здания и мировые точки ворот — ИИ атаки
+        # идёт сначала к ближайшим воротам, а не грызёт стены наугад
+        self._assault_rect = amap.get("rect")
+        self._assault_doors = amap.get("doors_xy")
         self._assault_slots = (amap["def_spawns"], amap["atk_spawns"])
         self._assault_build = amap.get("segs")
         # у своих карт могло не хватать слотов — добиваем свободными
@@ -2411,7 +2418,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.6 · ШТАБ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.7 · БАСТИОН", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -2609,15 +2616,32 @@ class Game:
             return
         free = [b for b in alive if b.order is None and not b.is_commander]
         random.shuffle(free)
-        n_hold = max(1, int(len(free) * 0.4)) if free else 0
+        # v3.7: в ШТУРМЕ АТАКУЮЩИМ «ДЕРЖАТЬ» НЕ достаётся — замерший
+        # у спавна штурмовик был главной глупостью атаки («стоит на
+        # месте пока не подойдёшь»); им — только «В АТАКУ», держать
+        # рубежи могут лишь защитники
+        atk_side = [b for b in free
+                    if getattr(self, "is_assault", False)
+                    and self.tank_team.get(b)
+                    == getattr(self, "assault_atk_team", 1)]
+        hold_pool = [b for b in free if b not in atk_side]
+        n_hold = max(1, int(len(hold_pool) * 0.4)) if hold_pool else 0
         n_atk = max(1, int(len(free) * 0.3)) if free else 0
-        for b in free[:n_hold]:
+        held = set()
+        for b in hold_pool[:n_hold]:
             b.order = "hold"
             b.order_xy = (b.x, b.y)
             b.order_t = random.uniform(CMD_HOLD_MIN, CMD_HOLD_MAX)
+            held.add(b)
             self.effects.float_text(b.x, b.y - 58, "ПРИКАЗ: ДЕРЖАТЬ",
                                     (255, 150, 150))
-        for b in free[n_hold:n_hold + n_atk]:
+        given = 0
+        for b in free:
+            if given >= n_atk:
+                break
+            if b in held:
+                continue
+            given += 1
             # v3.5: командир бросает часть ботов В АТАКУ
             b.order = "attack"
             b.order_t = random.uniform(CMD_HOLD_MIN, CMD_HOLD_MAX)
