@@ -120,6 +120,11 @@ class Tank:
         self.he_shots = 0          # разрывные снаряды — бонус «Р» или билд
         self.nova_charges = 0      # v3.1: «Круговой ад» (V) — только билд,
         # одноразовый залп из NOVA_SHELLS снарядов во все стороны
+        self.kamikaze_charges = 0  # v3.9: «Камикадзе» (B) — только билд,
+        # одноразовый шквал: KAMI_WAVES волны по KAMI_WAVE_SHELLS снарядов,
+        # после третьей волны танк гибнет
+        self.kami_waves = 0        # волн осталось в текущем шквале (0 — нет)
+        self.kami_wave_t = 0.0     # таймер до следующей волны шквала
         # v3.0: ТИП СНАРЯДА (std/he/ap/fire) — чем стреляет главное орудие;
         # у игрока выбирается в ангаре, ботам выдаётся случайный
         self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"

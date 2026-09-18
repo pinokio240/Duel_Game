@@ -1716,7 +1716,8 @@ def test_builds_v29():
                           POWERUP_INTERVAL, POWERUP_MAX,
                           TURRET_DAMAGE, HE_SPLASH_DAMAGE,
                           BUILD_RAPID_TIME, BUILD_HE_SHOTS, PU_FREEZE_TIME,
-                          PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT)
+                          PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT,
+                          KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_DAMAGE_MULT)
     from powerup import PU_INFO
     from bullet import Bullet
     from arena import Arena
@@ -1731,11 +1732,17 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: девять штук, все с описанием и цветом (v3.1: +КРУГОВОЙ АД) -----
-    check("в игре ДЕВЯТЬ билдов (+КРУГОВОЙ АД в v3.1)",
-          len(BUILDS) == 9 and len(BUILD_KEYS) == 9)
+    # ----- каталог билдов: ДЕСЯТЬ штук, все с описанием и цветом (v3.9: +КАМИКАДЗЕ) -----
+    check("в игре ДЕСЯТЬ билдов (+КАМИКАДЗЕ в v3.9)",
+          len(BUILDS) == 10 and len(BUILD_KEYS) == 10)
+    check("КАМИКАДЗЕ: 3 волны по 25, урон x1.30, одноразовый и ТОЛЬКО билд",
+          BUILD_KEYS[-1] == "kamikaze"
+          and BUILDS["kamikaze"]["items"] == {"kamikaze": 1}
+          and KAMI_WAVES == 3 and KAMI_WAVE_SHELLS == 25
+          and abs(KAMI_DAMAGE_MULT - 1.30) < 1e-9
+          and "kamikaze" not in PU_INFO)   # в бонусах на карте не появляется
     check("КРУГОВОЙ АД: 45 снарядов, урон x1.10, одноразовый и ТОЛЬКО билд",
-          BUILD_KEYS[-1] == "nova"
+          BUILD_KEYS[-2] == "nova"
           and BUILDS["nova"]["items"] == {"nova": 1}
           and NOVA_SHELLS == 45 and abs(NOVA_DAMAGE_MULT - 1.10) < 1e-9
           and "nova" not in PU_INFO)   # в бонусах на карте не появляется
@@ -1811,7 +1818,8 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 10 кнопок билдов («НЕТ» + 9, v3.1)", len(zones) == 10)
+    check("в ангаре 11 кнопок билдов («НЕТ» + 10, v3.9: +КАМИКАДЗЕ)",
+          len(zones) == 11)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -1826,7 +1834,13 @@ def test_builds_v29():
     g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_5))
     check("клавиша 5 выбирает билд №5 (ШТУРМОВИК)", g2.sel_build == 4)
     g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
-    check("клавиша 0 снимает билд", g2.sel_build is None)
+    check("клавиша 0 выбирает КАМИКАДЗЕ (10-й билд)",
+          g2.sel_build == BUILD_KEYS.index("kamikaze"))
+    zk = next(r for r, kd, d in g2._click_zones
+              if kd == "build" and d == BUILD_KEYS.index("kamikaze"))
+    g2.on_click(zk.center)
+    check("снять билд — кликом по выбранной плитке",
+          g2.sel_build is None)
 
     # ----- ТУРЕЛЬ: ставится, стреляет по чужакам, ломается, истекает -----
     g3 = Game()
@@ -2282,6 +2296,12 @@ def test_v30_zavarushka():
     g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_9))
     check("клавиша 9 выбирает КРУГОВОЙ АД",
           g5b.sel_build == BUILD_KEYS.index("nova"))
+    g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("клавиша 0 выбирает КАМИКАДЗЕ (10-й билд)",
+          g5b.sel_build == BUILD_KEYS.index("kamikaze"))
+    g5b.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("клавиша 0 повторно не снимает билд (снятие — кликом)",
+          g5b.sel_build == BUILD_KEYS.index("kamikaze"))
 
     # ----- боты с билдами и типами снарядов (заварушка в 10на10) -----
     g6 = Game()
@@ -4479,7 +4499,161 @@ def test_v38_element_nova():
     gm = Game()
     gm.state = "menu"
     gm.draw()
-    check("меню v3.8 рисуется с подсказкой «И СТИХИЕЙ»", True)
+    check("меню v3.9 рисуется с подсказкой «И СТИХИЕЙ»", True)
+
+
+def test_v39_kamikaze_control():
+    """v3.9 «ВТОРАЯ ЖИЗНЬ»: КАМИКАДЗЕ (B, билд) — 3 волны по 25 снарядов
+    веером по курсу, после третьей волны танк ГИБНЕТ (просьба игрока:
+    «добавьте камикадзе... выстреливает 3 волны по 25 снарядов но после
+    этой атаки ты умираешь»); И КОНТРОЛЬ НАД БОТОМ после своей смерти
+    (Enter в спектаторе) — тело становится вашим, ИИ выключается, в
+    командах сесть можно только за союзника, тело умерло — снова спектатор."""
+    import math
+    from game import Game
+    from settings import (BULLET_DAMAGE, KAMI_WAVES, KAMI_WAVE_SHELLS,
+                          KAMI_WAVE_CD, KAMI_SPREAD_DEG, KAMI_DAMAGE_MULT,
+                          ELEMENTS, BUILD_KEYS)
+    from arena import Arena, EMPTY_VARIANT
+    from tank import Tank
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # ----- билд выдаёт заряд; без билда B не стреляет -----
+    g = Game()
+    g.mode = 2
+    g.sel_build = BUILD_KEYS.index("kamikaze")
+    g.start_match()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    p = g.player
+    check("билд «КАМИКАДЗЕ» выдаёт 1 заряд",
+          p.kamikaze_charges == 1 and p.build_name == "КАМИКАДЗЕ")
+    p.kamikaze_charges = 0
+    check("без заряда B не стреляет",
+          not g._fire_kamikaze(p) and len(g.bullets) == 0)
+
+    # ----- шквал: 3 волны по 25, смерть после третьей -----
+    g.arena = Arena(EMPTY_VARIANT)
+    g.ais = []
+    g.bullets = []
+    p.x, p.y, p.angle = 900, 600, 0.0
+    p.kamikaze_charges = 1                  # заряд без билда (прямой) — для шквала
+    check("B запускает шквал", g._fire_kamikaze(p)
+          and p.kami_waves == KAMI_WAVES and p.kamikaze_charges == 0)
+    g._kami_step(1 / 60.0)                     # первая волна — сразу
+    check("первая волна: %d снарядов, осталось %d волны"
+          % (KAMI_WAVE_SHELLS, KAMI_WAVES - 1),
+          len(g.bullets) == KAMI_WAVE_SHELLS and p.kami_waves == 2)
+    check("веер в секторе %g° по курсу" % KAMI_SPREAD_DEG,
+          all(abs(((math.degrees(math.atan2(b.vy, b.vx))
+                    - p.angle + 180) % 360) - 180) <= KAMI_SPREAD_DEG / 2 + 0.1
+              for b in g.bullets))
+    expected = round(BULLET_DAMAGE * KAMI_DAMAGE_MULT
+                     * ELEMENTS["none"]["damage_mult"])
+    check("урон волны x1.30 x калибр нейтральной (%d)" % expected,
+          all(b.damage == expected for b in g.bullets))
+    g._kami_step(0.3)                          # пауза между волнами не прошла
+    check("между волнами пауза %.2g с" % KAMI_WAVE_CD,
+          len(g.bullets) == KAMI_WAVE_SHELLS)
+    g._kami_step(0.2)                          # вторая волна
+    check("вторая волна вышла", len(g.bullets) == 2 * KAMI_WAVE_SHELLS
+          and p.kami_waves == 1 and p.alive)
+    g._kami_step(KAMI_WAVE_CD + 0.01)          # третья волна + гибель
+    check("третья волна — всего %d снарядов, танк ГИБНЕТ"
+          % (3 * KAMI_WAVE_SHELLS),
+          len(g.bullets) == 3 * KAMI_WAVE_SHELLS
+          and not p.alive and p.hp == 0)
+
+    # ----- стихия заряжает волны (v3.8) и HUD-теги -----
+    g2 = Game()
+    g2.mode = 2
+    g2.start_match()
+    g2.arena = Arena(EMPTY_VARIANT)
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    g2.bullets = []
+    p2 = g2.player
+    p2.kamikaze_charges = 1
+    tags = g2._status_tags(p2)
+    check("HUD: КАМИКАДЗЕ ГОТОВ (B)",
+          any("КАМИКАДЗЕ ГОТОВ" in s for s in tags))
+    p2.element_keys = ["vamp"]
+    p2.element_key = "vamp"
+    p2.elem = ELEMENTS["vamp"]
+    g2._fire_kamikaze(p2)
+    g2._kami_step(1 / 60.0)
+    check("волна камикадзе несёт СТИХИЮ ангара (вампиризм)",
+          all(b.element == "vamp" for b in g2.bullets))
+    tags = g2._status_tags(p2)
+    check("HUD: КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ 2",
+          any("ВОЛН ОСТАЛОСЬ 2" in s for s in tags))
+
+    # ----- ботам КАМИКАДЗЕ не достаётся -----
+    g3 = Game()
+    g3.mode = 20
+    g3.start_match()
+    check("в 10на10 ни у одного бота нет камикадзе",
+          all(b.kamikaze_charges == 0 for b in g3.bots))
+
+    # ----- КОНТРОЛЬ НАД БОТОМ (Enter в спектаторе) — FFA -----
+    g4 = Game()
+    g4.mode = 3                                # FFA-3: два бота — есть кому
+    g4.start_match()
+    g4.arena = Arena(EMPTY_VARIANT)
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    old = g4.player
+    old._die(fx, snd)
+    g4._update_cam(0.05)                       # спектатор выберет живого
+    check("после смерти спектатор выбрал живого бота",
+          g4.spec_target is not None and g4.spec_target.alive)
+    body = g4.spec_target
+    check("Enter (v3.9) — ВЗЯТЬ КОНТРОЛЬ", g4._spec_control()
+          and g4.player is body)
+    check("ИИ тела выключен", all(a.t is not body for a in g4.ais))
+    check("повторный Enter не нужен (тело живо) — отказ",
+          not g4._spec_control())
+    g4.draw()
+    check("бой рисуется под контролем бота без падений", True)
+    body._die(fx, snd)
+    g4._update_cam(0.05)                   # спектатор перескакивает на живого
+    check("тело умерло — снова спектатор: можно сесть за следующего",
+          not g4.player.alive and g4._spec_control()
+          and g4.player is not body and g4.player.alive)
+
+    # ----- в КОМАНДНЫХ — только за союзника -----
+    g5 = Game()
+    g5.mode = 6                                # 2на2
+    g5.start_match()
+    g5.arena = Arena(EMPTY_VARIANT)
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5.player._die(fx, snd)
+    ally = next(b for b in g5.bots if g5.tank_team.get(b) == 0)
+    foe = next(b for b in g5.bots if g5.tank_team.get(b) != 0)
+    g5.spec_target = foe
+    check("за ВРАГА в командах контроль запрещён", not g5._spec_control())
+    g5.spec_target = ally
+    check("за СОЮЗНИКА — контроль получен", g5._spec_control()
+          and g5.player is ally)
+    check("приказы работают: союзники видны (сам — не в списке)",
+          all(b is not g5.player for b in g5._allies_alive()))
+    # меню рисуется с новой версией
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("меню v3.9 · ВТОРАЯ ЖИЗНЬ рисуется", True)
 
 
 if __name__ == "__main__":
@@ -4519,6 +4693,7 @@ if __name__ == "__main__":
     test_v36_shtab()
     test_v37_bastion()
     test_v38_element_nova()
+    test_v39_kamikaze_control()
     test_bigmap()
     test_points()
     test_score_table()

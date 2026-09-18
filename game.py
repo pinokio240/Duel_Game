@@ -38,6 +38,8 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       HE_SPLASH_DAMAGE, HE_SPLASH_RADIUS,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
+                      KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_WAVE_CD,
+                      KAMI_SPREAD_DEG, KAMI_DAMAGE_MULT,
                       SHELL_STAR_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
@@ -822,7 +824,9 @@ class Game:
             # (bot_builds наполнен в start_match): так раунды без матча
             # (меню, тесты) остаются детерминированными.
             if not boss and self.bot_builds:
-                self._apply_build(t, random.randrange(len(BUILD_KEYS)))
+                # v3.9: КАМИКАДЗЕ ботам НЕ достаётся (последний билд) —
+                # способность смертника для игрока, ИИ не умеет ей жертвовать
+                self._apply_build(t, random.randrange(len(BUILD_KEYS) - 1))
                 t.shell_type = self._random_bot_shell()
         self.bot_tank = self.bots[0] if self.bots else None
         self.ai = self.ais[0] if self.ais else None
@@ -954,6 +958,8 @@ class Game:
                 t.emp_charges = min(t.emp_charges + n, 99)
             elif item == "nova":                 # v3.1: «Круговой ад» — заряд один
                 t.nova_charges = min(t.nova_charges + n, 1)
+            elif item == "kamikaze":             # v3.9: «Камикадзе» — заряд один
+                t.kamikaze_charges = min(t.kamikaze_charges + n, 1)
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
@@ -1172,7 +1178,9 @@ class Game:
                 self._toggle_enemy(self.sel_en)   # эффект НА ВРАГА
                 self.sounds.play("ric")
             elif k in (pygame.K_0, pygame.K_KP0):
-                self.sel_build = None             # v2.9: без билда
+                # v3.9: ДЕСЯТЫЙ билд «КАМИКАДЗЕ» на клавише 0; «НЕТ» (без
+                # билда) — повторный клик по выбранной плитке
+                self.sel_build = BUILD_KEYS.index("kamikaze")
                 self.sounds.play("ric")
             elif k in (pygame.K_1, pygame.K_KP1):
                 self.sel_build = 0
@@ -1269,6 +1277,10 @@ class Game:
                 self._use_emp(self.player)         # v2.9: носимый ЭМИ-заряд
             elif k == pygame.K_v:
                 self._fire_nova(self.player)       # v3.1: КРУГОВОЙ АД (билд)
+            elif k == pygame.K_b:
+                self._fire_kamikaze(self.player)   # v3.9: КАМИКАДЗЕ (билд)
+            elif k == pygame.K_RETURN and not self.player.alive:
+                self._spec_control()   # v3.9: СЕСТЬ ЗА БОТА после своей смерти
         elif self.state == "pause":
             if k in (pygame.K_ESCAPE, pygame.K_RETURN):
                 self.state = "fight"
@@ -1446,6 +1458,34 @@ class Game:
             i = 0
         self.spec_target = alive[i]
         self.sounds.play("ric")
+
+    def _spec_control(self):
+        """v3.9: ПОСЛЕ СВОЕЙ СМЕРТИ — СЕСТЬ ЗА БОТА (Enter): тело, за которым
+        вы смотрели спектатором, становится вашим — его ИИ выключается и вы
+        управляете им до конца раунда (севший за врага в FFA — это второй
+        шанс, в КОМАНДНЫХ сесть можно только за СОЮЗНИКА, иначе это было
+        бы бесплатное предательство). Тело умерло — снова спектатор: можно
+        сесть за следующего, пока есть живые. Приказы (E) остаются у вас."""
+        if self.state != "fight" or self.player.alive:
+            return False
+        b = self.spec_target
+        if b is None or not b.alive or b is self.player:
+            return False
+        if self.team_mode and self.tank_team.get(b, None) != 0:
+            self.effects.float_text(b.x, b.y - 60, "ЧУЖАК!", (255, 90, 90))
+            self.sounds.play("ric")
+            return False
+        ai = next((a for a in self.ais if a.t is b), None)
+        if ai is not None:
+            self.ais.remove(ai)
+        self.player = b
+        self.orders_open = False
+        self.orders_pick = set()
+        self.orders_all = False
+        self.effects.float_text(b.x, b.y - 64, "ВЫ ЗА РУЛЁМ!", (255, 220, 80))
+        self.effects.ring(b.x, b.y, (255, 220, 80), 90, 0.4)
+        self.sounds.play("pickup")
+        return True
 
     def _update_cam(self, dt):
         """Камера едет за игроком; после его смерти — СПЕКТАТОРОМ: за живым
@@ -1700,6 +1740,7 @@ class Game:
         self._smokes_step(dt)
         self._powerups_step(dt)
         self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
+        self._kami_step(dt)           # v3.9: шквал камикадзе — волны по таймеру
         # v3.2: РЕМОНТ СТЕН — держите H рядом со своей (командной) стеной;
         # боты чинят своим же механизмом из ИИ
         self._repair_step(self.player, bool(keys[pygame.K_h]), dt)
@@ -2088,6 +2129,65 @@ class Game:
         self.effects.float_text(t.x, t.y - 60, "КРУГОВОЙ АД!", (255, 60, 110))
         return True
 
+    def _fire_kamikaze(self, t):
+        """v3.9: КАМИКАДЗЕ (B, ТОЛЬКО билд «Камикадзе», БОТАМ не достаётся):
+        одноразовый шквал смертника — KAMI_WAVES волны по KAMI_WAVE_SHELLS
+        снарядов ВЕЕРОМ по курсу (сектор KAMI_SPREAD_DEG), между волнами
+        KAMI_WAVE_CD сек — в них можно рулить и доворачивать на цель.
+        Урон снаряда x1.30, СТИХИЯ из ангара заряжает волны как обычный
+        выстрел (v3.8). ПОСЛЕ ТРЕТЬЕЙ ВОЛНЫ танк гибнет — это суть билда.
+        Волны летят даже если вас успели убить? НЕТ: шквал живёт, пока
+        жив танк-смертник (_kami_step проверяет alive)."""
+        if t is None or not t.alive or t.kamikaze_charges <= 0:
+            return False
+        t.kamikaze_charges = 0
+        t.kami_waves = KAMI_WAVES
+        t.kami_wave_t = 0.0            # первая волна — сразу же
+        self.effects.ring(t.x, t.y, (255, 120, 40), 120, 0.4)
+        self.effects.shake(5, 0.25)
+        self.sounds.play("laser")
+        self.effects.float_text(t.x, t.y - 60, "КАМИКАДЗЕ!", (255, 120, 40))
+        return True
+
+    def _kami_wave(self, t):
+        """v3.9: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов веером
+        по текущему курсу танка. Урон/скорость — как у обычного выстрела
+        с бонусом смертника x1.30 (стихия, моды проклятий/облегчений);
+        эффект — случайная из выбранных стихий (микс из консоли)."""
+        dmg = (BULLET_DAMAGE * KAMI_DAMAGE_MULT
+               * t.elem["damage_mult"] * t.mods["damage_mult"])
+        spd = (t.elem["speed_mult"] * t.mods["bullet_speed_mult"])
+        ek = [k for k in getattr(t, "element_keys", []) if k in ELEMENTS]
+        dmg = round(dmg)
+        off = t.radius + 14.0
+        for i in range(KAMI_WAVE_SHELLS):
+            a = t.angle - KAMI_SPREAD_DEG / 2.0 + (
+                KAMI_SPREAD_DEG * i / (KAMI_WAVE_SHELLS - 1))
+            rad = math.radians(a)
+            self.bullets.append(Bullet(
+                t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
+                a, t, damage=dmg, speed_mult=spd,
+                element=(random.choice(ek) if ek else None),
+                bounces=t.bullet_bounces, shell="std"))
+        self.effects.ring(t.x, t.y, (255, 120, 40), 90, 0.25)
+        self.sounds.play("explode")
+        t.kami_waves -= 1
+        t.kami_wave_t = KAMI_WAVE_CD
+        if t.kami_waves <= 0:
+            # шквал выпущен — смертник прощается: большой взрыв и гибель
+            self.effects.ring(t.x, t.y, (255, 120, 40), 170, 0.55)
+            self.effects.float_text(t.x, t.y - 64, "КАМИКАДЗЕ!", (255, 120, 40))
+            t._die(self.effects, self.sounds)
+
+    def _kami_step(self, dt):
+        """v3.9: тик шквала камикадзе у всех танков (фактически — игрока,
+        билд ботам не достаётся): таймер волны, пока танк жив."""
+        for t in self.tanks:
+            if t.kami_waves > 0 and t.alive:
+                t.kami_wave_t -= dt
+                if t.kami_wave_t <= 0:
+                    self._kami_wave(t)
+
     def _emp_blast(self, t):
         """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
         v2.6.2 — бьёт ТОЛЬКО ЧУЖИХ, союзники подобравшего целы (над
@@ -2342,7 +2442,8 @@ class Game:
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
             "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
             "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
-            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД выбранным снарядом И СТИХИЕЙ (звёздный = 225 осколков)",
+            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД (снаряд И СТИХИЯ)   B — КАМИКАДЗЕ: 3 волны по 25, после атаки вы гибнете",
+            "После смерти: ←/→ выбрать бота и ENTER — ВЗЯТЬ КОНТРОЛЬ над ним (v3.9). В командах — только за союзника.",
             "Вражеский ★ КОМАНДИР приказывает своим. Консоль (Ё): «помощь» с переносом строк и прокруткой.", 
         ]
         y = 290
@@ -2440,7 +2541,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.8 · СТИХИЯ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.9 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -2501,9 +2602,12 @@ class Game:
                       pygame.K_TAB) + tuple(ORDER_KEYMAP)
 
     def _allies_alive(self):
-        """Живые боты-союзники (в FFA список пуст — командовать некем)."""
+        """Живые боты-союзники (в FFA список пуст — командовать некем).
+        v3.9: само тело под контролем (после посадки за бота) НЕ в списке —
+        приказывать себе нельзя."""
         return [b for b in self.bots
-                if b.alive and self.tank_team.get(b) == 0]
+                if b.alive and self.tank_team.get(b) == 0
+                and b is not self.player]
 
     def _order_target(self):
         """Бот, БЛИЖАЙШИЙ К ПРИЦЕЛУ (курсору на арене); далеко от прицела
@@ -3296,7 +3400,8 @@ class Game:
         0 — без билда. Билд выдаёт предметы и баффы в начале КАЖДОГО
         раунда; с v3.0 билды получают и боты (случайный каждому)."""
         t = get_font(16).render(
-            "БИЛД — стартовый набор на каждый раунд (клик; 1…9 — билд, 0 — без):",
+            "БИЛД — стартовый набор на каждый раунд (клик; 1…9 — билд,"
+            " 0 — КАМИКАДЗЕ, «НЕТ» — клик):",
             True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
         f = get_font(13)
@@ -3750,6 +3855,10 @@ class Game:
                 el_part = (" · " + "+".join(names)) if names else ""
             sfx.append("КРУГОВОЙ АД x%d (V)%s%s" % (
                 t.nova_charges, sh_part, el_part))
+        if t.kamikaze_charges > 0:             # v3.9: «Камикадзе»
+            sfx.append("КАМИКАДЗЕ ГОТОВ (B)")
+        elif t.kami_waves > 0:
+            sfx.append("КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ %d" % t.kami_waves)
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
@@ -3847,7 +3956,10 @@ class Game:
             else:
                 segs = []
                 for i, t in enumerate(self.tanks):
-                    nm = "ВЫ" if i == 0 else BOT_NAMES[i - 1]
+                    # v3.9: «ВЫ» — по ССЫЛКЕ на текущее тело (после посадки
+                    # за бота прежний мёртвый tanks[0] уже не «ВЫ»)
+                    nm = ("ВЫ" if t is self.player
+                          else ("БОТ" if i == 0 else BOT_NAMES[i - 1]))
                     wins = self.score[i] if i < len(self.score) else 0
                     segs.append(seg_f.render("%s %d" % (nm, wins), True, t.color))
             total = (sum(s.get_width() for s in segs)
@@ -3933,7 +4045,8 @@ class Game:
                 and self.spec_target is not None):
             nm = self.spec_target.display_name or "БОТ"
             img = get_font(15).render(
-                "СПЕКТАТОР: %s — ←/→ (A/D) сменить цель" % nm,
+                "СПЕКТАТОР: %s — ←/→ (A/D) сменить цель · ENTER — ВЗЯТЬ"
+                " КОНТРОЛЬ (v3.9)" % nm,
                 True, (190, 205, 255))
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, 166)))
 
