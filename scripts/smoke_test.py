@@ -1839,8 +1839,14 @@ def test_builds_v29():
     zk = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == BUILD_KEYS.index("kamikaze"))
     g2.on_click(zk.center)
-    check("снять билд — кликом по выбранной плитке",
-          g2.sel_build is None)
+    check("повторный клик по КАМИКАДЗЕ (v3.9.2) — форма ВЕЕР, билд остался",
+          g2.sel_build == BUILD_KEYS.index("kamikaze")
+          and not g2.kami_circle)
+    zn = next(r for r, kd, d in g2._click_zones
+              if kd == "build" and d is None)
+    g2.on_click(zn.center)
+    check("снять билд — плиткой «НЕТ» (форма не сбрасывается)",
+          g2.sel_build is None and not g2.kami_circle)
 
     # ----- ТУРЕЛЬ: ставится, стреляет по чужакам, ломается, истекает -----
     g3 = Game()
@@ -4665,6 +4671,105 @@ def test_v39_kamikaze_control():
     check("меню v3.9 · ВТОРАЯ ЖИЗНЬ рисуется", True)
 
 
+def test_v392_kami_pattern():
+    """v3.9.2 «ВЫБОР ШКВАЛА»: форма шквала КАМИКАДЗЕ выбирается в ангаре —
+    повторная клавиша 0 или повторный клик по плитке переключают КРУГ
+    (равномерно на 360°, по умолчанию — форма v3.9.1 «а не конусом») и
+    ВЕЕР (сектор 100° по курсу, как в v3.9); форма доезжает до танка
+    через _apply_build, HUD показывает её в теге заряда, «НЕТ» снимает
+    билд не сбрасывая форму."""
+    import math
+    from game import Game
+    from settings import (KAMI_WAVE_SHELLS, KAMI_FAN_SPREAD_DEG,
+                          BUILD_KEYS)
+    from arena import Arena, EMPTY_VARIANT
+
+    # ----- ангар: 0 выбирает, повторное 0 переключает форму -----
+    g = Game()
+    g.state = "select"
+    g.draw()
+    check("форма шквала по умолчанию — КРУГ", g.kami_circle)
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("0 выбирает КАМИКАДЗЕ (форма КРУГ)",
+          g.sel_build == BUILD_KEYS.index("kamikaze") and g.kami_circle)
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("повторное 0 — форма ВЕЕР, билд остался",
+          g.sel_build == BUILD_KEYS.index("kamikaze") and not g.kami_circle)
+    g.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_0))
+    check("ещё раз 0 — снова КРУГ", g.kami_circle)
+
+    # ----- кликами: плитка переключает форму, «НЕТ» снимает билд -----
+    g.draw()
+    zk = next(r for r, kd, d in g._click_zones
+              if kd == "build" and d == BUILD_KEYS.index("kamikaze"))
+    g.on_click(zk.center)
+    check("клик по выбранной плитке — форма ВЕЕР",
+          not g.kami_circle
+          and g.sel_build == BUILD_KEYS.index("kamikaze"))
+    zn = next(r for r, kd, d in g._click_zones
+              if kd == "build" and d is None)
+    g.on_click(zn.center)
+    check("«НЕТ» снимает билд, форма не сбрасывается",
+          g.sel_build is None and not g.kami_circle)
+
+    # ----- билд доезжает до танка: шквал ВЕЕРОМ -----
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    g2 = Game()
+    g2.mode = 3                                 # FFA-3
+    g2.kami_circle = False
+    g2.sel_build = BUILD_KEYS.index("kamikaze")
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    p = g2.player
+    check("билд передал танку форму ВЕЕР",
+          p.kamikaze_charges == 1 and p.kami_circle is False)
+    tags = g2._status_tags(p)
+    check("HUD: КАМИКАДЗЕ ГОТОВ (B) · ВЕЕР",
+          any("КАМИКАДЗЕ ГОТОВ (B) · ВЕЕР" in s for s in tags))
+    g2.arena = Arena(EMPTY_VARIANT)
+    g2.ais = []
+    g2.bullets = []
+    p.x, p.y, p.angle = 900, 600, 0.0
+    g2._fire_kamikaze(p)
+    g2._kami_step(1 / 60.0)
+    check("ВЕЕР: все %d снарядов в секторе %g° по курсу"
+          % (KAMI_WAVE_SHELLS, KAMI_FAN_SPREAD_DEG),
+          len(g2.bullets) == KAMI_WAVE_SHELLS
+          and all(abs(((math.degrees(math.atan2(b.vy, b.vx))
+                        - p.angle + 180) % 360) - 180)
+                  <= KAMI_FAN_SPREAD_DEG / 2 + 0.1 for b in g2.bullets))
+
+    # ----- и КРУГ (форма v3.9.1 по умолчанию) -----
+    p.kami_circle = True
+    p.kami_waves = 0
+    p.kamikaze_charges = 1
+    tags = g2._status_tags(p)
+    check("HUD: КАМИКАДЗЕ ГОТОВ (B) · КРУГ",
+          any("КАМИКАДЗЕ ГОТОВ (B) · КРУГ" in s for s in tags))
+    g2.bullets = []
+    g2._fire_kamikaze(p)
+    g2._kami_step(1 / 60.0)
+    angs = sorted((math.degrees(math.atan2(b.vy, b.vx)) - p.angle) % 360
+                  for b in g2.bullets)
+    gaps = [(angs[(i + 1) % len(angs)] - angs[i]) % 360
+            for i in range(len(angs))]
+    step = 360.0 / KAMI_WAVE_SHELLS
+    check("КРУГ: %d снарядов равномерно через %g°"
+          % (KAMI_WAVE_SHELLS, step),
+          len(angs) == KAMI_WAVE_SHELLS
+          and max(gaps) - min(gaps) < 1e-4
+          and abs(gaps[0] - step) < 1e-4)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -4703,6 +4808,7 @@ if __name__ == "__main__":
     test_v37_bastion()
     test_v38_element_nova()
     test_v39_kamikaze_control()
+    test_v392_kami_pattern()
     test_bigmap()
     test_points()
     test_score_table()

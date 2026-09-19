@@ -39,7 +39,7 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       BUILDS, BUILD_KEYS, EMP_CHARGE_BUILD,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
                       KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_WAVE_CD,
-                      KAMI_DAMAGE_MULT,
+                      KAMI_DAMAGE_MULT, KAMI_FAN_SPREAD_DEG,
                       SHELL_STAR_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
@@ -364,6 +364,10 @@ class Game:
         # v2.9: стартовый билд (индекс в BUILD_KEYS или None — «без билда»),
         # выбирается в ангаре; максимум ОДИН билд на танк
         self.sel_build = None
+        # v3.9.2: форма шквала КАМИКАДЗЕ — КРУГ (равномерно 360°) или ВЕЕР
+        # (сектор по курсу); переключается в ангаре повторной клавишей 0
+        # или повторным кликом по плитке, доезжает до танка в _apply_build
+        self.kami_circle = True
         # v3.0: тип снаряда (индекс в SHELL_KEYS) — четвертая часть сборки
         self.sel_shell = 0
         # v3.0: СПЕКТАТОР — после смерти игрока камера следует за живым
@@ -960,12 +964,21 @@ class Game:
                 t.nova_charges = min(t.nova_charges + n, 1)
             elif item == "kamikaze":             # v3.9: «Камикадзе» — заряд один
                 t.kamikaze_charges = min(t.kamikaze_charges + n, 1)
+                t.kami_circle = self.kami_circle   # v3.9.2: форма из ангара
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
             t.mods[mod] = t.mods.get(mod, 1.0) * val
         self.effects.float_text(t.x, t.y - 78, "БИЛД: %s" % bd["name"],
                                 bd["color"])
+
+    def _toggle_kami(self):
+        """v3.9.2: форма шквала КАМИКАДЗЕ — КРУГ (равномерно на 360°,
+        по репорту «вокруг своей оси, а не конусом») или ВЕЕР (сектор
+        KAMI_FAN_SPREAD_DEG по курсу, как в v3.9). Переключается в ангаре
+        повторной клавишей 0 или повторным кликом по плитке КАМИКАДЗЕ;
+        выбор доезжает до танка в начале раунда (_apply_build)."""
+        self.kami_circle = not self.kami_circle
 
     def _bless_cap(self):
         """Сколько облегчений можно взять: 1 + каждое проклятье."""
@@ -1178,9 +1191,12 @@ class Game:
                 self._toggle_enemy(self.sel_en)   # эффект НА ВРАГА
                 self.sounds.play("ric")
             elif k in (pygame.K_0, pygame.K_KP0):
-                # v3.9: ДЕСЯТЫЙ билд «КАМИКАДЗЕ» на клавише 0; «НЕТ» (без
-                # билда) — повторный клик по выбранной плитке
-                self.sel_build = BUILD_KEYS.index("kamikaze")
+                # v3.9: билд «КАМИКАДЗЕ»; v3.9.2: повторное 0 переключает
+                # форму шквала КРУГ/ВЕЕР (снять билд — плитка «НЕТ» кликом)
+                if self.sel_build == BUILD_KEYS.index("kamikaze"):
+                    self._toggle_kami()
+                else:
+                    self.sel_build = BUILD_KEYS.index("kamikaze")
                 self.sounds.play("ric")
             elif k in (pygame.K_1, pygame.K_KP1):
                 self.sel_build = 0
@@ -1403,7 +1419,12 @@ class Game:
             if pos is not None:
                 self._ed_click(pos)
         elif kind == "build":                  # v2.9: выбор билда (макс. один)
-            self.sel_build = None if data == self.sel_build else data
+            # v3.9.2: повторный клик по выбранной КАМИКАДЗЕ — форма КРУГ/ВЕЕР
+            if (data is not None and data == self.sel_build
+                    and BUILD_KEYS[data] == "kamikaze"):
+                self._toggle_kami()
+            else:
+                self.sel_build = None if data == self.sel_build else data
             self.sounds.play("ric")
         elif kind == "shell":                  # v3.0: тип снаряда
             self.sel_shell = data
@@ -2150,12 +2171,12 @@ class Game:
         return True
 
     def _kami_wave(self, t):
-        """v3.9.1: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов ПОЛНЫМ
-        КРУГОМ вокруг танка — равномерно через 360/N градусов, старт от
-        текущего курса (курс задаёт лишь точку отсчёта круга). Урон/
-        скорость — как у обычного выстрела с бонусом смертника x1.30
-        (стихия, моды проклятий/облегчений); эффект — случайная из
-        выбранных стихий (микс из консоли)."""
+        """v3.9.2: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов выбранной
+        ФОРМОЙ — КРУГ (равномерно через 360/N вокруг танка, курс задаёт
+        лишь точку отсчёта) или ВЕЕР (сектор KAMI_FAN_SPREAD_DEG по курсу,
+        как в v3.9). Урон/скорость — как у обычного выстрела с бонусом
+        смертника x1.30 (стихия, моды проклятий/облегчений); эффект —
+        случайная из выбранных стихий (микс из консоли)."""
         dmg = (BULLET_DAMAGE * KAMI_DAMAGE_MULT
                * t.elem["damage_mult"] * t.mods["damage_mult"])
         spd = (t.elem["speed_mult"] * t.mods["bullet_speed_mult"])
@@ -2163,7 +2184,11 @@ class Game:
         dmg = round(dmg)
         off = t.radius + 14.0
         for i in range(KAMI_WAVE_SHELLS):
-            a = t.angle + 360.0 * i / KAMI_WAVE_SHELLS
+            if t.kami_circle:                   # v3.9.1: полный круг 360°
+                a = t.angle + 360.0 * i / KAMI_WAVE_SHELLS
+            else:                               # v3.9.2: веер по курсу
+                a = (t.angle - KAMI_FAN_SPREAD_DEG / 2.0
+                     + KAMI_FAN_SPREAD_DEG * i / (KAMI_WAVE_SHELLS - 1))
             rad = math.radians(a)
             self.bullets.append(Bullet(
                 t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
@@ -2542,7 +2567,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.9.1 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.9.2 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -3395,14 +3420,15 @@ class Game:
 
     def _build_panel(self, y):
         """v2.9: БИЛДЫ — стартовые наборы в один ряд (10 кнопок: «НЕТ»
-        плюс девять билдов — с v3.1 добавился «КРУГОВОЙ АД»).
+        плюс десять билдов — с v3.9 добавился «КАМИКАДЗЕ»).
         МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому билду заменяет выбор,
-        повторный клик по выбранному снимает. Клавиши 1…9 — билды,
-        0 — без билда. Билд выдаёт предметы и баффы в начале КАЖДОГО
-        раунда; с v3.0 билды получают и боты (случайный каждому)."""
+        повторный клик по КАМИКАДЗЕ (v3.9.2) переключает форму шквала
+        КРУГ/ВЕЕР, снять билд — плитка «НЕТ». Клавиши 1…9 — билды,
+        0 — КАМИКАДЗЕ (повторно — форма). Билд выдаёт предметы и баффы
+        в начале КАЖДОГО раунда; с v3.0 билды получают и боты."""
         t = get_font(16).render(
             "БИЛД — стартовый набор на каждый раунд (клик; 1…9 — билд,"
-            " 0 — КАМИКАДЗЕ, «НЕТ» — клик):",
+            " 0 — КАМИКАДЗЕ (повторно — КРУГ/ВЕЕР), «НЕТ» — клик):",
             True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
         f = get_font(13)
@@ -3411,7 +3437,10 @@ class Game:
                           COL_TEXT if self.sel_build is None else COL_DIM), None)]
         for i, key in enumerate(BUILD_KEYS):
             sel = self.sel_build == i
-            btns.append((f.render(BUILDS[key]["name"], True,
+            nm = BUILDS[key]["name"]
+            if sel and key == "kamikaze":  # v3.9.2: форма шквала на плитке
+                nm += ": %s" % ("КРУГ" if self.kami_circle else "ВЕЕР")
+            btns.append((f.render(nm, True,
                                   COL_TEXT if sel else COL_DIM), i))
         total = sum(im.get_width() + 18 for im, _ in btns) + gap * (len(btns) - 1)
         bx = SCREEN_W / 2 - total / 2.0
@@ -3443,11 +3472,19 @@ class Game:
                                   "клик — снять выбранный билд"])
             else:
                 bd = BUILDS[BUILD_KEYS[hov_bd]]
+                lines = [bd["desc"],
+                         "выдаётся В НАЧАЛЕ каждого раунда",
+                         "максимум ОДИН билд на танк",
+                         "v3.0: боты тоже получают случайные билды"]
+                if BUILD_KEYS[hov_bd] == "kamikaze":   # v3.9.2: форма шквала
+                    lines.insert(1,
+                                 "сейчас: %s — повторный клик (или 0)"
+                                 " переключит на %s"
+                                 % ("КРУГ" if self.kami_circle else "ВЕЕР",
+                                    "ВЕЕР" if self.kami_circle else "КРУГ"))
+                    lines.insert(2, "снять билд — плитка «НЕТ»")
                 self._tooltip = ("БИЛД «%s»" % bd["name"], bd["color"],
-                                 [bd["desc"],
-                                  "выдаётся В НАЧАЛЕ каждого раунда",
-                                  "максимум ОДИН билд на танк",
-                                  "v3.0: боты тоже получают случайные билды"])
+                                 lines)
 
     def _tt_shell(self, key):
         """v3.0: тултип карточки типа снаряда."""
@@ -3856,8 +3893,9 @@ class Game:
                 el_part = (" · " + "+".join(names)) if names else ""
             sfx.append("КРУГОВОЙ АД x%d (V)%s%s" % (
                 t.nova_charges, sh_part, el_part))
-        if t.kamikaze_charges > 0:             # v3.9: «Камикадзе»
-            sfx.append("КАМИКАДЗЕ ГОТОВ (B)")
+        if t.kamikaze_charges > 0:             # v3.9: «Камикадзе» (v3.9.2: форма)
+            sfx.append("КАМИКАДЗЕ ГОТОВ (B) · %s"
+                       % ("КРУГ" if t.kami_circle else "ВЕЕР"))
         elif t.kami_waves > 0:
             sfx.append("КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ %d" % t.kami_waves)
         if t.shield_t > 0:
