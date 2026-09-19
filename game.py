@@ -40,6 +40,8 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       NOVA_SHELLS, NOVA_DAMAGE_MULT,
                       KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_WAVE_CD,
                       KAMI_DAMAGE_MULT, KAMI_FAN_SPREAD_DEG,
+                      CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
+                      WAVE_SPEED, WAVE_MAX_R, WAVE_DAMAGE,
                       SHELL_STAR_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
@@ -345,6 +347,7 @@ class Game:
         self.bots = []
         self.ais = []
         self.bullets = []
+        self.shockwaves = []      # v3.10: активные ударные волны (билд «Волна»)
         self.powerups = []
         self.mines = []
         self.smokes = []
@@ -828,9 +831,11 @@ class Game:
             # (bot_builds наполнен в start_match): так раунды без матча
             # (меню, тесты) остаются детерминированными.
             if not boss and self.bot_builds:
-                # v3.9: КАМИКАДЗЕ ботам НЕ достаётся (последний билд) —
-                # способность смертника для игрока, ИИ не умеет ей жертвовать
-                self._apply_build(t, random.randrange(len(BUILD_KEYS) - 1))
+                # v3.9: КАМИКАДЗЕ ботам НЕ достаётся; v3.10: КОНУС и ВОЛНА —
+                # тоже (их способности жмутся руками, ботам они бесполезны)
+                bot_pool = [i for i, k in enumerate(BUILD_KEYS)
+                            if k not in ("kamikaze", "cone", "wave")]
+                self._apply_build(t, random.choice(bot_pool))
                 t.shell_type = self._random_bot_shell()
         self.bot_tank = self.bots[0] if self.bots else None
         self.ai = self.ais[0] if self.ais else None
@@ -854,6 +859,7 @@ class Game:
         # окно «выяснения» стартует только после смерти игрока
         self.spectate_t = 0.0
         self.bullets = []
+        self.shockwaves = []          # v3.10: волны не переживают новый раунд
         self.powerups = []
         self.mines = []
         self.smokes = []
@@ -965,6 +971,10 @@ class Game:
             elif item == "kamikaze":             # v3.9: «Камикадзе» — заряд один
                 t.kamikaze_charges = min(t.kamikaze_charges + n, 1)
                 t.kami_circle = self.kami_circle   # v3.9.2: форма из ангара
+            elif item == "cone":                 # v3.10: «Конус» — заряд один
+                t.cone_charges = min(t.cone_charges + n, 1)
+            elif item == "wave":                 # v3.10: «Волна» — заряд один
+                t.wave_charges = min(t.wave_charges + n, 1)
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
@@ -1295,6 +1305,10 @@ class Game:
                 self._fire_nova(self.player)       # v3.1: КРУГОВОЙ АД (билд)
             elif k == pygame.K_b:
                 self._fire_kamikaze(self.player)   # v3.9: КАМИКАДЗЕ (билд)
+            elif k == pygame.K_c:
+                self._fire_cone(self.player)       # v3.10: КОНУС (билд)
+            elif k == pygame.K_z:
+                self._fire_wave(self.player)       # v3.10: ВОЛНА (билд)
             elif k == pygame.K_RETURN and not self.player.alive:
                 self._spec_control()   # v3.9: СЕСТЬ ЗА БОТА после своей смерти
         elif self.state == "pause":
@@ -1762,6 +1776,7 @@ class Game:
         self._powerups_step(dt)
         self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
         self._kami_step(dt)           # v3.9: шквал камикадзе — волны по таймеру
+        self._waves_step(dt)          # v3.10: ударные волны (билд «Волна»)
         # v3.2: РЕМОНТ СТЕН — держите H рядом со своей (командной) стеной;
         # боты чинят своим же механизмом из ИИ
         self._repair_step(self.player, bool(keys[pygame.K_h]), dt)
@@ -2082,6 +2097,46 @@ class Game:
         self._emp_blast(t)
         return True
 
+    def _blast_loadout(self, t, mult, neutral_as_caliber=False):
+        """v3.10: общая НАЧИНКА залповых способностей (КРУГОВОЙ АД v3.5/
+        v3.8, КАМИКАДЗЕ и КОНУС): ТИП СНАРЯДА из ангара даёт свои множители
+        урона/скорости (разрывной x0.80, бронебойный x1.30 и скорость x1.30,
+        зажигательный x0.85, звёздный — своя цена), бонус способности (mult)
+        поверх; СТИХИЯ ангара — урон и скорость по основной, эффект каждому
+        снаряду — случайная из выбранных (микс из консоли), зажигательный
+        снаряд ВСЕГДА огненный. С v3.10 залпы честно учитывают и МОДЫ
+        проклятий/облегчений (нова раньше их игнорировала).
+        НЕЙТРАЛЬНАЯ стихия — особый случай: у новы она НЕ применяется
+        поверх (v3.8: не двойнить её x1.10 с x1.10 билда), а у камикадзе/
+        конуса применяется (их бонусы иные — прежнее поведение v3.9
+        «x1.30 x калибр нейтральной»); для этого neutral_as_caliber=True.
+        Возвращает (shell, dmg, spd, ek) — урон неокруглённый."""
+        shell = getattr(t, "shell_type", "std")
+        if shell not in SHELL_TYPES:
+            shell = "std"
+        dmg = BULLET_DAMAGE * mult
+        spd = 1.0
+        if shell == "he":
+            dmg *= 0.80
+        elif shell == "ap":
+            dmg *= 1.30
+            spd = 1.30
+        elif shell == "fire":
+            dmg *= 0.85
+        elif shell == "star":
+            dmg *= SHELL_STAR_DAMAGE_MULT
+        base_key = getattr(t, "element_key", "none")
+        if base_key != "none":
+            base_el = ELEMENTS.get(base_key, ELEMENTS["none"])
+            dmg *= base_el["damage_mult"]
+            spd *= base_el["speed_mult"]
+        elif neutral_as_caliber:
+            dmg *= ELEMENTS["none"]["damage_mult"]   # «снаряд больнее»
+        ek = [k for k in getattr(t, "element_keys", []) if k in ELEMENTS]
+        dmg *= t.mods.get("damage_mult", 1.0)
+        spd *= t.mods.get("bullet_speed_mult", 1.0)
+        return shell, dmg, spd, ek
+
     def _fire_nova(self, t):
         """v3.1: КРУГОВОЙ АД (V, ТОЛЬКО билд «Круговой ад»): одноразовый
         залп — NOVA_SHELLS снарядов веером во ВСЕ стороны. v3.5: залп
@@ -2101,30 +2156,9 @@ class Game:
         if t is None or not t.alive or t.nova_charges <= 0:
             return False
         t.nova_charges -= 1
-        shell = getattr(t, "shell_type", "std")
-        dmg = BULLET_DAMAGE * NOVA_DAMAGE_MULT   # x1.10 — суть билда
-        spd = 1.0
-        if shell == "he":
-            dmg *= 0.80
-        elif shell == "ap":
-            dmg *= 1.30
-            spd = 1.30
-        elif shell == "fire":
-            dmg *= 0.85
-        elif shell == "star":
-            dmg *= SHELL_STAR_DAMAGE_MULT
-        # v3.8: СТИХИЯ ИЗ АНГАРА заряжает залп — как обычный выстрел:
-        # урон/скорость по ОСНОВНОЙ стихии (element_key), эффект каждому
-        # снаряду — случайная из выбранных (микс стихий из консоли).
-        # Зажигательный снаряд ВСЕГДА огненный (это его суть), цена
-        # основной стихии честно остаётся в уроне. Нейтральная — не
-        # стихия, а калибр ствола: двойного бонуса с x1.10 билда нет.
-        base_key = getattr(t, "element_key", "none")
-        if base_key != "none":
-            base_el = ELEMENTS.get(base_key, ELEMENTS["none"])
-            dmg *= base_el["damage_mult"]
-            spd *= base_el["speed_mult"]
-        ek = [k for k in getattr(t, "element_keys", []) if k in ELEMENTS]
+        # v3.10: начинка залпа — общий механизм _blast_loadout (тип снаряда
+        # из ангара x бонус x стихия x моды); раньше моды здесь не учитывались
+        shell, dmg, spd, ek = self._blast_loadout(t, NOVA_DAMAGE_MULT)
         dmg = round(dmg)
         off = t.radius + 6.0
         for i in range(NOVA_SHELLS):
@@ -2171,16 +2205,15 @@ class Game:
         return True
 
     def _kami_wave(self, t):
-        """v3.9.2: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов выбранной
-        ФОРМОЙ — КРУГ (равномерно через 360/N вокруг танка, курс задаёт
-        лишь точку отсчёта) или ВЕЕР (сектор KAMI_FAN_SPREAD_DEG по курсу,
-        как в v3.9). Урон/скорость — как у обычного выстрела с бонусом
-        смертника x1.30 (стихия, моды проклятий/облегчений); эффект —
-        случайная из выбранных стихий (микс из консоли)."""
-        dmg = (BULLET_DAMAGE * KAMI_DAMAGE_MULT
-               * t.elem["damage_mult"] * t.mods["damage_mult"])
-        spd = (t.elem["speed_mult"] * t.mods["bullet_speed_mult"])
-        ek = [k for k in getattr(t, "element_keys", []) if k in ELEMENTS]
+        """v3.10: ОДНА волна камикадзе: KAMI_WAVE_SHELLS снарядов выбранной
+        ФОРМОЙ — КРУГ (равномерно через 360/N вокруг танка) или ВЕЕР
+        (сектор KAMI_FAN_SPREAD_DEG по курсу). С v3.10 волна стреляет ТЕМ
+        ТИПОМ СНАРЯДА и СТИХИЕЙ, что выбраны в ангаре (репорт игрока
+        «а почему камикадзе не берет снаряд который выбран?»), начинка —
+        общая _blast_loadout (нейтральная учитывается калибром, как в
+        v3.9). ПОСЛЕ ТРЕТЬЕЙ волны танк гибнет."""
+        shell, dmg, spd, ek = self._blast_loadout(
+            t, KAMI_DAMAGE_MULT, neutral_as_caliber=True)
         dmg = round(dmg)
         off = t.radius + 14.0
         for i in range(KAMI_WAVE_SHELLS):
@@ -2190,11 +2223,19 @@ class Game:
                 a = (t.angle - KAMI_FAN_SPREAD_DEG / 2.0
                      + KAMI_FAN_SPREAD_DEG * i / (KAMI_WAVE_SHELLS - 1))
             rad = math.radians(a)
+            if shell == "fire":
+                elem = "fire"                # зажигательный — всегда огонь
+            elif ek:
+                elem = random.choice(ek)
+            else:
+                elem = None
             self.bullets.append(Bullet(
                 t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
                 a, t, damage=dmg, speed_mult=spd,
-                element=(random.choice(ek) if ek else None),
-                bounces=t.bullet_bounces, shell="std"))
+                element=elem,
+                bounces=(0 if shell == "ap" else None),
+                shell=shell, he=(shell == "he"),
+                star=(shell == "star")))
         self.effects.ring(t.x, t.y, (255, 120, 40), 90, 0.25)
         self.sounds.play("explode")
         t.kami_waves -= 1
@@ -2213,6 +2254,87 @@ class Game:
                 t.kami_wave_t -= dt
                 if t.kami_wave_t <= 0:
                     self._kami_wave(t)
+
+    def _fire_cone(self, t):
+        """v3.10: КОНУС (C, ТОЛЬКО билд «Конус», БОТАМ не достаётся):
+        одноразовый залп КОНУСОМ вперёд — CONE_SHELLS снарядов в секторе
+        CONE_SPREAD_DEG по курсу, урон x1.15. Стреляет ТЕМ ТИПОМ СНАРЯДА
+        И СТИХИЕЙ, что выбраны в ангаре (общая начинка _blast_loadout —
+        просьба игрока «билды которые делают круг и конус»). Заряд один
+        за раунд."""
+        if t is None or not t.alive or t.cone_charges <= 0:
+            return False
+        t.cone_charges -= 1
+        shell, dmg, spd, ek = self._blast_loadout(
+            t, CONE_DAMAGE_MULT, neutral_as_caliber=True)
+        dmg = round(dmg)
+        off = t.radius + 6.0
+        for i in range(CONE_SHELLS):
+            a = (t.angle - CONE_SPREAD_DEG / 2.0
+                 + CONE_SPREAD_DEG * i / (CONE_SHELLS - 1))
+            rad = math.radians(a)
+            if shell == "fire":
+                elem = "fire"                # зажигательный — всегда огонь
+            elif ek:
+                elem = random.choice(ek)
+            else:
+                elem = None
+            self.bullets.append(Bullet(
+                t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
+                a, t, damage=dmg, speed_mult=spd,
+                element=elem,
+                bounces=(0 if shell == "ap" else None),
+                shell=shell, he=(shell == "he"),
+                star=(shell == "star")))
+        self.effects.ring(t.x, t.y, (170, 120, 255), 110, 0.35)
+        self.effects.shake(3, 0.18)
+        self.sounds.play("explode")
+        self.effects.float_text(t.x, t.y - 60, "КОНУС!", (170, 120, 255))
+        return True
+
+    def _fire_wave(self, t):
+        """v3.10: УДАРНАЯ ВОЛНА (Z, ТОЛЬКО билд «Волна», БОТАМ не достаётся):
+        круговая волна расходится от танка до WAVE_MAX_R со скоростью
+        WAVE_SPEED и ОДИН раз бьёт КАЖДОГО ЧУЖАКА на WAVE_DAMAGE — стихия
+        ангара и моды усиливают урон. СТЕНЫ ВОЛНЕ НЕ ПОМЕХА (это волна,
+        а не снаряд), союзники владельца целы. Заряд один за раунд."""
+        if t is None or not t.alive or t.wave_charges <= 0:
+            return False
+        t.wave_charges -= 1
+        dmg = round(WAVE_DAMAGE * t.elem["damage_mult"]
+                    * t.mods.get("damage_mult", 1.0))
+        self.shockwaves.append({
+            "x": t.x, "y": t.y, "r": t.radius + 8.0,
+            "speed": WAVE_SPEED, "max_r": WAVE_MAX_R, "dmg": dmg,
+            "owner": t, "team": self.tank_team.get(t), "hits": set()})
+        self.effects.ring(t.x, t.y, (120, 220, 255), WAVE_MAX_R,
+                          WAVE_MAX_R / WAVE_SPEED)
+        self.effects.burst(t.x, t.y, (120, 220, 255), 18, 300, 0.4, 4)
+        self.effects.shake(5, 0.25)
+        self.sounds.play("explode")
+        self.effects.float_text(t.x, t.y - 60, "УДАРНАЯ ВОЛНА!",
+                                (120, 220, 255))
+        return True
+
+    def _waves_step(self, dt):
+        """v3.10: тик ударных волн: расширение, урон чужакам — каждому
+        РОВНО ОДИН раз (попадание фиксируется в hits)."""
+        for w in self.shockwaves[:]:
+            w["r"] += w["speed"] * dt
+            if w["r"] >= w["max_r"]:
+                self.shockwaves.remove(w)
+                continue
+            for o in self.tanks:
+                if not o.alive or o is w["owner"] or o in w["hits"]:
+                    continue
+                if w["team"] is not None and \
+                        self.tank_team.get(o) == w["team"]:
+                    continue                      # союзники владельца целы
+                if (o.x - w["x"]) ** 2 + (o.y - w["y"]) ** 2 <= w["r"] ** 2:
+                    w["hits"].add(o)
+                    o.take_damage(w["dmg"], self.effects, self.sounds)
+                    self.effects.float_text(o.x, o.y - 54, "ВОЛНА!",
+                                            (120, 220, 255))
 
     def _emp_blast(self, t):
         """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
@@ -2468,13 +2590,19 @@ class Game:
             "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
             "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
             "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
-            "F — мина   Q — стена   R — ТУРЕЛЬ   H — РЕМОНТ   X — ЭМИ   V — КРУГОВОЙ АД (снаряд И СТИХИЯ)   B — КАМИКАДЗЕ: 3 волны по 25, после атаки вы гибнете",
+            "F — мина  Q — стена  R — ТУРЕЛЬ  H — РЕМОНТ  X — ЭМИ  V — КРУГОВОЙ АД (снаряд и СТИХИЯ)  B — КАМИКАДЗЕ 3×25  C — КОНУС  Z — ВОЛНА",
             "После смерти: ←/→ выбрать бота и ENTER — ВЗЯТЬ КОНТРОЛЬ над ним (v3.9). В командах — только за союзника.",
             "Вражеский ★ КОМАНДИР приказывает своим. Консоль (Ё): «помощь» с переносом строк и прокруткой.", 
         ]
         y = 290
         for s in lines:
-            img = get_font(21, bold=False).render(s, True, COL_DIM)
+            # v3.10: длинные подсказки не должны вылезать за экран —
+            # шрифт каждой строки ужимается до влезания (было 21 всегда,
+            # строки приказов/после смерти обрезались с краёв)
+            size = 21
+            while size > 13 and get_font(size, bold=False).size(s)[0] > SCREEN_W - 36:
+                size -= 1
+            img = get_font(size, bold=False).render(s, True, COL_DIM)
             self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y)))
             y += 23
         # выбор сложности (1/2/3 или клик)
@@ -2567,7 +2695,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.9.2 · ВТОРАЯ ЖИЗНЬ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.10 · АРСЕНАЛ", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -3419,8 +3547,8 @@ class Game:
             self._tooltip = self._tt_shell(SHELL_KEYS[hov_key])
 
     def _build_panel(self, y):
-        """v2.9: БИЛДЫ — стартовые наборы в один ряд (10 кнопок: «НЕТ»
-        плюс десять билдов — с v3.9 добавился «КАМИКАДЗЕ»).
+        """v2.9: БИЛДЫ — стартовые наборы в один ряд (13 кнопок: «НЕТ»
+        плюс двенадцать билдов — v3.10 добавил «КОНУС» и «ВОЛНА»).
         МАКСИМУМ ОДИН БИЛД НА ТАНК: клик по другому билду заменяет выбор,
         повторный клик по КАМИКАДЗЕ (v3.9.2) переключает форму шквала
         КРУГ/ВЕЕР, снять билд — плитка «НЕТ». Клавиши 1…9 — билды,
@@ -3431,8 +3559,19 @@ class Game:
             " 0 — КАМИКАДЗЕ (повторно — КРУГ/ВЕЕР), «НЕТ» — клик):",
             True, COL_GOLD)
         self.screen.blit(t, t.get_rect(center=(SCREEN_W / 2, y - 26)))
-        f = get_font(13)
+        # v3.10: билдов стало 12 (13 плиток с «НЕТ») — если ряд не влезает,
+        # шрифт плиток ужимается (13 -> 11); меряем по САМОЙ длинной
+        # подписи (выбранный КАМИКАДЗЕ с формой)
         gap = 10
+        names = ["НЕТ"] + [
+            (BUILDS[k]["name"] + ": КРУГ") if k == "kamikaze"
+            else BUILDS[k]["name"] for k in BUILD_KEYS]
+        fsize = 13
+        while fsize > 11 and sum(
+                get_font(fsize).size(nm)[0] + 18 for nm in names) \
+                + gap * (len(names) - 1) > SCREEN_W - 24:
+            fsize -= 1
+        f = get_font(fsize)
         btns = [(f.render("НЕТ", True,
                           COL_TEXT if self.sel_build is None else COL_DIM), None)]
         for i, key in enumerate(BUILD_KEYS):
@@ -3833,6 +3972,23 @@ class Game:
             size -= 1
         return get_font(size).render(label, True, color or t.color)
 
+    def _blast_tag(self, t, base_parts):
+        """v3.10: общий хвост HUD-тега залповых способностей (нова v3.5
+        собирает свой тег по тем же правилам): тип снаряда, если не
+        стандартный, и стихии (зажигательный — всегда Огонь, в его залпе
+        стихии игрока не летят)."""
+        parts = list(base_parts)
+        if t.shell_type != "std":
+            parts.append(SHELL_TYPES[t.shell_type]["name"])
+        if t.shell_type == "fire":
+            parts.append(ELEMENTS["fire"]["name"])
+        else:
+            names = [ELEMENTS[k]["name"] for k
+                     in getattr(t, "element_keys", []) if k in ELEMENTS]
+            if names:
+                parts.append("+".join(names))
+        return " · ".join(parts)
+
     def _status_tags(self, t):
         """Статусы танка строкой (общие для HUD игрока и строк ботов)."""
         sfx = []
@@ -3893,11 +4049,19 @@ class Game:
                 el_part = (" · " + "+".join(names)) if names else ""
             sfx.append("КРУГОВОЙ АД x%d (V)%s%s" % (
                 t.nova_charges, sh_part, el_part))
-        if t.kamikaze_charges > 0:             # v3.9: «Камикадзе» (v3.9.2: форма)
-            sfx.append("КАМИКАДЗЕ ГОТОВ (B) · %s"
-                       % ("КРУГ" if t.kami_circle else "ВЕЕР"))
+        if t.kamikaze_charges > 0:
+            # v3.9: «Камикадзе»; v3.9.2: форма; v3.10: тип снаряда и стихия
+            sfx.append(self._blast_tag(t, [
+                "КАМИКАДЗЕ ГОТОВ (B)",
+                "КРУГ" if t.kami_circle else "ВЕЕР"]))
         elif t.kami_waves > 0:
             sfx.append("КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ %d" % t.kami_waves)
+        if t.cone_charges > 0:                 # v3.10: «Конус»
+            sfx.append(self._blast_tag(t, ["КОНУС ГОТОВ (C)"]))
+        if t.wave_charges > 0:                 # v3.10: «Волна» (стихия = урон)
+            names = [ELEMENTS[k]["name"] for k
+                     in getattr(t, "element_keys", []) if k in ELEMENTS]
+            sfx.append(" · ".join(["ВОЛНА ГОТОВ (Z)"] + names))
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером

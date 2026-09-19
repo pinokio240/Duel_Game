@@ -1717,7 +1717,9 @@ def test_builds_v29():
                           TURRET_DAMAGE, HE_SPLASH_DAMAGE,
                           BUILD_RAPID_TIME, BUILD_HE_SHOTS, PU_FREEZE_TIME,
                           PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT,
-                          KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_DAMAGE_MULT)
+                          KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_DAMAGE_MULT,
+                          CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
+                          WAVE_SPEED, WAVE_MAX_R, WAVE_DAMAGE)
     from powerup import PU_INFO
     from bullet import Bullet
     from arena import Arena
@@ -1732,20 +1734,32 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: ДЕСЯТЬ штук, все с описанием и цветом (v3.9: +КАМИКАДЗЕ) -----
-    check("в игре ДЕСЯТЬ билдов (+КАМИКАДЗЕ в v3.9)",
-          len(BUILDS) == 10 and len(BUILD_KEYS) == 10)
+    # ----- каталог билдов: ДВЕНАДЦАТЬ штук (v3.10: +КОНУС и +ВОЛНА) -----
+    check("в игре ДВЕНАДЦАТЬ билдов (v3.10: +КОНУС и +ВОЛНА)",
+          len(BUILDS) == 12 and len(BUILD_KEYS) == 12)
     check("КАМИКАДЗЕ: 3 волны по 25, урон x1.30, одноразовый и ТОЛЬКО билд",
-          BUILD_KEYS[-1] == "kamikaze"
+          BUILD_KEYS.index("kamikaze") == 9
           and BUILDS["kamikaze"]["items"] == {"kamikaze": 1}
           and KAMI_WAVES == 3 and KAMI_WAVE_SHELLS == 25
           and abs(KAMI_DAMAGE_MULT - 1.30) < 1e-9
           and "kamikaze" not in PU_INFO)   # в бонусах на карте не появляется
     check("КРУГОВОЙ АД: 45 снарядов, урон x1.10, одноразовый и ТОЛЬКО билд",
-          BUILD_KEYS[-2] == "nova"
+          BUILD_KEYS.index("nova") == 8
           and BUILDS["nova"]["items"] == {"nova": 1}
           and NOVA_SHELLS == 45 and abs(NOVA_DAMAGE_MULT - 1.10) < 1e-9
           and "nova" not in PU_INFO)   # в бонусах на карте не появляется
+    check("КОНУС (v3.10): 16 снарядов в секторе 70°, урон x1.15, ТОЛЬКО билд",
+          BUILD_KEYS[-2] == "cone"
+          and BUILDS["cone"]["items"] == {"cone": 1}
+          and CONE_SHELLS == 16 and abs(CONE_SPREAD_DEG - 70.0) < 1e-9
+          and abs(CONE_DAMAGE_MULT - 1.15) < 1e-9
+          and "cone" not in PU_INFO)
+    check("ВОЛНА (v3.10): волна до 540 px со скоростью 420, урон 40, ТОЛЬКО билд",
+          BUILD_KEYS[-1] == "wave"
+          and BUILDS["wave"]["items"] == {"wave": 1}
+          and abs(WAVE_SPEED - 420.0) < 1e-9
+          and abs(WAVE_MAX_R - 540.0) < 1e-9 and WAVE_DAMAGE == 40
+          and "wave" not in PU_INFO)
     check("первый билд — СТРОИТЕЛЬ (5 стен и 2 мины)",
           BUILD_KEYS[0] == "builder"
           and BUILDS["builder"]["items"] == {"barrier": 5, "mine": 2})
@@ -1818,8 +1832,8 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 11 кнопок билдов («НЕТ» + 10, v3.9: +КАМИКАДЗЕ)",
-          len(zones) == 11)
+    check("в ангаре 13 кнопок билдов («НЕТ» + 12, v3.10: +КОНУС и ВОЛНА)",
+          len(zones) == 13)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -4770,6 +4784,182 @@ def test_v392_kami_pattern():
           and abs(gaps[0] - step) < 1e-4)
 
 
+def test_v310_arsenal():
+    """v3.10 «АРСЕНАЛ»: 1) камикадзе стреляет ТЕМ ТИПОМ СНАРЯДА, что выбран
+    в ангаре (репорт игрока «а почему камикадзе не берет снаряд который
+    выбран?») — общая начинка _blast_loadout: тип снаряда x бонус x стихия
+    x моды; нейтральная учитывается калибром (43, как в v3.9); 2) два
+    новых билда-способности по просьбе «билды которые делают круг и
+    конус»: КОНУС (C — 16 снарядов конусом 70° вперёд) и ВОЛНА (Z —
+    ударная волна-круг до 540 px, бьёт каждого чужака ОДИН раз, стены
+    не спасают, союзники целы). Ботам эти билды не достаются."""
+    import math
+    from game import Game
+    from settings import (BULLET_DAMAGE, KAMI_DAMAGE_MULT, KAMI_WAVE_SHELLS,
+                          CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
+                          WAVE_DAMAGE, WAVE_MAX_R, WAVE_SPEED,
+                          SHELL_KEYS, SHELL_STAR_DAMAGE_MULT, BUILD_KEYS,
+                          ELEMENTS)
+    from arena import Arena, EMPTY_VARIANT
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    def fresh(shell):
+        g = Game()
+        g.mode = 3
+        g.sel_shell = SHELL_KEYS.index(shell)
+        g.sel_build = BUILD_KEYS.index("kamikaze")
+        g.start_match()
+        g.state = "fight"
+        g._fake_keys = FakeKeys(())
+        g.ais = []
+        g.bullets = []
+        p = g.player
+        p.x, p.y, p.angle = 900, 600, 0.0
+        return g, p
+
+    # --- камикадзе берёт выбранный СНАРЯД: стандартный (43 — как в v3.9) ---
+    g, p = fresh("std")
+    check("камикадзе: заряд и стандартный снаряд из ангара",
+          p.kamikaze_charges == 1 and p.shell_type == "std")
+    tags = g._status_tags(p)
+    check("HUD: КАМИКАДЗЕ ГОТОВ (B) · КРУГ (std — без типа в теге)",
+          any(s == "КАМИКАДЗЕ ГОТОВ (B) · КРУГ" for s in tags))
+    g._fire_kamikaze(p)
+    g._kami_step(1 / 60.0)
+    exp = round(BULLET_DAMAGE * KAMI_DAMAGE_MULT
+                * ELEMENTS["none"]["damage_mult"])
+    check("волна std: урон %d (x1.30 x калибр нейтральной), shell std" % exp,
+          len(g.bullets) == KAMI_WAVE_SHELLS
+          and all(b.shell == "std" and b.damage == exp and not b.pierce
+                  for b in g.bullets))
+
+    # --- бронебойный: урон x1.30x1.30, без рикошетов, скорость x1.30 ---
+    gap_, pap = fresh("ap")
+    tags = gap_._status_tags(pap)
+    check("HUD: КАМИКАДЗЕ ГОТОВ (B) · КРУГ · БРОНЕБОЙНЫЙ",
+          any("КАМИКАДЗЕ ГОТОВ (B) · КРУГ · БРОНЕБОЙНЫЙ" in s
+              for s in tags))
+    gap_._fire_kamikaze(pap)
+    gap_._kami_step(1 / 60.0)
+    exp = round(BULLET_DAMAGE * KAMI_DAMAGE_MULT * 1.30
+                * ELEMENTS["none"]["damage_mult"])
+    check("волна АП: урон %d, пробой, бонов 0" % exp,
+          all(b.shell == "ap" and b.damage == exp and b.bounces == 0
+              and b.pierce for b in gap_.bullets))
+
+    # --- зажигательный: все огненные, урон x0.85 ---
+    gf, pf = fresh("fire")
+    gf._fire_kamikaze(pf)
+    gf._kami_step(1 / 60.0)
+    exp = round(BULLET_DAMAGE * KAMI_DAMAGE_MULT * 0.85
+                * ELEMENTS["none"]["damage_mult"])
+    check("волна огненная: все Огонь, урон %d" % exp,
+          all(b.shell == "fire" and b.element == "fire" and b.damage == exp
+              for b in gf.bullets))
+    tags = gf._status_tags(pf)   # заряд уже потрачен — тег волн остался
+    check("HUD: КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ 2 после выстрела",
+          any("ВОЛН ОСТАЛОСЬ 2" in s for s in tags))
+
+    # --- КОНУС: звёздный снаряд, сектор 70°, один заряд ---
+    gc = Game()
+    gc.mode = 3
+    gc.sel_shell = SHELL_KEYS.index("star")
+    gc.sel_build = BUILD_KEYS.index("cone")
+    gc.start_match()
+    gc.state = "fight"
+    gc._fake_keys = FakeKeys(())
+    pc = gc.player
+    check("билд «КОНУС» выдаёт заряд, снаряд ЗВЁЗДНЫЙ из ангара",
+          pc.cone_charges == 1 and pc.shell_type == "star")
+    tags = gc._status_tags(pc)
+    check("HUD: КОНУС ГОТОВ (C) · ЗВЁЗДНЫЙ",
+          any("КОНУС ГОТОВ (C) · ЗВЁЗДНЫЙ" in s for s in tags))
+    pc.cone_charges = 0
+    check("без заряда КОНУС не стреляет",
+          not gc._fire_cone(pc) and len(gc.bullets) == 0)
+    gc.ais = []
+    gc.bullets = []
+    pc.x, pc.y, pc.angle = 900, 600, 0.0
+    pc.cone_charges = 1
+    check("C стреляет КОНУСОМ, заряд потрачен",
+          gc._fire_cone(pc) and pc.cone_charges == 0)
+    exp = round(BULLET_DAMAGE * CONE_DAMAGE_MULT * SHELL_STAR_DAMAGE_MULT
+                * ELEMENTS["none"]["damage_mult"])
+    rel = [(math.degrees(math.atan2(b.vy, b.vx)) - pc.angle + 180) % 360
+           - 180 for b in gc.bullets]
+    check("конус: %d звёздных снарядов в секторе %g° (урон %d)"
+          % (CONE_SHELLS, CONE_SPREAD_DEG, exp),
+          len(gc.bullets) == CONE_SHELLS
+          and all(b.shell == "star" and b.star_split and b.damage == exp
+                  for b in gc.bullets)
+          and max(rel) <= CONE_SPREAD_DEG / 2 + 0.1
+          and min(rel) >= -CONE_SPREAD_DEG / 2 - 0.1
+          and max(rel) - min(rel) > CONE_SPREAD_DEG - 1)
+
+    # --- ВОЛНА: бьёт чужака ОДИН раз, союзники и владелец целы ---
+    gw = Game()
+    gw.mode = 6                                  # 2на2: есть союзник
+    gw.sel_build = BUILD_KEYS.index("wave")
+    gw.start_match()
+    gw.state = "fight"
+    gw._fake_keys = FakeKeys(())
+    gw.arena = Arena(EMPTY_VARIANT)
+    pw = gw.player
+    check("билд «ВОЛНА» выдаёт заряд", pw.wave_charges == 1)
+    tags = gw._status_tags(pw)
+    check("HUD: ВОЛНА ГОТОВ (Z)", any("ВОЛНА ГОТОВ (Z)" in s for s in tags))
+    pw.wave_charges = 0
+    check("без заряда ВОЛНА не запускается",
+          not gw._fire_wave(pw) and len(gw.shockwaves) == 0)
+    pw.wave_charges = 1
+    ally = next(b for b in gw.bots if gw.tank_team.get(b) == 0)
+    foe = next(b for b in gw.bots if gw.tank_team.get(b) != 0)
+    pw.x, pw.y = 900, 600
+    foe.x, foe.y = 1150, 600                     # 250 px — волна достанет
+    ally.x, ally.y = 980, 600                    # рядом — но СВОЙ
+    fx, snd = _Fx(), _Snd()
+    pw._die(fx, snd)                             # мёртвый не запускает
+    check("мёртвый волну не запускает", not gw._fire_wave(pw))
+    pw.alive = True
+    check("Z запускает УДАРНУЮ ВОЛНУ", gw._fire_wave(pw)
+          and len(gw.shockwaves) == 1 and pw.wave_charges == 0)
+    exp = round(WAVE_DAMAGE * ELEMENTS["none"]["damage_mult"])
+    check("волна несёт урон %d (x калибр нейтральной)" % exp,
+          gw.shockwaves[0]["dmg"] == exp)
+    hp0 = foe.hp
+    for _ in range(int(WAVE_MAX_R / WAVE_SPEED / (1 / 60.0)) + 5):
+        gw._waves_step(1 / 60.0)
+    check("чужак получил %d урона РОВНО ОДИН раз (%d -> %d)"
+          % (exp, hp0, foe.hp),
+          hp0 - foe.hp == exp)
+    check("союзник и владелец целы",
+          ally.alive and ally.hp == ally.max_hp)
+    check("волна угасла на радиусе %g" % WAVE_MAX_R,
+          len(gw.shockwaves) == 0)
+
+    # --- ботам новые билды не достаются ---
+    gb = Game()
+    gb.mode = 20
+    gb.start_match()
+    check("в 10на10 ни у одного бота нет КОНУСА/ВОЛНЫ/КАМИКАДЗЕ",
+          all(b.cone_charges == 0 and b.wave_charges == 0
+              and b.kamikaze_charges == 0 for b in gb.bots))
+
+    # --- меню рисуется с новой версией ---
+    gm = Game()
+    gm.state = "menu"
+    gm.draw()
+    check("меню v3.10 · АРСЕНАЛ рисуется", True)
+
+
 if __name__ == "__main__":
     pygame.init()
     test_maps()
@@ -4809,6 +4999,7 @@ if __name__ == "__main__":
     test_v38_element_nova()
     test_v39_kamikaze_control()
     test_v392_kami_pattern()
+    test_v310_arsenal()
     test_bigmap()
     test_points()
     test_score_table()
