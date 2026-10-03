@@ -41,7 +41,10 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_WAVE_CD,
                       KAMI_DAMAGE_MULT, KAMI_FAN_SPREAD_DEG,
                       CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
-                      WAVE_SPEED, WAVE_MAX_R, WAVE_DAMAGE,
+                      VOLNA_SHELLS, VOLNA_DAMAGE_MULT,
+                      GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME,
+                      TUNNEL_W, TUNNEL_H, TUNNEL_CLEAR, TUNNEL_PBR,
+                      COCKPIT_ZOOM, COCKPIT_LIFT,
                       SHELL_STAR_DAMAGE_MULT,
                       SHELL_TYPES, SHELL_KEYS, SHELL_BOT_WEIGHTS,
                       FIRE_ZONE_RADIUS, FIRE_ZONE_LIFE, FIRE_ZONE_DPS,
@@ -347,7 +350,7 @@ class Game:
         self.bots = []
         self.ais = []
         self.bullets = []
-        self.shockwaves = []      # v3.10: активные ударные волны (билд «Волна»)
+        self.cockpit = False         # v3.11: ВИД БАШНИ (F1) — вид от первого лица
         self.powerups = []
         self.mines = []
         self.smokes = []
@@ -759,6 +762,7 @@ class Game:
             self.build[5], self.build[6],
             shell_type=SHELL_KEYS[self.sel_shell])
         self.player.team = 0
+        self.player.is_player = True   # v3.11: призрак-игрок видит себя ярче
         self.tank_team[self.player] = 0
         # эффекты НА ВРАГА: словарь модов для вражеской команды
         emods = {}
@@ -831,10 +835,12 @@ class Game:
             # (bot_builds наполнен в start_match): так раунды без матча
             # (меню, тесты) остаются детерминированными.
             if not boss and self.bot_builds:
-                # v3.9: КАМИКАДЗЕ ботам НЕ достаётся; v3.10: КОНУС и ВОЛНА —
-                # тоже (их способности жмутся руками, ботам они бесполезны)
+                # v3.11: БОТЫ САМИ БЕРУТ ПЕРКИ — пул = ВСЕ билды, кроме
+                # КАМИКАДЗЕ (смертник по кнопке — не для ИИ). КОНУС и ВОЛНА
+                # теперь тоже достаются ботам, и они ими ПОЛЬЗУЮТСЯ
+                # (bot._use_items); ПРИЗРАК — пассивка, кнопок не требует
                 bot_pool = [i for i, k in enumerate(BUILD_KEYS)
-                            if k not in ("kamikaze", "cone", "wave")]
+                            if k != "kamikaze"]
                 self._apply_build(t, random.choice(bot_pool))
                 t.shell_type = self._random_bot_shell()
         self.bot_tank = self.bots[0] if self.bots else None
@@ -859,7 +865,6 @@ class Game:
         # окно «выяснения» стартует только после смерти игрока
         self.spectate_t = 0.0
         self.bullets = []
-        self.shockwaves = []          # v3.10: волны не переживают новый раунд
         self.powerups = []
         self.mines = []
         self.smokes = []
@@ -975,6 +980,9 @@ class Game:
                 t.cone_charges = min(t.cone_charges + n, 1)
             elif item == "wave":                 # v3.10: «Волна» — заряд один
                 t.wave_charges = min(t.wave_charges + n, 1)
+            elif item == "ghost":                # v3.11: «Призрак» — пассивка
+                t.ghost_on = True
+                t.cloak_cd = GHOST_VISIBLE_TIME  # цикл маскировки с нуля
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
@@ -1308,7 +1316,12 @@ class Game:
             elif k == pygame.K_c:
                 self._fire_cone(self.player)       # v3.10: КОНУС (билд)
             elif k == pygame.K_z:
-                self._fire_wave(self.player)       # v3.10: ВОЛНА (билд)
+                self._fire_wave(self.player)       # v3.11: ВОЛНА — кольцо снарядов
+            elif k == pygame.K_F1:
+                # v3.11: ВИД БАШНИ — вид от первого лица (только пока жив)
+                if self.player.alive:
+                    self.cockpit = not self.cockpit
+                    self.sounds.play("ric")
             elif k == pygame.K_RETURN and not self.player.alive:
                 self._spec_control()   # v3.9: СЕСТЬ ЗА БОТА после своей смерти
         elif self.state == "pause":
@@ -1776,7 +1789,7 @@ class Game:
         self._powerups_step(dt)
         self._turrets_step(dt)        # v2.9: турели ищут цель и стреляют
         self._kami_step(dt)           # v3.9: шквал камикадзе — волны по таймеру
-        self._waves_step(dt)          # v3.10: ударные волны (билд «Волна»)
+        self._ghost_step(dt)          # v3.11: маскировка «Призрака» циклом
         # v3.2: РЕМОНТ СТЕН — держите H рядом со своей (командной) стеной;
         # боты чинят своим же механизмом из ИИ
         self._repair_step(self.player, bool(keys[pygame.K_h]), dt)
@@ -1884,6 +1897,10 @@ class Game:
     def fire_laser(self, shooter, fan=False):
         """Мгновенный луч: пробивает всё до первой стены.
         Веер (fan=True) — три луча с разбросом, каждый слабее."""
+        if getattr(shooter, "cloak_t", 0) > 0:
+            # v3.11: лазер тоже раскрывает призрака
+            shooter.cloak_t = 0.0
+            shooter.cloak_cd = GHOST_VISIBLE_TIME
         if fan:
             for off in (-PU_LASER_FAN_SPREAD, 0.0, PU_LASER_FAN_SPREAD):
                 self._laser_ray(shooter, shooter.angle + off,
@@ -1923,6 +1940,17 @@ class Game:
             return True
         for s in self.smokes:
             if s.life > 0 and _seg_circle(x1, y1, x2, y2, s.x, s.y, s.radius):
+                return True
+        # v3.11: ТОННЕЛИ — разные зоны (внутри/снаружи или разные галереи)
+        # НЕ ВИДЯТ друг друга; внутри одной галереи видно как обычно.
+        # «ВУПОРНОТ» (TUNNEL_PBR): вплотную (дистанция < 260) обзор не режем —
+        # иначе боты замирают друг против друга (никто не стреляет по скрытой
+        # цели) и раунд зависает. Тоннель прячет от ДАЛЬНЕГО боя.
+        if self.arena.tunnels:
+            dx, dy = x2 - x1, y2 - y1
+            if dx * dx + dy * dy > TUNNEL_PBR * TUNNEL_PBR \
+                    and self.arena.tunnel_idx(x1, y1) != \
+                    self.arena.tunnel_idx(x2, y2):
                 return True
         return False
 
@@ -2293,48 +2321,68 @@ class Game:
         return True
 
     def _fire_wave(self, t):
-        """v3.10: УДАРНАЯ ВОЛНА (Z, ТОЛЬКО билд «Волна», БОТАМ не достаётся):
-        круговая волна расходится от танка до WAVE_MAX_R со скоростью
-        WAVE_SPEED и ОДИН раз бьёт КАЖДОГО ЧУЖАКА на WAVE_DAMAGE — стихия
-        ангара и моды усиливают урон. СТЕНЫ ВОЛНЕ НЕ ПОМЕХА (это волна,
-        а не снаряд), союзники владельца целы. Заряд один за раунд."""
+        """v3.11: ВОЛНА (Z, билд; теперь и БОТАМ достаётся) — КОЛЬЦО ИЗ
+        СНАРЯДОВ: по репорту игрока «я думал волна из снарядов будет»
+        ударная волна v3.10 заменена настоящим залпом — VOLNA_SHELLS
+        снарядов полным кругом 360° вокруг танка (шаг 360/N, как шквал
+        камикадзе, но ОДНОЙ волной и без смерти). Снаряд — ТЕМ ТИПОМ И
+        СТИХИЕЙ, что выбраны в ангаре (общая начинка _blast_loadout,
+        нейтральная — калибром). Заряд один за раунд."""
         if t is None or not t.alive or t.wave_charges <= 0:
             return False
         t.wave_charges -= 1
-        dmg = round(WAVE_DAMAGE * t.elem["damage_mult"]
-                    * t.mods.get("damage_mult", 1.0))
-        self.shockwaves.append({
-            "x": t.x, "y": t.y, "r": t.radius + 8.0,
-            "speed": WAVE_SPEED, "max_r": WAVE_MAX_R, "dmg": dmg,
-            "owner": t, "team": self.tank_team.get(t), "hits": set()})
-        self.effects.ring(t.x, t.y, (120, 220, 255), WAVE_MAX_R,
-                          WAVE_MAX_R / WAVE_SPEED)
+        shell, dmg, spd, ek = self._blast_loadout(
+            t, VOLNA_DAMAGE_MULT, neutral_as_caliber=True)
+        dmg = round(dmg)
+        off = t.radius + 8.0
+        for i in range(VOLNA_SHELLS):
+            a = t.angle + 360.0 * i / VOLNA_SHELLS
+            rad = math.radians(a)
+            if shell == "fire":
+                elem = "fire"                # зажигательный — всегда огонь
+            elif ek:
+                elem = random.choice(ek)
+            else:
+                elem = None
+            self.bullets.append(Bullet(
+                t.x + math.cos(rad) * off, t.y + math.sin(rad) * off,
+                a, t, damage=dmg, speed_mult=spd,
+                element=elem,
+                bounces=(0 if shell == "ap" else None),
+                shell=shell, he=(shell == "he"),
+                star=(shell == "star")))
+        self.effects.ring(t.x, t.y, (120, 220, 255), 130, 0.35)
         self.effects.burst(t.x, t.y, (120, 220, 255), 18, 300, 0.4, 4)
-        self.effects.shake(5, 0.25)
+        self.effects.shake(4, 0.2)
         self.sounds.play("explode")
-        self.effects.float_text(t.x, t.y - 60, "УДАРНАЯ ВОЛНА!",
-                                (120, 220, 255))
+        self.effects.float_text(t.x, t.y - 60, "ВОЛНА!", (120, 220, 255))
         return True
 
-    def _waves_step(self, dt):
-        """v3.10: тик ударных волн: расширение, урон чужакам — каждому
-        РОВНО ОДИН раз (попадание фиксируется в hits)."""
-        for w in self.shockwaves[:]:
-            w["r"] += w["speed"] * dt
-            if w["r"] >= w["max_r"]:
-                self.shockwaves.remove(w)
+    def _ghost_step(self, dt):
+        """v3.11: тик маскировки «ПРИЗРАКА» у всех танков с билдом:
+        ВИДЕН GHOST_VISIBLE_TIME сек -> СКРЫТЕН GHOST_CLOAK_TIME сек
+        (боты и турели его игнорируют, tank.draw рисует тусклым) ->
+        снова виден. Выстрел раскрывает (см. _shoot_bullet)."""
+        for t in self.tanks:
+            if not t.ghost_on or not t.alive:
                 continue
-            for o in self.tanks:
-                if not o.alive or o is w["owner"] or o in w["hits"]:
-                    continue
-                if w["team"] is not None and \
-                        self.tank_team.get(o) == w["team"]:
-                    continue                      # союзники владельца целы
-                if (o.x - w["x"]) ** 2 + (o.y - w["y"]) ** 2 <= w["r"] ** 2:
-                    w["hits"].add(o)
-                    o.take_damage(w["dmg"], self.effects, self.sounds)
-                    self.effects.float_text(o.x, o.y - 54, "ВОЛНА!",
-                                            (120, 220, 255))
+            if t.cloak_t > 0:
+                t.cloak_t -= dt
+                if t.cloak_t <= 0:
+                    t.cloak_t = 0.0
+                    t.cloak_cd = GHOST_VISIBLE_TIME
+                    if t is self.player:
+                        self.effects.float_text(
+                            t.x, t.y - 60, "МАСКИРОВКА СПАЛА",
+                            (170, 255, 230))
+            else:
+                t.cloak_cd -= dt
+                if t.cloak_cd <= 0:
+                    t.cloak_t = GHOST_CLOAK_TIME
+                    self.sounds.play("ric")
+                    if t is self.player:
+                        self.effects.float_text(
+                            t.x, t.y - 60, "МАСКИРОВКА!", (170, 255, 230))
 
     def _emp_blast(self, t):
         """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
@@ -2455,17 +2503,25 @@ class Game:
                 b.draw(self.world, ox, oy)
             for t in reversed(self.tanks):   # игрок рисуется поверх ботов
                 if t.alive:
-                    pad = self._team_pad(t)   # v2.6: подсветка команд
-                    if pad is not None:
-                        self.world.blit(
-                            pad, (int(t.x + ox - pad.get_width() / 2),
-                                  int(t.y + oy - pad.get_height() / 2)))
-                    t.draw(self.world, ox, oy)
-                    self._draw_badge(t, ox, oy)   # v3.4: приказы и командир
+                    hidden = t.cloaked and t is not self.player
+                    if not hidden:
+                        pad = self._team_pad(t)   # v2.6: подсветка команд
+                        if pad is not None:
+                            self.world.blit(
+                                pad, (int(t.x + ox - pad.get_width() / 2),
+                                      int(t.y + oy - pad.get_height() / 2)))
+                        t.draw(self.world, ox, oy)
+                        self._draw_badge(t, ox, oy)   # v3.4: приказы и командир
+                    else:
+                        t.draw(self.world, ox, oy)    # призрак — тусклый контур
             self.effects.draw(self.world, ox, oy)
+            self._draw_tunnel_roofs(self.world, ox, oy)   # v3.11: крыши
             for s in self.smokes:
                 s.draw(self.world, ox, oy)
         self.screen.blit(self.world, (0, 0))
+        if in_battle and self.cockpit and self.player.alive \
+                and self.state in ("intro", "fight", "pause", "round_end"):
+            self._cockpit_transform()     # v3.11: ВИД БАШНИ (F1)
 
         if self.state == "menu":
             self._draw_menu()
@@ -2542,6 +2598,95 @@ class Game:
         if self.con_open:
             self._draw_console()
 
+    def _draw_tunnel_roofs(self, surf, ox, oy):
+        """v3.11: КРЫШИ ТОННЕЛЕЙ — рисуются ПОВЕРХ танков и пуль: всё, что
+        под крышей, скрыто от глаз (обзор режет и vision_blocked). Своего
+        танка под крышей видно полупрозрачным контуром — иначе игрок не
+        поймёт, где он. Сам тоннель НЕ стена: коллизий нет, есть только
+        визуал крыши и стелс-логика обзора."""
+        for r in self.arena.tunnels:
+            rect = pygame.Rect(int(r.x + ox), int(r.y + oy), r.w, r.h)
+            if rect.right < -40 or rect.left > SCREEN_W + 40 \
+                    or rect.bottom < -40 or rect.top > SCREEN_H + 40:
+                continue
+            pygame.draw.rect(surf, (13, 14, 26), rect)
+            # диагональная штриховка — «кровля»
+            for i in range(-rect.h, rect.w + rect.h, 26):
+                pygame.draw.line(surf, (22, 24, 42),
+                                 (rect.x + i, rect.bottom),
+                                 (rect.x + i + rect.h, rect.top))
+            pygame.draw.rect(surf, (150, 90, 220), rect, 3)
+            lbl = get_font(13, bold=True).render("ТОННЕЛЬ", True,
+                                                 (120, 75, 190))
+            surf.blit(lbl, lbl.get_rect(center=rect.center))
+        # свой танк под крышей — полупрозрачный контур поверх кровли
+        t = self.player
+        if t is not None and t.alive \
+                and self.arena.tunnel_idx(t.x, t.y) is not None:
+            img = pygame.transform.rotate(t._sprite, -t.angle).copy()
+            img.set_alpha(150)
+            surf.blit(img, img.get_rect(
+                center=(int(t.x + ox), int(t.y + oy))))
+
+    # ================= v3.11: ВИД БАШНИ (F1) =================
+    @staticmethod
+    def _cockpit_map(px, py, ang, tank_x, tank_y):
+        """v3.11: МАПИНГ ВИДА БАШНИ (чистая функция — тестируется).
+        Возвращает (phi, rel_x, rel_y): phi — угол для
+        pygame.transform.rotozoom, rel — вектор ОТ ТАНКА К ТОЧКЕ (px, py)
+        на экране (до умножения на зум), когда курс танка (ang, град.)
+        смотрит строго ВВЕРХ. Алгебра: матрица M переводит вектор курса
+        h=(cos a, sin a) в (0, -1) «вверх» экрана, а правый борт танка
+        r=(-sin a, cos a) — в (1, 0) «вправо» (без зеркала):
+        M = [[-sin a, cos a], [-cos a, -sin a]]. Совпадает с матрицей
+        pygame-поворота на phi = a + 90°, поэтому rotozoom(world, phi, z)
+        и ручной пересчёт точек согласованы."""
+        a = math.radians(ang)
+        phi = math.degrees(a) + 90.0
+        dx, dy = px - tank_x, py - tank_y
+        m00, m01 = -math.sin(a), math.cos(a)
+        m10, m11 = -math.cos(a), -math.sin(a)
+        rel_x = m00 * dx + m01 * dy
+        rel_y = m10 * dx + m11 * dy
+        return phi, rel_x, rel_y
+
+    def _cockpit_transform(self):
+        """v3.11: собрать кадр ВИДА БАШНИ: мир уже нарисован на self.world
+        (экранные координаты) — крутим его rotozoom вокруг центра холста,
+        зумим и кладём так, чтобы танк встал на (SCREEN_W/2,
+        SCREEN_H/2 + COCKPIT_LIFT), курс — строго вверх. Сверху — прицел."""
+        t = self.player
+        ox, oy = self.effects.offset()
+        ox -= self.cam[0]
+        oy -= self.cam[1]
+        tsx, tsy = t.x + ox, t.y + oy          # танк на мировом холсте
+        a = math.radians(t.angle)
+        phi = math.degrees(a) + 90.0
+        m00, m01 = -math.sin(a), math.cos(a)
+        m10, m11 = -math.cos(a), -math.sin(a)
+        zoom = COCKPIT_ZOOM
+        cx, cy = SCREEN_W / 2.0, SCREEN_H / 2.0   # центр мирового холста
+        vx, vy = tsx - cx, tsy - cy
+        rx = m00 * vx + m01 * vy               # позиция танка на rot-холсте
+        ry = m10 * vx + m11 * vy               # (относительно его центра)
+        rot = pygame.transform.rotozoom(self.world, phi, zoom)
+        bx = SCREEN_W / 2.0 - rot.get_width() / 2.0 - zoom * rx
+        by = SCREEN_H / 2.0 + COCKPIT_LIFT - rot.get_height() / 2.0 - zoom * ry
+        self.screen.blit(rot, (bx, by))
+        # прицел: кольцо над носом танка + подпись режима
+        cx2, cy2 = SCREEN_W / 2.0, SCREEN_H / 2.0 + COCKPIT_LIFT - 84
+        pygame.draw.circle(self.screen, (120, 220, 255),
+                           (int(cx2), int(cy2)), 16, 2)
+        pygame.draw.line(self.screen, (120, 220, 255),
+                         (cx2 - 24, cy2), (cx2 - 8, cy2), 2)
+        pygame.draw.line(self.screen, (120, 220, 255),
+                         (cx2 + 8, cy2), (cx2 + 24, cy2), 2)
+        pygame.draw.line(self.screen, (120, 220, 255),
+                         (cx2, cy2 - 24), (cx2, cy2 - 8), 2)
+        tag = get_font(13, bold=True).render(
+            "ВИД БАШНИ (F1 — обычный вид)", True, (120, 220, 255))
+        self.screen.blit(tag, (12, SCREEN_H - tag.get_height() - 12))
+
     def _draw_capture_point(self, surf, ox=0, oy=0):
         """v3.2: ТОЧКА ЗАХВАТА ШТУРМА — пульсирующее золотое кольцо;
         v3.3: стоит ВНУТРИ здания штурмовой карты; по мере захвата
@@ -2587,10 +2732,10 @@ class Game:
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
-            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F11 — ВО ВЕСЬ ЭКРАН",
+            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F1 — ВИД БАШНИ   F11 — ВО ВЕСЬ ЭКРАН",
             "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
             "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
-            "F — мина  Q — стена  R — ТУРЕЛЬ  H — РЕМОНТ  X — ЭМИ  V — КРУГОВОЙ АД (снаряд и СТИХИЯ)  B — КАМИКАДЗЕ 3×25  C — КОНУС  Z — ВОЛНА",
+            "F — мина  Q — стена  R — ТУРЕЛЬ  H — РЕМОНТ  X — ЭМИ  V — КРУГОВОЙ АД (снаряд и СТИХИЯ)  B — КАМИКАДЗЕ 3×25  C — КОНУС  Z — ВОЛНА (кольцо)",
             "После смерти: ←/→ выбрать бота и ENTER — ВЗЯТЬ КОНТРОЛЬ над ним (v3.9). В командах — только за союзника.",
             "Вражеский ★ КОМАНДИР приказывает своим. Консоль (Ё): «помощь» с переносом строк и прокруткой.", 
         ]
@@ -2695,7 +2840,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.10 · АРСЕНАЛ", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.11 · ПРИЗРАК", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -3567,7 +3712,7 @@ class Game:
             (BUILDS[k]["name"] + ": КРУГ") if k == "kamikaze"
             else BUILDS[k]["name"] for k in BUILD_KEYS]
         fsize = 13
-        while fsize > 11 and sum(
+        while fsize > 10 and sum(
                 get_font(fsize).size(nm)[0] + 18 for nm in names) \
                 + gap * (len(names) - 1) > SCREEN_W - 24:
             fsize -= 1
@@ -3614,7 +3759,7 @@ class Game:
                 lines = [bd["desc"],
                          "выдаётся В НАЧАЛЕ каждого раунда",
                          "максимум ОДИН билд на танк",
-                         "v3.0: боты тоже получают случайные билды"]
+                         "боты ТОЖЕ берут билды — сами, каждый матч (v3.11)"]
                 if BUILD_KEYS[hov_bd] == "kamikaze":   # v3.9.2: форма шквала
                     lines.insert(1,
                                  "сейчас: %s — повторный клик (или 0)"
@@ -4058,10 +4203,13 @@ class Game:
             sfx.append("КАМИКАДЗЕ! ВОЛН ОСТАЛОСЬ %d" % t.kami_waves)
         if t.cone_charges > 0:                 # v3.10: «Конус»
             sfx.append(self._blast_tag(t, ["КОНУС ГОТОВ (C)"]))
-        if t.wave_charges > 0:                 # v3.10: «Волна» (стихия = урон)
-            names = [ELEMENTS[k]["name"] for k
-                     in getattr(t, "element_keys", []) if k in ELEMENTS]
-            sfx.append(" · ".join(["ВОЛНА ГОТОВ (Z)"] + names))
+        if t.wave_charges > 0:                 # v3.11: «Волна» — кольцо снарядов
+            sfx.append(self._blast_tag(t, ["ВОЛНА ГОТОВ (Z)"]))
+        if t.ghost_on:                         # v3.11: «Призрак»
+            if t.cloak_t > 0:
+                sfx.append("ПРИЗРАК: СКРЫТЕН %.1f" % t.cloak_t)
+            else:
+                sfx.append("ПРИЗРАК: ТЕНЬ ЧЕРЕЗ %.1f" % max(0.0, t.cloak_cd))
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
@@ -4358,6 +4506,11 @@ class Game:
         bg.fill((8, 10, 22, 190))
         self.screen.blit(bg, (x0, y0))
         pygame.draw.rect(self.screen, (70, 80, 120), (x0, y0, mw, mh), 1)
+        # v3.11: тоннели — фиолетовые прямоугольники (зоны без обзора)
+        for r in self.arena.tunnels:
+            pygame.draw.rect(self.screen, (120, 75, 190),
+                             (x0 + r.x * k, y0 + r.y * k,
+                              max(2.0, r.w * k), max(1.5, r.h * k)))
         for r in self.arena.obstacles:
             pygame.draw.rect(self.screen, (72, 84, 140),
                              (x0 + r.x * k, y0 + r.y * k,

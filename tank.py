@@ -21,7 +21,9 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       TURRET_CARRY, HE_MAX_CARRY, HE_CHARGES_PICKUP,
                       SHELL_TYPES, SHELL_AP_RELOAD_MULT,
                       SHELL_STAR_DAMAGE_MULT,
-                      WALL_TIER_ORDER, WALL_CARRY, WALL_BONUS_GIVE)
+                      WALL_TIER_ORDER, WALL_CARRY, WALL_BONUS_GIVE,
+                      GHOST_ALPHA, GHOST_SELF_ALPHA,
+                      GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME)
 from bullet import Bullet, ELEMENT_COLORS
 
 # уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
@@ -130,7 +132,13 @@ class Tank:
         self.cone_charges = 0      # v3.10: «Конус» (C) — только билд,
         # одноразовый залп конусом вперёд выбранным снарядом и стихией
         self.wave_charges = 0      # v3.10: «Волна» (Z) — только билд,
-        # одноразовая ударная волна-круг, бьёт всех чужаков по разу
+        # v3.11: одноразовое КОЛЬЦО из снарядов (переделано с ударной волны)
+        # v3.11: «ПРИЗРАК» (билд) — пассивная маскировка циклом: cloak_t > 0
+        # — скрытен остаток; cloak_cd — сколько ещё ВИДЕН до ухода в тень
+        self.ghost_on = False
+        self.cloak_t = 0.0
+        self.cloak_cd = 0.0
+        self.is_player = False     # v3.11: призрак-игрок видит себя ярче
         # v3.0: ТИП СНАРЯДА (std/he/ap/fire) — чем стреляет главное орудие;
         # у игрока выбирается в ангаре, ботам выдаётся случайный
         self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"
@@ -158,6 +166,13 @@ class Tank:
     @barrier_charges.setter
     def barrier_charges(self, v):
         self.wall_charges["std"] = max(0, int(v))
+
+    # ----- v3.11: «ПРИЗРАК» -----
+    @property
+    def cloaked(self):
+        """Танк СКРЫТЕН прямо сейчас (билд «Призрак»): cloak_t тикает.
+        Скрытого игнорируют боты (_pick_target) и турели (aim)."""
+        return self.ghost_on and self.cloak_t > 0.0
 
     def wall_total(self):
         """Стен всех ярусов в боекомплекте."""
@@ -320,6 +335,10 @@ class Tank:
     def try_shoot(self, bullets, effects, sounds):
         if not self.alive or self.cooldown > 0 or self.frozen_t > 0:
             return
+        if self.cloak_t > 0:
+            # v3.11 «ПРИЗРАК»: выстрел РАСКРЫВАЕТ маскировку — цикл заново
+            self.cloak_t = 0.0
+            self.cloak_cd = GHOST_VISIBLE_TIME
         rad = math.radians(self.angle)
         mx = self.x + math.cos(rad) * (self.radius + 14)
         my = self.y + math.sin(rad) * (self.radius + 14)
@@ -565,6 +584,15 @@ class Tank:
 
     # ----- отрисовка -----
     def draw(self, surf, ox=0, oy=0):
+        if self.cloaked:
+            # v3.11: скрытый призрак — еле заметный контур; сам игрок видит
+            # себя ярче (GHOST_SELF_ALPHA), чужие призраки — тускло
+            img = pygame.transform.rotate(self._sprite, -self.angle)
+            img = img.copy()
+            img.set_alpha(GHOST_SELF_ALPHA if self.is_player else GHOST_ALPHA)
+            rect = img.get_rect(center=(int(self.x + ox), int(self.y + oy)))
+            surf.blit(img, rect.topleft)
+            return                      # статусы/вспышки призрака не рисуем
         img = pygame.transform.rotate(self._sprite, -self.angle)
         rect = img.get_rect(center=(int(self.x + ox), int(self.y + oy)))
         surf.blit(img, rect.topleft)

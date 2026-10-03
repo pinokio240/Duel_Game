@@ -57,10 +57,11 @@ class Turret:
     def aim(self, game):
         """Ближайший живой ЧУЖОЙ танк в радиусе с чистой линией огня
         (или None). Чужак — тот, у кого team другой; дым обзор не режет
-        (турель на радарах), но стены — заслон."""
+        (турель на радарах), но стены — заслон.
+        v3.11: СКРЫТЫЙ «ПРИЗРАК» турели не виден."""
         best, best_d = None, TURRET_RANGE
         for t in game.tanks:
-            if not t.alive or t.team == self.team:
+            if not t.alive or t.team == self.team or t.cloaked:
                 continue
             d = math.hypot(t.x - self.x, t.y - self.y)
             if d >= best_d:

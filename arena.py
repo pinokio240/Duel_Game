@@ -22,7 +22,8 @@ from settings import (SCREEN_W, SCREEN_H, COL_WALL, COL_GRID, COL_BG,
                       BARRIER_LEN, ASSAULT_BUILD_OUT_TIER,
                       ASSAULT_BUILD_IN_TIER, ASSAULT_DEF_SPAWNS,
                       ASSAULT_ATK_SPAWNS, MAPS_DIR,
-                      EDITOR_COLS, EDITOR_ROWS, EDITOR_CELL)
+                      EDITOR_COLS, EDITOR_ROWS, EDITOR_CELL,
+                      TUNNEL_COUNT, TUNNEL_W, TUNNEL_H, TUNNEL_CLEAR)
 
 WALL_T = 60  # толщина внешних стен в исходной раскладке (масштабируется)
 
@@ -521,7 +522,71 @@ class Arena:
                         " [большая]" if team else "")
                      + (" ★" if tags else ""))
         self.dynamic = []   # живые препятствия (стены-барьеры), меняются в бою
+        # v3.11: ТОННЕЛИ — крытые галереи: НЕ стены (танк проезжает насквозь,
+        # пули летят), но режут ОБЗОР: кто внутри — не видит наружу, и его
+        # не видят (game.vision_blocked проверяет tunnel_idx)
+        self.tunnels = self._make_tunnels()
         self._bg = self._make_background()
+
+    def _make_tunnels(self):
+        """v3.11: расставить до TUNNEL_COUNT тоннелей в свободных местах.
+        Детерминированно: одна и та же карта всегда получает ОДНИ и те же
+        тоннели (справедливо и тестируемо). Кандидаты собираются по сетке,
+        затем жадно берём самые РАЗНЕСЁННЫЕ: первый — ближе к центру,
+        каждый следующий — максимально далеко от уже взятых. Тоннель не
+        задевает стены/препятствия (зазор ~два танка, чтобы можно было
+        въехать и выехать) и точки появления танков."""
+        s = self.w / float(SCREEN_W)
+        tw, th = int(TUNNEL_W * s), int(TUNNEL_H * s)
+        if tw < 120 or th < 60:            # совсем крошечные карты — нет мест
+            return []
+        pad = max(32, int(36 * s))         # зазор до стен: ~танк с запасом
+        spad = int(TUNNEL_CLEAR * s)       # зазор до точек появления
+        spawns = [pygame.Rect(px - spad, py - spad, spad * 2, spad * 2)
+                  for px, py in self.spawn_cols]
+        cands = []
+        step = 32
+        # две ОРИЕНТАЦИИ: горизонтальная (w x h) и вертикальная (h x w) —
+        # в плотных раскладках вертикальная галерея влезает там, где
+        # горизонтальной тесно
+        for cw, ch in ((tw, th), (th, tw)):
+            y0 = self.wall_t + pad
+            while y0 + ch + pad <= self.h - self.wall_t:
+                x0 = self.wall_t + pad
+                while x0 + cw + pad <= self.w - self.wall_t:
+                    r = pygame.Rect(x0, y0, cw, ch)
+                    box = r.inflate(pad * 2, pad * 2)
+                    if not any(box.colliderect(o) for o in self.rects) \
+                            and not any(box.colliderect(sp) for sp in spawns):
+                        cands.append(r)
+                    x0 += step
+                y0 += step
+        out = []
+        while cands and len(out) < TUNNEL_COUNT:
+            if not out:
+                # берём кандидата ближе к центру карты — не прячем тоннель
+                # в угол (но и не ровно в центре: смещение задаёт сетка)
+                cx, cy = self.w / 2.0, self.h / 2.0
+                out.append(min(cands, key=lambda r: (r.centerx - cx) ** 2
+                               + (r.centery - cy) ** 2))
+            else:
+                def _far(r):
+                    return min((r.centerx - q.centerx) ** 2
+                               + (r.centery - q.centery) ** 2 for q in out)
+                out.append(max(cands, key=_far))
+            # убираем кандидатов, ПЕРЕСЕКАЮЩИХСЯ с выбранным (с половинным
+            # запасом — между тоннелями зазор нужен меньше, чем до стен)
+            box = out[-1].inflate(pad, pad)
+            cands = [r for r in cands if not box.colliderect(r)]
+        return out
+
+    def tunnel_idx(self, x, y):
+        """v3.11: индекс тоннеля, в котором лежит точка (или None) —
+        основа стелс-логики обзора в game.vision_blocked."""
+        for i, r in enumerate(self.tunnels):
+            if r.collidepoint(x, y):
+                return i
+        return None
 
     def _add_props(self, obs):
         """Накидать 0..PROP_MAX случайных баррикад в свободные места —

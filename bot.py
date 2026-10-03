@@ -71,11 +71,13 @@ class BotAI:
 
     def _pick_target(self, game):
         """Ближайший живой ЧУЖОЙ танк — в FFA это может быть другой бот,
-        в командных режимах (2на2, босс) — только танк чужой команды (v2.2)."""
+        в командных режимах (2на2, босс) — только танк чужой команды (v2.2).
+        v3.11: СКРЫТЫЕ «ПРИЗРАКИ» не считаются целью — маскировка работает."""
         t = self.t
         cands = [o for o in game.tanks
                  if o is not t and o.alive
-                 and getattr(o, "team", None) != getattr(t, "team", None)]
+                 and getattr(o, "team", None) != getattr(t, "team", None)
+                 and not o.cloaked]
         if not cands:
             return None
         return min(cands, key=lambda o: (o.x - t.x) ** 2 + (o.y - t.y) ** 2)
@@ -534,6 +536,14 @@ class BotAI:
         # из 45 снарядов во все стороны: в упор почти не увернуться
         if t.nova_charges > 0 and dist < 340 and p.alive:
             game._fire_nova(t)
+        # v3.11: БОТЫ САМИ ПОЛЬЗУЮТСЯ ПЕРКАМИ-ЗАЛПАМИ (пул расширен):
+        # КОНУС — цель впереди на дистанции выстрела; ВОЛНА — кольцо
+        # снарядов, когда чужак близко (в радиусе кольца)
+        if t.cone_charges > 0 and dist < 430 and p.alive \
+                and self._visible(game, p.x, p.y):
+            game._fire_cone(t)
+        if t.wave_charges > 0 and dist < 520 and p.alive:
+            game._fire_wave(t)
 
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""

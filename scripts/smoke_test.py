@@ -1719,7 +1719,8 @@ def test_builds_v29():
                           PU_TURRET_MAX, NOVA_SHELLS, NOVA_DAMAGE_MULT,
                           KAMI_WAVES, KAMI_WAVE_SHELLS, KAMI_DAMAGE_MULT,
                           CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
-                          WAVE_SPEED, WAVE_MAX_R, WAVE_DAMAGE)
+                          VOLNA_SHELLS, VOLNA_DAMAGE_MULT,
+                          GHOST_CLOAK_TIME, GHOST_VISIBLE_TIME)
     from powerup import PU_INFO
     from bullet import Bullet
     from arena import Arena
@@ -1734,9 +1735,9 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: ДВЕНАДЦАТЬ штук (v3.10: +КОНУС и +ВОЛНА) -----
-    check("в игре ДВЕНАДЦАТЬ билдов (v3.10: +КОНУС и +ВОЛНА)",
-          len(BUILDS) == 12 and len(BUILD_KEYS) == 12)
+    # ----- каталог билдов: ТРИНАДЦАТЬ штук (v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК) -----
+    check("в игре ТРИНАДЦАТЬ билдов (v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК)",
+          len(BUILDS) == 13 and len(BUILD_KEYS) == 13)
     check("КАМИКАДЗЕ: 3 волны по 25, урон x1.30, одноразовый и ТОЛЬКО билд",
           BUILD_KEYS.index("kamikaze") == 9
           and BUILDS["kamikaze"]["items"] == {"kamikaze": 1}
@@ -1749,17 +1750,24 @@ def test_builds_v29():
           and NOVA_SHELLS == 45 and abs(NOVA_DAMAGE_MULT - 1.10) < 1e-9
           and "nova" not in PU_INFO)   # в бонусах на карте не появляется
     check("КОНУС (v3.10): 16 снарядов в секторе 70°, урон x1.15, ТОЛЬКО билд",
-          BUILD_KEYS[-2] == "cone"
+          BUILD_KEYS.index("cone") == 10
           and BUILDS["cone"]["items"] == {"cone": 1}
           and CONE_SHELLS == 16 and abs(CONE_SPREAD_DEG - 70.0) < 1e-9
           and abs(CONE_DAMAGE_MULT - 1.15) < 1e-9
           and "cone" not in PU_INFO)
-    check("ВОЛНА (v3.10): волна до 540 px со скоростью 420, урон 40, ТОЛЬКО билд",
-          BUILD_KEYS[-1] == "wave"
+    check("ВОЛНА (v3.11): КОЛЬЦО из %d снарядов, урон x%.2f, ТОЛЬКО билд"
+          % (VOLNA_SHELLS, VOLNA_DAMAGE_MULT),
+          BUILD_KEYS[-2] == "wave"
           and BUILDS["wave"]["items"] == {"wave": 1}
-          and abs(WAVE_SPEED - 420.0) < 1e-9
-          and abs(WAVE_MAX_R - 540.0) < 1e-9 and WAVE_DAMAGE == 40
+          and VOLNA_SHELLS == 24
+          and abs(VOLNA_DAMAGE_MULT - 1.10) < 1e-9
           and "wave" not in PU_INFO)
+    check("ПРИЗРАК (v3.11): маскировка циклом %g/%g с, ТОЛЬКО билд"
+          % (GHOST_CLOAK_TIME, GHOST_VISIBLE_TIME),
+          BUILD_KEYS[-1] == "ghost"
+          and BUILDS["ghost"]["items"] == {"ghost": 1}
+          and GHOST_CLOAK_TIME == 3.0 and GHOST_VISIBLE_TIME == 4.5
+          and "ghost" not in PU_INFO)
     check("первый билд — СТРОИТЕЛЬ (5 стен и 2 мины)",
           BUILD_KEYS[0] == "builder"
           and BUILDS["builder"]["items"] == {"barrier": 5, "mine": 2})
@@ -1832,8 +1840,9 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 13 кнопок билдов («НЕТ» + 12, v3.10: +КОНУС и ВОЛНА)",
-          len(zones) == 13)
+    check("в ангаре 14 кнопок билдов («НЕТ» + 13,"
+          " v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК)",
+          len(zones) == 14)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -4791,13 +4800,13 @@ def test_v310_arsenal():
     x моды; нейтральная учитывается калибром (43, как в v3.9); 2) два
     новых билда-способности по просьбе «билды которые делают круг и
     конус»: КОНУС (C — 16 снарядов конусом 70° вперёд) и ВОЛНА (Z —
-    ударная волна-круг до 540 px, бьёт каждого чужака ОДИН раз, стены
-    не спасают, союзники целы). Ботам эти билды не достаются."""
+    с v3.11 по репорту «я думал волна из снарядов будет» это КОЛЬЦО ИЗ
+    СНАРЯДОВ, см. test_v311_ghost_tunnels; геометрия заряда — тут)."""
     import math
     from game import Game
     from settings import (BULLET_DAMAGE, KAMI_DAMAGE_MULT, KAMI_WAVE_SHELLS,
                           CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
-                          WAVE_DAMAGE, WAVE_MAX_R, WAVE_SPEED,
+                          VOLNA_SHELLS, VOLNA_DAMAGE_MULT,
                           SHELL_KEYS, SHELL_STAR_DAMAGE_MULT, BUILD_KEYS,
                           ELEMENTS)
     from arena import Arena, EMPTY_VARIANT
@@ -4904,7 +4913,7 @@ def test_v310_arsenal():
           and min(rel) >= -CONE_SPREAD_DEG / 2 - 0.1
           and max(rel) - min(rel) > CONE_SPREAD_DEG - 1)
 
-    # --- ВОЛНА: бьёт чужака ОДИН раз, союзники и владелец целы ---
+    # --- ВОЛНА (v3.11): КОЛЬЦО ИЗ СНАРЯДОВ вместо ударной волны ---
     gw = Game()
     gw.mode = 6                                  # 2на2: есть союзник
     gw.sel_build = BUILD_KEYS.index("wave")
@@ -4917,47 +4926,237 @@ def test_v310_arsenal():
     tags = gw._status_tags(pw)
     check("HUD: ВОЛНА ГОТОВ (Z)", any("ВОЛНА ГОТОВ (Z)" in s for s in tags))
     pw.wave_charges = 0
-    check("без заряда ВОЛНА не запускается",
-          not gw._fire_wave(pw) and len(gw.shockwaves) == 0)
-    pw.wave_charges = 1
-    ally = next(b for b in gw.bots if gw.tank_team.get(b) == 0)
-    foe = next(b for b in gw.bots if gw.tank_team.get(b) != 0)
-    pw.x, pw.y = 900, 600
-    foe.x, foe.y = 1150, 600                     # 250 px — волна достанет
-    ally.x, ally.y = 980, 600                    # рядом — но СВОЙ
+    check("без заряда ВОЛНА не стреляет",
+          not gw._fire_wave(pw) and len(gw.bullets) == 0)
     fx, snd = _Fx(), _Snd()
-    pw._die(fx, snd)                             # мёртвый не запускает
+    pw._die(fx, snd)                             # мёртвый не стреляет
     check("мёртвый волну не запускает", not gw._fire_wave(pw))
     pw.alive = True
-    check("Z запускает УДАРНУЮ ВОЛНУ", gw._fire_wave(pw)
-          and len(gw.shockwaves) == 1 and pw.wave_charges == 0)
-    exp = round(WAVE_DAMAGE * ELEMENTS["none"]["damage_mult"])
-    check("волна несёт урон %d (x калибр нейтральной)" % exp,
-          gw.shockwaves[0]["dmg"] == exp)
-    hp0 = foe.hp
-    for _ in range(int(WAVE_MAX_R / WAVE_SPEED / (1 / 60.0)) + 5):
-        gw._waves_step(1 / 60.0)
-    check("чужак получил %d урона РОВНО ОДИН раз (%d -> %d)"
-          % (exp, hp0, foe.hp),
-          hp0 - foe.hp == exp)
-    check("союзник и владелец целы",
-          ally.alive and ally.hp == ally.max_hp)
-    check("волна угасла на радиусе %g" % WAVE_MAX_R,
-          len(gw.shockwaves) == 0)
+    gw.ais = []
+    gw.bullets = []
+    pw.x, pw.y, pw.angle = 900, 600, 0.0
+    pw.wave_charges = 1
+    check("Z выпускает КОЛЬЦО снарядов, заряд потрачен",
+          gw._fire_wave(pw) and pw.wave_charges == 0)
+    exp = round(BULLET_DAMAGE * VOLNA_DAMAGE_MULT
+                * ELEMENTS["none"]["damage_mult"])
+    angs = sorted(math.degrees(math.atan2(b.vy, b.vx)) % 360.0
+                  for b in gw.bullets)
+    gaps = [angs[i + 1] - angs[i] for i in range(len(angs) - 1)]
+    gaps.append(angs[0] + 360.0 - angs[-1])
+    step = 360.0 / VOLNA_SHELLS
+    check("кольцо: %d снарядов равномерно через %g° (std, урон %d)"
+          % (VOLNA_SHELLS, step, exp),
+          len(gw.bullets) == VOLNA_SHELLS
+          and all(b.shell == "std" and b.damage == exp for b in gw.bullets)
+          and max(gaps) - min(gaps) < 1e-4
+          and abs(sum(gaps) / len(gaps) - step) < 1e-4)
+    check("это снаряды, а не ударная волна v3.10 (shockwaves удалён)",
+          not hasattr(gw, "shockwaves"))
 
-    # --- ботам новые билды не достаются ---
+    # --- v3.11: боты сами берут перки — пул ВСЕ билды, кроме КАМИКАДЗЕ ---
     gb = Game()
     gb.mode = 20
     gb.start_match()
-    check("в 10на10 ни у одного бота нет КОНУСА/ВОЛНЫ/КАМИКАДЗЕ",
-          all(b.cone_charges == 0 and b.wave_charges == 0
-              and b.kamikaze_charges == 0 for b in gb.bots))
+    check("в 10на10 ни у одного бота нет КАМИКАДЗЕ",
+          all(b.kamikaze_charges == 0 for b in gb.bots))
+    import random as _rnd
+    pool = [k for k in BUILD_KEYS if k != "kamikaze"]
+    got = set()
+    for _ in range(500):
+        got.add(_rnd.choice(pool))
+    check("ботский пул (%d билдов) даёт КОНУС/ВОЛНУ/ПРИЗРАКА,"
+          " но не КАМИКАДЗЕ" % len(pool),
+          {"cone", "wave", "ghost"} <= got and "kamikaze" not in got)
 
     # --- меню рисуется с новой версией ---
     gm = Game()
     gm.state = "menu"
     gm.draw()
-    check("меню v3.10 · АРСЕНАЛ рисуется", True)
+    check("меню v3.11 · ПРИЗРАК рисуется", True)
+
+
+def test_v311_ghost_tunnels():
+    """v3.11 «ПРИЗРАК» — по репорту игрока («я думал волна из снарядов
+    будет… нехватает вида от первого лица… туннелей… классов например
+    призрак делается иногда невидимым… боты могут сами себе брать перки»):
+    1) ПРИЗРАК — 13-й билд: маскировка циклом, выстрел раскрывает, боты
+    (_pick_target) и турели (aim) скрытого игнорируют, рендер тусклый;
+    2) ТОННЕЛИ на картах — крытые галереи режут обзор (внутри/снаружи
+    не видят друг друга, внутри одной — видно), не стены;
+    3) ВИД БАШНИ (F1) — мапинг «курс вверх» без зеркала + draw();
+    4) боты сами пользуются КОНУСОМ и ВОЛНОЙ (_use_items)."""
+    import math
+    from game import Game
+    from settings import (BUILD_KEYS, GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME,
+                          VOLNA_SHELLS, TUNNEL_COUNT, TUNNEL_PBR)
+    from arena import Arena, EMPTY_VARIANT
+    from bot import BotAI
+    from turret import Turret
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # --- 1) ПРИЗРАК: цикл маскировки ---
+    g = Game()
+    g.mode = 3
+    g.sel_build = BUILD_KEYS.index("ghost")
+    g.start_match()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    p = g.player
+    check("билд «ПРИЗРАК» включил пассивку (старт с видимой фазы)",
+          p.ghost_on and not p.cloaked and p.cloak_cd > 0)
+    tags = g._status_tags(p)
+    check("HUD: ПРИЗРАК: ТЕНЬ ЧЕРЕЗ N",
+          any("ПРИЗРАК: ТЕНЬ ЧЕРЕЗ" in s for s in tags))
+    for _ in range(int(GHOST_VISIBLE_TIME * 60) + 4):
+        g._ghost_step(1 / 60.0)
+    check("через %g с призрак СКРЫТЕН" % GHOST_VISIBLE_TIME,
+          p.cloaked and p.cloak_t > 0)
+    tags = g._status_tags(p)
+    check("HUD: ПРИЗРАК: СКРЫТЕН N",
+          any("ПРИЗРАК: СКРЫТЕН" in s for s in tags))
+    for _ in range(int(GHOST_CLOAK_TIME * 60) + 4):
+        g._ghost_step(1 / 60.0)
+    check("маскировка спала САМА — цикл пошёл заново",
+          not p.cloaked and p.cloak_cd > 0)
+    for _ in range(int(GHOST_VISIBLE_TIME * 60) + 4):
+        g._ghost_step(1 / 60.0)
+    check("призрак снова ушёл в тень", p.cloaked)
+    p.cooldown = 0.0
+    p.cloak_t = min(p.cloak_t, 1.0)
+    n0 = len(g.bullets)
+    p.try_shoot(g.bullets, fx, snd)
+    check("выстрел РАСКРЫВАЕТ призрака (и стреляет)",
+          not p.cloaked and p.cloak_cd > 0 and len(g.bullets) > n0)
+    g.draw()
+    check("draw() с видимым и скрытым танком не падает", True)
+
+    # --- боты и турель скрытого не видят ---
+    g2 = Game()
+    g2.mode = 3
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    g2.arena = Arena(EMPTY_VARIANT)
+    hunter = g2.player
+    prey = g2.bots[0]
+    for b in g2.bots[1:]:
+        b._die(fx, snd)                  # изолируем пару охотник-жертва
+    prey.ghost_on = True
+    hunter.x, hunter.y = prey.x + 400, prey.y
+    ai = BotAI(hunter, 2)
+    check("без маскировки бот видит цель", ai._pick_target(g2) is prey)
+    prey.cloak_t = 1.0
+    check("СКРЫТОГО бота _pick_target НЕ видит",
+          ai._pick_target(g2) is None)
+    prey.cloak_t = 0.0
+    tr = Turret(prey.x - 300, prey.y, hunter)
+    check("без маскировки турель видит цель", tr.aim(g2) is prey)
+    prey.cloak_t = 1.0
+    check("СКРЫТОГО турель НЕ видит", tr.aim(g2) is None)
+
+    # --- 2) ТОННЕЛИ: расстановка и обзор ---
+    g3 = Game()
+    g3.mode = 3
+    g3.start_match()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.ais = []
+    a = g3.arena = Arena(EMPTY_VARIANT)
+    check("на карте есть ТОННЕЛИ (%d шт на пустой карте)" % TUNNEL_COUNT,
+          len(a.tunnels) == TUNNEL_COUNT)
+    check("тоннели не задевают стены и препятствия",
+          all(not t.colliderect(o) for t in a.tunnels for o in a.rects))
+    t0, t1 = a.tunnels[0], a.tunnels[1]
+    check("тоннели разнесены (не пересекаются даже с запасом)",
+          not t0.inflate(80, 80).colliderect(t1))
+    ins = (t0.centerx, t0.centery)
+    out = (t0.centerx - 1200, t0.centery) \
+        if t0.centerx > a.w / 2 else (t0.centerx + 1200, t0.centery)
+    check("из тоннеля наружу НЕ ВИДНО (vision_blocked)",
+          g3.vision_blocked(ins[0], ins[1], out[0], out[1]))
+    check("снаружи в тоннель тоже НЕ ВИДНО",
+          g3.vision_blocked(out[0], out[1], ins[0], ins[1]))
+    check("внутри ОДНОГО тоннеля видно",
+          not g3.vision_blocked(ins[0], ins[1],
+                                t0.centerx + 20, t0.centery))
+    check("между РАЗНЫМИ тоннелями НЕ ВИДНО",
+          g3.vision_blocked(t0.centerx, t0.centery, t1.centerx, t1.centery))
+    check("«вупорнот» %g: цель у стены галереи ВИДНА (PBR)" % TUNNEL_PBR,
+          not g3.vision_blocked(t0.centerx, t0.centery,
+                                t0.centerx + 230, t0.centery))
+    check("вдали (%g+) галерея по-прежнему прячет" % (TUNNEL_PBR + 40),
+          g3.vision_blocked(t0.centerx, t0.centery,
+                            t0.centerx + 300, t0.centery))
+    check("тоннель НЕ стена: центр свободен для танка",
+          not a.circle_collides(t0.centerx, t0.centery, 24))
+    g3.draw()
+    check("draw() рисует крыши тоннелей", True)
+
+    # --- 3) ВИД БАШНИ (F1): мапинг и отрисовка ---
+    g4 = Game()
+    g4.mode = 3
+    g4.start_match()
+    g4.state = "fight"
+    g4._fake_keys = FakeKeys(())
+    g4.ais = []
+    pc = g4.player
+    pc.x, pc.y, pc.angle = 1200, 800, 0.0
+    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F1))
+    check("F1 включает ВИД БАШНИ", g4.cockpit)
+    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F1))
+    check("F1 повторно выключает", not g4.cockpit)
+    g4.cockpit = True
+    phi, rx, ry = Game._cockpit_map(pc.x + 100, pc.y, 0.0, pc.x, pc.y)
+    check("курс 0°: точка ВПЕРЕДИ уходит ВВЕРХ (0, -100), phi=90",
+          abs(phi - 90.0) < 1e-6 and abs(rx) < 1e-6 and abs(ry + 100) < 1e-6)
+    phi, rx, ry = Game._cockpit_map(pc.x, pc.y + 100, 0.0, pc.x, pc.y)
+    check("правый борт (юг при курсе 0°) уходит ВПРАВО (100, 0)",
+          abs(rx - 100) < 1e-6 and abs(ry) < 1e-6)
+    phi, rx, ry = Game._cockpit_map(pc.x, pc.y - 100, 0.0, pc.x, pc.y)
+    check("левый борт (север) уходит ВЛЕВО (-100, 0)",
+          abs(rx + 100) < 1e-6 and abs(ry) < 1e-6)
+    phi, rx, ry = Game._cockpit_map(pc.x, pc.y + 100, 90.0, pc.x, pc.y)
+    check("курс 90° (юг): точка ВПЕРЕДИ снова ВВЕРХ",
+          abs(rx) < 1e-6 and abs(ry + 100) < 1e-6)
+    g4.draw()
+    check("draw() с ВИДОМ БАШНИ не падает", True)
+    g4.cockpit = False
+
+    # --- 4) боты сами пользуются КОНУСОМ и ВОЛНОЙ ---
+    g5 = Game()
+    g5.mode = 3
+    g5.start_match()
+    g5.state = "fight"
+    g5._fake_keys = FakeKeys(())
+    g5.ais = []
+    g5.arena = Arena(EMPTY_VARIANT)
+    bot = g5.bots[0]
+    bot.cone_charges = 1
+    bot.wave_charges = 1
+    bot.x, bot.y, bot.angle = 1200, 800, 0.0
+    g5.player.x, g5.player.y = bot.x + 250, bot.y   # цель прямо впереди
+    ai2 = BotAI(bot, 2)
+    ai2.target = g5.player
+    n0 = len(g5.bullets)
+    ai2._use_items(g5, 250.0)
+    fired = len(g5.bullets) - n0
+    check("бот САМ выпалил КОНУС и/или ВОЛНУ (%d снарядов), заряды ушли"
+          % fired,
+          fired >= VOLNA_SHELLS and bot.cone_charges == 0
+          and bot.wave_charges == 0)
 
 
 if __name__ == "__main__":
@@ -5000,6 +5199,7 @@ if __name__ == "__main__":
     test_v39_kamikaze_control()
     test_v392_kami_pattern()
     test_v310_arsenal()
+    test_v311_ghost_tunnels()
     test_bigmap()
     test_points()
     test_score_table()
