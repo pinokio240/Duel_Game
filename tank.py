@@ -23,7 +23,8 @@ from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, CURSES, BLESSINGS
                       SHELL_STAR_DAMAGE_MULT,
                       WALL_TIER_ORDER, WALL_CARRY, WALL_BONUS_GIVE,
                       GHOST_ALPHA, GHOST_SELF_ALPHA,
-                      GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME)
+                      GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME,
+                      NITRO_SPEED_MULT, NITRO_ARMOR_DOWN, NITRO_CD)
 from bullet import Bullet, ELEMENT_COLORS
 
 # уникальный номер команды для каждого танка по умолчанию (FFA — все чужие);
@@ -139,6 +140,13 @@ class Tank:
         self.cloak_t = 0.0
         self.cloak_cd = 0.0
         self.is_player = False     # v3.11: призрак-игрок видит себя ярче
+        # v3.12: «НИТРО» (билд) — форсаж по F1: nitro_t > 0 — горит
+        # (скорость xNITRO_SPEED_MULT, броня слабее на NITRO_ARMOR_DOWN);
+        # nitro_cd — перезарядка кнопки. Включение платит NITRO_HP_COST HP
+        self.nitro_on = False
+        self.nitro_t = 0.0
+        self.nitro_cd = 0.0
+        self._nitro_was_on = False  # форсаж горел на прошлом тике (для кулдауна)
         # v3.0: ТИП СНАРЯДА (std/he/ap/fire) — чем стреляет главное орудие;
         # у игрока выбирается в ангаре, ботам выдаётся случайный
         self.shell_type = shell_type if shell_type in SHELL_TYPES else "std"
@@ -216,6 +224,8 @@ class Tank:
             # ослабить (Текущий бак) или усилить (Гоночный бак) турбо
             s *= (BOOST_PERK_MULT if self.perk_key == BOOST_PERK_KEY
                   else BOOST_MULT) * self.mods["boost_mult"]
+        if self.nitro_t > 0:
+            s *= NITRO_SPEED_MULT   # v3.12: форсаж «НИТРО» (F1)
         return s
 
     @property
@@ -426,7 +436,11 @@ class Tank:
             return
         if self.shield_t > 0:
             dmg *= 0.4
-        dmg = max(5, round(dmg - (0 if pierce else self.armor)))
+        # v3.12: пока горит НИТРО, броня слабее на NITRO_ARMOR_DOWN
+        # (ниже нуля не падает; бронебойный броню игнорирует как раньше)
+        arm = (max(0, self.armor - NITRO_ARMOR_DOWN)
+               if self.nitro_t > 0 else self.armor)
+        dmg = max(5, round(dmg - (0 if pierce else arm)))
         self.hp -= dmg
         self.flash = 0.12
         effects.float_text(self.x, self.y - 36, "-%d" % dmg, (255, 130, 130))
@@ -571,6 +585,11 @@ class Tank:
         self.shield_t = max(0.0, self.shield_t - dt)
         self.boost_t = max(0.0, self.boost_t - dt)
         self.rapid_t = max(0.0, self.rapid_t - dt)
+        self.nitro_t = max(0.0, self.nitro_t - dt)   # v3.12: НИТРО
+        if self.nitro_t == 0.0 and self._nitro_was_on:
+            self.nitro_cd = NITRO_CD   # форсаж сгорел — пошла перезарядка
+        self._nitro_was_on = self.nitro_t > 0.0
+        self.nitro_cd = max(0.0, self.nitro_cd - dt)
         was_frozen = self.frozen_t > 0
         self.frozen_t = max(0.0, self.frozen_t - dt)
         if was_frozen and self.frozen_t <= 0.0:

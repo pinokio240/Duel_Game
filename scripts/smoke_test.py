@@ -1735,9 +1735,9 @@ def test_builds_v29():
     class _Snd:
         def play(self, *a, **k): pass
 
-    # ----- каталог билдов: ТРИНАДЦАТЬ штук (v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК) -----
-    check("в игре ТРИНАДЦАТЬ билдов (v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК)",
-          len(BUILDS) == 13 and len(BUILD_KEYS) == 13)
+    # ----- каталог билдов: ЧЕТЫРНАДЦАТЬ штук (v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК, v3.12: +НИТРО) -----
+    check("в игре ЧЕТЫРНАДЦАТЬ билдов (v3.11: +ПРИЗРАК, v3.12: +НИТРО)",
+          len(BUILDS) == 14 and len(BUILD_KEYS) == 14)
     check("КАМИКАДЗЕ: 3 волны по 25, урон x1.30, одноразовый и ТОЛЬКО билд",
           BUILD_KEYS.index("kamikaze") == 9
           and BUILDS["kamikaze"]["items"] == {"kamikaze": 1}
@@ -1757,14 +1757,14 @@ def test_builds_v29():
           and "cone" not in PU_INFO)
     check("ВОЛНА (v3.11): КОЛЬЦО из %d снарядов, урон x%.2f, ТОЛЬКО билд"
           % (VOLNA_SHELLS, VOLNA_DAMAGE_MULT),
-          BUILD_KEYS[-2] == "wave"
+          BUILD_KEYS.index("wave") == 11
           and BUILDS["wave"]["items"] == {"wave": 1}
           and VOLNA_SHELLS == 24
           and abs(VOLNA_DAMAGE_MULT - 1.10) < 1e-9
           and "wave" not in PU_INFO)
     check("ПРИЗРАК (v3.11): маскировка циклом %g/%g с, ТОЛЬКО билд"
           % (GHOST_CLOAK_TIME, GHOST_VISIBLE_TIME),
-          BUILD_KEYS[-1] == "ghost"
+          BUILD_KEYS.index("ghost") == 12
           and BUILDS["ghost"]["items"] == {"ghost": 1}
           and GHOST_CLOAK_TIME == 3.0 and GHOST_VISIBLE_TIME == 4.5
           and "ghost" not in PU_INFO)
@@ -1840,9 +1840,9 @@ def test_builds_v29():
     g2.state = "select"
     g2.draw()
     zones = [r for r, kd, d in g2._click_zones if kd == "build"]
-    check("в ангаре 14 кнопок билдов («НЕТ» + 13,"
-          " v3.10: +КОНУС/ВОЛНА, v3.11: +ПРИЗРАК)",
-          len(zones) == 14)
+    check("в ангаре 15 кнопок билдов («НЕТ» + 14,"
+          " v3.11: +ПРИЗРАК, v3.12: +НИТРО)",
+          len(zones) == 15)
     z0 = next(r for r, kd, d in g2._click_zones
               if kd == "build" and d == 0)
     g2.on_click(z0.center)
@@ -4012,6 +4012,12 @@ def test_v36_shtab():
     foe.hp = foe.max_hp = 10 ** 9
     a.order = "cover"
     a.order_t = 0.0
+    # фиксируем скорость: билд и шасси у бота СЛУЧАЙНЫЕ, а СТРОЙКА ВЕКА
+    # на тяжёлом шасси ползёт ~40 px/s и не успевает за 5 с (флак)
+    a.chassis = CHASSIS["light"]
+    a.hull = HULL["light"]
+    a.mods["speed_mult"] = 1.0
+    a.nitro_on = False
     ai = BotAI(a, 2)
     ai.target = foe
     d0 = math.hypot(a.x - gc.player.x, a.y - gc.player.y)
@@ -4965,15 +4971,15 @@ def test_v310_arsenal():
     got = set()
     for _ in range(500):
         got.add(_rnd.choice(pool))
-    check("ботский пул (%d билдов) даёт КОНУС/ВОЛНУ/ПРИЗРАКА,"
+    check("ботский пул (%d билдов) даёт КОНУС/ВОЛНУ/ПРИЗРАКА/НИТРО,"
           " но не КАМИКАДЗЕ" % len(pool),
-          {"cone", "wave", "ghost"} <= got and "kamikaze" not in got)
+          {"cone", "wave", "ghost", "nitro"} <= got and "kamikaze" not in got)
 
     # --- меню рисуется с новой версией ---
     gm = Game()
     gm.state = "menu"
     gm.draw()
-    check("меню v3.11 · ПРИЗРАК рисуется", True)
+    check("меню v3.12 · НИТРО рисуется", True)
 
 
 def test_v311_ghost_tunnels():
@@ -4984,7 +4990,7 @@ def test_v311_ghost_tunnels():
     (_pick_target) и турели (aim) скрытого игнорируют, рендер тусклый;
     2) ТОННЕЛИ на картах — крытые галереи режут обзор (внутри/снаружи
     не видят друг друга, внутри одной — видно), не стены;
-    3) ВИД БАШНИ (F1) — мапинг «курс вверх» без зеркала + draw();
+    3) ВИД БАШНИ (F2 с v3.12) — мапинг «курс вверх» без зеркала + draw();
     4) боты сами пользуются КОНУСОМ и ВОЛНОЙ (_use_items)."""
     import math
     from game import Game
@@ -5105,7 +5111,7 @@ def test_v311_ghost_tunnels():
     g3.draw()
     check("draw() рисует крыши тоннелей", True)
 
-    # --- 3) ВИД БАШНИ (F1): мапинг и отрисовка ---
+    # --- 3) ВИД БАШНИ (F2 с v3.12): мапинг и отрисовка ---
     g4 = Game()
     g4.mode = 3
     g4.start_match()
@@ -5114,10 +5120,10 @@ def test_v311_ghost_tunnels():
     g4.ais = []
     pc = g4.player
     pc.x, pc.y, pc.angle = 1200, 800, 0.0
-    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F1))
-    check("F1 включает ВИД БАШНИ", g4.cockpit)
-    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F1))
-    check("F1 повторно выключает", not g4.cockpit)
+    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F2))
+    check("F2 включает ВИД БАШНИ", g4.cockpit)
+    g4.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F2))
+    check("F2 повторно выключает", not g4.cockpit)
     g4.cockpit = True
     phi, rx, ry = Game._cockpit_map(pc.x + 100, pc.y, 0.0, pc.x, pc.y)
     check("курс 0°: точка ВПЕРЕДИ уходит ВВЕРХ (0, -100), phi=90",
@@ -5157,6 +5163,164 @@ def test_v311_ghost_tunnels():
           % fired,
           fired >= VOLNA_SHELLS and bot.cone_charges == 0
           and bot.wave_charges == 0)
+
+
+def test_v312_nitro():
+    """v3.12 «НИТРО» — по репорту игрока: «сделай навык (перк) ф1 крч
+    дает 2.5Х скорости взамен на -5 брони и -10 хп»:
+    1) билд №14 НИТРО (F1): форсаж x2.5 на 4 с, плата 10 HP сразу
+       (не убивает) и -5 брони, пока горит; перезарядка 9 с;
+    2) ВИД БАШНИ переехал на F2 (F1 занял НИТРО);
+    3) боты сами жмут форсаж в погоне (дистанция > 480)."""
+    from game import Game
+    from settings import (BUILD_KEYS, BUILDS, NITRO_SPEED_MULT, NITRO_TIME,
+                          NITRO_CD, NITRO_HP_COST, NITRO_ARMOR_DOWN)
+    from powerup import PU_INFO
+    from arena import Arena, EMPTY_VARIANT
+    from bot import BotAI
+
+    class _Fx:
+        def burst(self, *a, **k): pass
+        def ring(self, *a, **k): pass
+        def float_text(self, *a, **k): pass
+        def shake(self, *a, **k): pass
+
+    class _Snd:
+        def play(self, *a, **k): pass
+
+    fx, snd = _Fx(), _Snd()
+
+    # --- 1) каталог: 14-й билд с верными константами ---
+    check("НИТРО — 14-й билд, клавиша F1 в описании, в бонусах НЕ появляется",
+          BUILD_KEYS.index("nitro") == 13
+          and BUILDS["nitro"]["items"] == {"nitro": 1}
+          and "F1" in BUILDS["nitro"]["desc"]
+          and "nitro" not in PU_INFO)
+    check("константы НИТРО: x2.5 на 4 с, перезарядка 9 с, -10 HP, -5 брони",
+          abs(NITRO_SPEED_MULT - 2.5) < 1e-9
+          and abs(NITRO_TIME - 4.0) < 1e-9
+          and abs(NITRO_CD - 9.0) < 1e-9
+          and NITRO_HP_COST == 10 and NITRO_ARMOR_DOWN == 5)
+
+    # --- 2) механика форсажа ---
+    g = Game()
+    g.mode = 3
+    g.sel_build = BUILD_KEYS.index("nitro")
+    g.start_match()
+    g.state = "fight"
+    g._fake_keys = FakeKeys(())
+    g.ais = []
+    p = g.player
+    check("билд НИТРО дошёл до танка (форсаж выключен)",
+          p.nitro_on and p.nitro_t == 0.0 and p.nitro_cd == 0.0)
+    tags = g._status_tags(p)
+    check("HUD: НИТРО ГОТОВ (F1)",
+          any("НИТРО ГОТОВ (F1)" in s for s in tags))
+    check("без билда НИТРО не жмётся",
+          not g._use_nitro(Tank(0, 0, 0, "medium", "medium", COL))
+          and p.nitro_t == 0.0)
+    hp0, spd0 = p.hp, p.speed
+    check("включение: HP -%d сразу, таймер пошёл" % NITRO_HP_COST,
+          g._use_nitro(p)
+          and abs(p.hp - (hp0 - NITRO_HP_COST)) < 1e-6
+          and abs(p.nitro_t - NITRO_TIME) < 1e-9)
+    check("скорость выросла ровно в %.1f раза" % NITRO_SPEED_MULT,
+          abs(p.speed / spd0 - NITRO_SPEED_MULT) < 1e-6)
+    tags = g._status_tags(p)
+    check("HUD: НИТРО: ФОРСАЖ N (броня -%d)" % NITRO_ARMOR_DOWN,
+          any("НИТРО: ФОРСАЖ" in s and "броня -%d" % NITRO_ARMOR_DOWN in s
+              for s in tags))
+    check("пока форсаж горит, повторно не жмётся", not g._use_nitro(p))
+
+    # броня при форсаже: среднее шасси (броня 6) ловит 30 урона как 29,
+    # без форсажа — как 24
+    tm = Tank(0, 0, 0, "medium", "medium", COL)
+    tm.nitro_on = True
+    tm.nitro_t = 1.0
+    tm.hp = 100.0
+    tm.take_damage(30, fx, snd)
+    d_on = 100 - tm.hp
+    tm2 = Tank(0, 0, 0, "medium", "medium", COL)
+    tm2.hp = 100.0
+    tm2.take_damage(30, fx, snd)
+    d_off = 100 - tm2.hp
+    check("броня слабее на %d ТОЛЬКО при горящем форсаже (%d против %d)"
+          % (NITRO_ARMOR_DOWN, d_on, d_off),
+          d_on == 30 - max(0, 6 - NITRO_ARMOR_DOWN) and d_off == 30 - 6)
+
+    # плата не убивает: при 5 HP остаётся 1
+    p.hp = 5.0
+    p.nitro_t = 0.0
+    p.nitro_cd = 0.0
+    check("при 5 HP форсаж НЕ убивает (остаётся 1 HP)",
+          g._use_nitro(p) and p.hp == 1.0 and p.alive)
+    p.hp = 90.0
+
+    # конец форсажа: скорость и броня вернулись, стартовала перезарядка
+    for _ in range(int(NITRO_TIME * 60) + 4):
+        p.update(1 / 60.0)
+    check("форсаж кончился сам: таймер 0, пошла перезарядка",
+          p.nitro_t == 0.0 and p.nitro_cd > 0)
+    check("скорость вернулась", abs(p.speed / spd0 - 1.0) < 1e-6)
+    tags = g._status_tags(p)
+    check("HUD: НИТРО: ПЕРЕЗАРЯДКА N",
+          any("НИТРО: ПЕРЕЗАРЯДКА" in s for s in tags))
+    check("перезарядка блокирует кнопку", not g._use_nitro(p))
+    for _ in range(int(NITRO_CD * 60) + 4):
+        p.update(1 / 60.0)
+    hp1 = p.hp
+    check("перезарядка прошла — НИТРО снова жмётся (снова -%d HP)"
+          % NITRO_HP_COST,
+          g._use_nitro(p) and abs(p.hp - (hp1 - NITRO_HP_COST)) < 1e-6)
+
+    # --- 3) клавиши в бою: F1 — НИТРО, F2 — ВИД БАШНИ ---
+    g2 = Game()
+    g2.mode = 3
+    g2.sel_build = BUILD_KEYS.index("nitro")
+    g2.start_match()
+    g2.state = "fight"
+    g2._fake_keys = FakeKeys(())
+    g2.ais = []
+    hp2 = g2.player.hp
+    g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F1))
+    check("клавиша F1 в бою включает НИТРО (и снимает HP)",
+          g2.player.nitro_t > 0 and g2.player.hp == hp2 - NITRO_HP_COST)
+    g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F2))
+    check("клавиша F2 включает ВИД БАШНИ (переехал с F1)", g2.cockpit)
+    g2.on_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_F2))
+    check("F2 повторно выключает вид башни", not g2.cockpit)
+    g2.draw()
+    check("draw() с горящим форсажем не падает", True)
+
+    # --- 4) боты сами жмут НИТРО в погоне ---
+    g3 = Game()
+    g3.mode = 3
+    g3.start_match()
+    g3.state = "fight"
+    g3._fake_keys = FakeKeys(())
+    g3.ais = []
+    g3.arena = Arena(EMPTY_VARIANT)
+    bot = g3.bots[0]
+    bot.nitro_on = True
+    bot.x, bot.y = 1200, 800
+    g3.player.x, g3.player.y = bot.x + 640, bot.y   # цель далеко (> 480)
+    ai = BotAI(bot, 2)
+    ai.target = g3.player
+    ai._use_items(g3, 640.0)
+    check("бот с НИТРО сам жмёт форсаж в погоне (цель за 640)",
+          bot.nitro_t > 0 and bot.hp == bot.max_hp - NITRO_HP_COST)
+    bot.nitro_t = 0.0
+    bot.nitro_cd = 0.0
+    bot.hp = 12.0
+    ai._use_items(g3, 640.0)
+    check("при 12 HP бот НЕ жмёт НИТРО (плата %d опасна)" % NITRO_HP_COST,
+          bot.nitro_t == 0.0)
+
+    # новый раунд — перк выдаётся заново, форсаж сброшен
+    g._reset_round()
+    check("новый раунд: НИТРО снова у танка, форсаж выключен",
+          g.player.nitro_on and g.player.nitro_t == 0.0
+          and g.player.nitro_cd == 0.0)
 
 
 if __name__ == "__main__":
@@ -5200,6 +5364,7 @@ if __name__ == "__main__":
     test_v392_kami_pattern()
     test_v310_arsenal()
     test_v311_ghost_tunnels()
+    test_v312_nitro()
     test_bigmap()
     test_points()
     test_score_table()

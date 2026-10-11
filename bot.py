@@ -13,7 +13,7 @@ v3.2: ШТУРМ — защитники держатся точки, строя�
 import math
 import random
 from settings import (CHASSIS, HULL, WEAPONS, PERKS, ELEMENTS, DIFF_PRESETS,
-                      ASSAULT_POINT_R)
+                      ASSAULT_POINT_R, NITRO_HP_COST)
 
 # сколько какой бонус стоит для бота (чем больше — тем охотнее едет)
 PU_VALUE = {
@@ -544,6 +544,12 @@ class BotAI:
             game._fire_cone(t)
         if t.wave_charges > 0 and dist < 520 and p.alive:
             game._fire_wave(t)
+        # v3.12: НИТРО — бот жмёт форсаж, когда цель ДАЛЕКО и надо
+        # догнать (дистанция > 480), если плата HP его не прикончит
+        if (t.nitro_on and t.nitro_t <= 0 and t.nitro_cd <= 0
+                and p.alive and dist > 480
+                and t.hp > NITRO_HP_COST + 5):
+            game._use_nitro(t)
 
     def _choose_direction(self, game, ang_to, dist):
         """Выбор направления: ремонт / бонус / фланг / дистанция."""

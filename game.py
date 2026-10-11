@@ -43,6 +43,8 @@ from settings import (SCREEN_W, SCREEN_H, FPS, TITLE, COL_TEXT, COL_DIM,
                       CONE_SHELLS, CONE_SPREAD_DEG, CONE_DAMAGE_MULT,
                       VOLNA_SHELLS, VOLNA_DAMAGE_MULT,
                       GHOST_VISIBLE_TIME, GHOST_CLOAK_TIME,
+                      NITRO_SPEED_MULT, NITRO_TIME, NITRO_CD,
+                      NITRO_HP_COST, NITRO_ARMOR_DOWN,
                       TUNNEL_W, TUNNEL_H, TUNNEL_CLEAR, TUNNEL_PBR,
                       COCKPIT_ZOOM, COCKPIT_LIFT,
                       SHELL_STAR_DAMAGE_MULT,
@@ -350,7 +352,7 @@ class Game:
         self.bots = []
         self.ais = []
         self.bullets = []
-        self.cockpit = False         # v3.11: ВИД БАШНИ (F1) — вид от первого лица
+        self.cockpit = False         # v3.11: ВИД БАШНИ (F2 с v3.12) — вид от первого лица
         self.powerups = []
         self.mines = []
         self.smokes = []
@@ -983,6 +985,8 @@ class Game:
             elif item == "ghost":                # v3.11: «Призрак» — пассивка
                 t.ghost_on = True
                 t.cloak_cd = GHOST_VISIBLE_TIME  # цикл маскировки с нуля
+            elif item == "nitro":                # v3.12: «Нитро» — навык-форсаж
+                t.nitro_on = True
         for buff, val in bd.get("buffs", {}).items():
             setattr(t, buff, val)
         for mod, val in bd.get("mods", {}).items():   # v3.0: «Стройка века»
@@ -1318,7 +1322,10 @@ class Game:
             elif k == pygame.K_z:
                 self._fire_wave(self.player)       # v3.11: ВОЛНА — кольцо снарядов
             elif k == pygame.K_F1:
-                # v3.11: ВИД БАШНИ — вид от первого лица (только пока жив)
+                self._use_nitro(self.player)       # v3.12: НИТРО — форсаж (билд)
+            elif k == pygame.K_F2:
+                # v3.11: ВИД БАШНИ — вид от первого лица (только пока жив);
+                # v3.12: переехал с F1 на F2 — F1 занял НИТРО
                 if self.player.alive:
                     self.cockpit = not self.cockpit
                     self.sounds.play("ric")
@@ -2384,6 +2391,29 @@ class Game:
                         self.effects.float_text(
                             t.x, t.y - 60, "МАСКИРОВКА!", (170, 255, 230))
 
+    def _use_nitro(self, t):
+        """v3.12: НИТРО (F1, билд; ботам тоже достаётся) — ФОРСАЖ по
+        просьбе игрока «сделай навык (перк) ф1 крч дает 2.5Х скорости
+        взамен на -5 брони и -10 хп»: скорость xNITRO_SPEED_MULT на
+        NITRO_TIME сек. Плата сразу: NITRO_HP_COST HP (добить себя
+        нельзя — остаётся минимум 1); на время форсажа броня слабее
+        на NITRO_ARMOR_DOWN (см. Tank.take_damage). Перезарядка
+        NITRO_CD сек — навык можно жать несколько раз за раунд."""
+        if t is None or not t.alive or not t.nitro_on:
+            return False
+        if t.nitro_t > 0 or t.nitro_cd > 0:
+            return False
+        t.hp = max(1.0, t.hp - NITRO_HP_COST)
+        t.nitro_t = NITRO_TIME
+        self.effects.float_text(t.x, t.y - 60, "НИТРО!", (255, 235, 90))
+        self.effects.float_text(t.x, t.y - 86,
+                                "-%d HP" % NITRO_HP_COST, (255, 110, 110))
+        self.effects.ring(t.x, t.y, (255, 235, 90), 90, 0.3)
+        if t is self.player:
+            self.effects.shake(3, 0.15)
+        self.sounds.play("pickup")
+        return True
+
     def _emp_blast(self, t):
         """ЭМИ-взрыв вокруг танка t (бонус «Э» или носимый заряд по X):
         v2.6.2 — бьёт ТОЛЬКО ЧУЖИХ, союзники подобравшего целы (над
@@ -2521,7 +2551,7 @@ class Game:
         self.screen.blit(self.world, (0, 0))
         if in_battle and self.cockpit and self.player.alive \
                 and self.state in ("intro", "fight", "pause", "round_end"):
-            self._cockpit_transform()     # v3.11: ВИД БАШНИ (F1)
+            self._cockpit_transform()     # v3.11: ВИД БАШНИ (F2 с v3.12)
 
         if self.state == "menu":
             self._draw_menu()
@@ -2628,7 +2658,7 @@ class Game:
             surf.blit(img, img.get_rect(
                 center=(int(t.x + ox), int(t.y + oy))))
 
-    # ================= v3.11: ВИД БАШНИ (F1) =================
+    # ================= v3.11: ВИД БАШНИ (F2 с v3.12) =================
     @staticmethod
     def _cockpit_map(px, py, ang, tank_x, tank_y):
         """v3.11: МАПИНГ ВИДА БАШНИ (чистая функция — тестируется).
@@ -2684,7 +2714,7 @@ class Game:
         pygame.draw.line(self.screen, (120, 220, 255),
                          (cx2, cy2 - 24), (cx2, cy2 - 8), 2)
         tag = get_font(13, bold=True).render(
-            "ВИД БАШНИ (F1 — обычный вид)", True, (120, 220, 255))
+            "ВИД БАШНИ (F2 — обычный вид)", True, (120, 220, 255))
         self.screen.blit(tag, (12, SCREEN_H - tag.get_height() - 12))
 
     def _draw_capture_point(self, surf, ox=0, oy=0):
@@ -2732,7 +2762,7 @@ class Game:
         sub = get_font(30, bold=False).render("танковая дуэль", True, COL_GOLD)
         self.screen.blit(sub, sub.get_rect(center=(SCREEN_W / 2, 235)))
         lines = [
-            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F1 — ВИД БАШНИ   F11 — ВО ВЕСЬ ЭКРАН",
+            "W/S — вперёд и назад   A/D — поворот   Пробел — выстрел   F1 — НИТРО   F2 — ВИД БАШНИ   F11 — ВО ВЕСЬ ЭКРАН",
             "E — ОКНО ПРИКАЗОВ: 1 ДЕРЖАТЬ · 2 ЗА МНОЙ · 3 ПРИКРЫВАЙ · 4 В АТАКУ · 5 К ТОЧКЕ · 6 ОТСТУПАЙ · 7 ПО МОЕЙ ЦЕЛИ · 8 СВОБОДНО",
             "В окне ПЛИТКИ БОТОВ (клик или Tab — кому приказ) и «ВСЯ КОМАНДА» (T). Бой не останавливается.",
             "F — мина  Q — стена  R — ТУРЕЛЬ  H — РЕМОНТ  X — ЭМИ  V — КРУГОВОЙ АД (снаряд и СТИХИЯ)  B — КАМИКАДЗЕ 3×25  C — КОНУС  Z — ВОЛНА (кольцо)",
@@ -2840,7 +2870,7 @@ class Game:
             "или Enter / T / M — мышью можно нажать любую кнопку", True, COL_DIM)
         self.screen.blit(img, img.get_rect(center=(SCREEN_W / 2, y + 96)))
         # версия
-        img = get_font(16, bold=False).render("v3.11 · ПРИЗРАК", True, (60, 66, 95))
+        img = get_font(16, bold=False).render("v3.12 · НИТРО", True, (60, 66, 95))
         self.screen.blit(img, img.get_rect(bottomright=(SCREEN_W - 12,
                                                         SCREEN_H - 12)))
 
@@ -4210,6 +4240,14 @@ class Game:
                 sfx.append("ПРИЗРАК: СКРЫТЕН %.1f" % t.cloak_t)
             else:
                 sfx.append("ПРИЗРАК: ТЕНЬ ЧЕРЕЗ %.1f" % max(0.0, t.cloak_cd))
+        if t.nitro_on:                         # v3.12: «Нитро»
+            if t.nitro_t > 0:
+                sfx.append("НИТРО: ФОРСАЖ %.1f (броня -%d)"
+                           % (t.nitro_t, NITRO_ARMOR_DOWN))
+            elif t.nitro_cd > 0:
+                sfx.append("НИТРО: ПЕРЕЗАРЯДКА %.1f" % t.nitro_cd)
+            else:
+                sfx.append("НИТРО ГОТОВ (F1)")
         if t.shield_t > 0:
             sfx.append("ЩИТ %.0f" % t.shield_t)
         # ЛАЗЕРНЫЙ ВЕЕР: лазер + веер вместе — лучи веером
